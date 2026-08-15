@@ -1,0 +1,8 @@
+{
+  "from_the_editor": "Two of today's pieces are, underneath, the same story: what it costs to move data you no longer trust. The lead — a team hauling forty terabytes off Postgres, rollback plans and all — is the version with the invoices attached, and it earns the front page by refusing to tidy up its failures. Read it first, while the coffee is hot; it rewards attention and it is long.\n\nThe local desk supplies the counterpoint. Somebody has finally put the MBTA's slow-zone data into a shape a rider can argue with, and the charts do more persuading than a year of press releases. It is a short read and a satisfying one, and it pairs unreasonably well with the migration story: both are about institutions discovering what they actually have.\n\nThe rest of the issue is quieter than usual. That is not a complaint — a thin Friday is a good excuse to finish the long one properly rather than skimming six. If you only get through the lead today, you will not have missed much else.",
+  "section_intros": {
+    "Top Stories": "The day's most substantial piece: a full account of a forty-terabyte migration, with the failures left in. It is long, technical and unusually honest about what went wrong.",
+    "Boston & Local": "Transit data gets the treatment it deserves. A rider-built analysis of MBTA slow zones, with charts you can check yourself and a methodology section that holds up.",
+    "Niche Corner": "A section the model wrote an intro for even though nothing was placed in it today — a stray thread about tape-drive firmware and the people who still maintain it. The issue drops intros for sections that never ran."
+  }
+}

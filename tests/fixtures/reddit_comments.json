@@ -1,0 +1,76 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "title": "A Story About Databases",
+            "permalink": "/r/rust/comments/abc/title/",
+            "score": 512,
+            "num_comments": 87
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "author": "ferris",
+            "score": 55,
+            "body": "The borrow checker earns its keep here.",
+            "body_html": "&lt;div class=\"md\"&gt;&lt;p&gt;The borrow checker earns its keep here.&lt;/p&gt;&lt;/div&gt;",
+            "replies": {
+              "kind": "Listing",
+              "data": {
+                "children": [
+                  {
+                    "kind": "t1",
+                    "data": {
+                      "author": "crab",
+                      "score": 12,
+                      "body_html": "&lt;div class=\"md\"&gt;&lt;p&gt;Only if you never fight it.&lt;/p&gt;&lt;/div&gt;",
+                      "replies": ""
+                    }
+                  },
+                  {
+                    "kind": "more",
+                    "data": { "count": 14, "children": ["x1", "x2"] }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "author": "[deleted]",
+            "score": 1,
+            "body_html": "&lt;div class=\"md\"&gt;&lt;p&gt;[removed]&lt;/p&gt;&lt;/div&gt;",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "author": "rustacean",
+            "score": 31,
+            "body_html": "&lt;div class=\"md\"&gt;&lt;p&gt;The section on &amp;quot;unsafe&amp;quot; is the best part.&lt;/p&gt;&lt;/div&gt;",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "more",
+          "data": { "count": 40, "children": ["y1"] }
+        }
+      ]
+    }
+  }
+]

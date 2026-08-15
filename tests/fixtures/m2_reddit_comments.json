@@ -1,0 +1,105 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "subreddit": "programming",
+            "id": "1abcd2",
+            "name": "t3_1abcd2",
+            "title": "A Deep Dive Into B-Trees",
+            "score": 845,
+            "num_comments": 231,
+            "permalink": "/r/programming/comments/1abcd2/a_deep_dive_into_btrees/",
+            "url": "https://blog.dev/post"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "id": "kx1",
+            "name": "t1_kx1",
+            "author": "index_nerd",
+            "score": 412,
+            "body": "Fan-out is the whole ballgame; everything else is bookkeeping.",
+            "depth": 0,
+            "stickied": false,
+            "replies": {
+              "kind": "Listing",
+              "data": {
+                "children": [
+                  {
+                    "kind": "t1",
+                    "data": {
+                      "id": "kx2",
+                      "name": "t1_kx2",
+                      "author": "pagecache",
+                      "score": 130,
+                      "body": "Until your keys are variable length & the math gets ugly.",
+                      "depth": 1,
+                      "stickied": false,
+                      "replies": ""
+                    }
+                  },
+                  {
+                    "kind": "more",
+                    "data": {
+                      "count": 18,
+                      "name": "t1_more1",
+                      "id": "more1",
+                      "children": ["kx9", "kx10"]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "kx3",
+            "name": "t1_kx3",
+            "author": "AutoModerator",
+            "score": 1,
+            "body": "Please keep discussion civil.",
+            "depth": 0,
+            "stickied": true,
+            "replies": ""
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "kx4",
+            "name": "t1_kx4",
+            "author": "[deleted]",
+            "score": null,
+            "body": "[removed]",
+            "depth": 0,
+            "stickied": false,
+            "replies": ""
+          }
+        },
+        {
+          "kind": "more",
+          "data": {
+            "count": 205,
+            "name": "t1_more2",
+            "id": "more2",
+            "children": []
+          }
+        }
+      ]
+    }
+  }
+]

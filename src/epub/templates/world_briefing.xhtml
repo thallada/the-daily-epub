@@ -1,0 +1,10 @@
+{% extends "base.xhtml" %}
+{% block body_class %}world-briefing{% endblock %}
+{% block content %}
+      <h1>World Briefing</h1>
+      <p class="dateline">{{ display_date }}</p>
+      <hr class="rule"/>
+      <div class="world-body">
+{{ body_html|safe }}
+      </div>
+{% endblock %}

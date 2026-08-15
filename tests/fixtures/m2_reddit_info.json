@@ -1,0 +1,69 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": null,
+    "dist": 3,
+    "modhash": "",
+    "geo_filter": "",
+    "before": null,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "subreddit": "programming",
+          "id": "1abcd2",
+          "name": "t3_1abcd2",
+          "title": "A Deep Dive Into B-Trees",
+          "score": 845,
+          "ups": 845,
+          "num_comments": 231,
+          "permalink": "/r/programming/comments/1abcd2/a_deep_dive_into_btrees/",
+          "url": "https://blog.dev/post",
+          "author": "u_someone",
+          "created_utc": 1786748531.0,
+          "over_18": false,
+          "stickied": false,
+          "is_self": false
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "subreddit": "databases",
+          "id": "1efgh3",
+          "name": "t3_1efgh3",
+          "title": "A Deep Dive Into B-Trees",
+          "score": 96,
+          "ups": 96,
+          "num_comments": 14,
+          "permalink": "/r/databases/comments/1efgh3/a_deep_dive_into_btrees/",
+          "url": "https://blog.dev/post",
+          "author": "dbperson",
+          "created_utc": 1786752000.0,
+          "over_18": false,
+          "stickied": false,
+          "is_self": false
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "subreddit": "rust",
+          "id": "1ijkl4",
+          "name": "t3_1ijkl4",
+          "title": "A Deep Dive Into B-Trees",
+          "score": 12,
+          "ups": 12,
+          "num_comments": 2,
+          "permalink": "/r/rust/comments/1ijkl4/a_deep_dive_into_btrees/",
+          "url": "https://blog.dev/post",
+          "author": "ferris",
+          "created_utc": 1786755000.0,
+          "over_18": false,
+          "stickied": false,
+          "is_self": false
+        }
+      }
+    ]
+  }
+}

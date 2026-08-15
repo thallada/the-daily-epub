@@ -1,0 +1,34 @@
+{% extends "base.xhtml" %}
+{% block body_class %}article{% endblock %}
+{% block content %}
+      <div class="article-header">
+        <h1 class="article-title">{{ article_title }}</h1>
+{% if let Some(line) = byline %}
+        <p class="byline">{{ line }}</p>
+{% endif %}
+        <p class="meta">{{ meta_line }}</p>
+{% if let Some(line) = social_line %}
+        <p class="social">{{ line }}</p>
+{% endif %}
+{% if let Some(text) = summary %}
+        <p class="summary">{{ text }}</p>
+{% endif %}
+{% if excerpt_only %}
+        <p class="notice">(excerpt only &#8212; read online)</p>
+{% endif %}
+      </div>
+      <hr class="rule"/>
+      <div class="article-body">
+{{ body_html|safe }}
+      </div>
+      <hr class="rule"/>
+      <div class="article-footer">
+{% if let Some(links) = rating %}
+        <p class="rating">Was this a good pick? <a href="{{ links.up_url }}">[ &#128077; Yes ]</a> &#183; <a href="{{ links.down_url }}">[ &#128078; No ]</a></p>
+{% endif %}
+        <p class="read-online"><a href="{{ read_online_url }}">Read online &#8599;</a></p>
+{% if let Some(href) = discussion_href %}
+        <p class="see-discussion"><a href="{{ href }}">&#128172; Read the discussion</a></p>
+{% endif %}
+      </div>
+{% endblock %}

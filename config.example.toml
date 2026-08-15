@@ -1,0 +1,82 @@
+# The Daily EPUB — example configuration (spec §3.14).
+#
+# Load order (later wins): built-in defaults ← this file ← `DAILY_EPUB_*` env vars.
+# Nested keys use a double underscore in env vars, e.g.
+#   DAILY_EPUB_MINIFLUX__API_KEY=...
+#   DAILY_EPUB_DEEPSEEK__API_KEY=...
+#   DAILY_EPUB_SERVER__HMAC_SECRET=...
+#   DAILY_EPUB_LOOKBACK_HOURS=30
+
+timezone = "America/New_York"
+lookback_hours = 26
+target_article_count = 20
+prefilter_keep = 120
+retention_days = 21
+max_daily_usd = 2.0
+world_briefing = true
+
+# SQLite database file. Parent directories are created on demand.
+database_path = "/var/lib/daily-epub/daily-epub.db"
+
+# Default output directory for generated artifacts (overridden by `--out`).
+out_dir = "/var/lib/daily-epub/out"
+
+# Path to the Scour interests OPML used to seed the taste profile (§3.6).
+interests_opml = "data/scour-interests.opml"
+
+[miniflux]
+base_url = "http://127.0.0.1:8082"
+# api_key via DAILY_EPUB_MINIFLUX__API_KEY env
+page_limit = 250
+
+[deepseek]
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-v4-flash"          # DeepSeek-V4-Flash-0731 (confirmed 2026-08-15)
+# api_key via DAILY_EPUB_DEEPSEEK__API_KEY env
+score_batch_size = 12
+score_temperature = 0.3
+editorial_temperature = 0.8
+# USD per 1M tokens, used for the cost guardrail.
+price_input_per_mtok = 0.14
+price_cached_input_per_mtok = 0.0028
+price_output_per_mtok = 0.28
+
+[curation]
+always_include_feeds = []            # miniflux feed ids or site urls
+blocked_domains = []
+# Extra paywalled hosts, merged with the built-in list (nytimes, wsj, ft, …).
+# A short body from one of these is marked "excerpt only" and penalized (§3.3).
+paywall_domains = []
+sections = [
+  "Top Stories",
+  "Tech & Engineering",
+  "Science & Space",
+  "AI & Machine Learning",
+  "Culture & Essays",
+  "Boston & Local",
+  "Niche Corner",
+  "From the Blogroll",
+]
+
+[publish]
+bookorbit_dir = "/srv/bookorbit/libraries/daily-epub"
+xtc_dir = "/var/lib/daily-epub/xtc"
+
+[xtc]
+enabled = true
+# epub-to-xtc-converter has no global npm bin; it is invoked through node.
+# The code appends: <input.epub> -o <output.xtch> -f <format> -c <settings>
+command = "node"
+args = ["/opt/epub-to-xtc-converter/cli/index.js", "convert"]
+format = "xtch"                      # xtc (1-bit) | xtch (grayscale)
+# REQUIRED in practice: the converter refuses to start without `font.path`,
+# which can only be given through this file. Start from xtc-settings.example.json.
+settings = "/etc/daily-epub/xtc-settings.json"
+
+[server]
+bind = "127.0.0.1:3499"
+public_url = "https://daily.hallada.net"
+# hmac_secret via DAILY_EPUB_SERVER__HMAC_SECRET env (32+ random bytes)
+# Optional Basic auth for the XTC OPDS feed and file downloads:
+# basic_auth_user = "daily"
+# basic_auth_pass = "..."

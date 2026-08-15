@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="{{ width }}" height="{{ height }}" viewBox="0 0 {{ width }} {{ height }}">
+  <rect x="0" y="0" width="{{ width }}" height="{{ height }}" fill="#ffffff"/>
+  <rect x="{{ margin }}" y="{{ margin }}" width="{{ inner_width }}" height="{{ inner_height }}"
+        fill="none" stroke="#111111" stroke-width="{{ border }}"/>
+  <text x="{{ center_x }}" y="{{ masthead_y }}" text-anchor="middle" fill="#111111"
+        font-family="Georgia, 'Times New Roman', Times, serif" font-size="{{ masthead_size }}">The Daily EPUB</text>
+  <line x1="{{ rule_x1 }}" y1="{{ rule_y }}" x2="{{ rule_x2 }}" y2="{{ rule_y }}" stroke="#111111" stroke-width="{{ border }}"/>
+  <text x="{{ center_x }}" y="{{ weekday_y }}" text-anchor="middle" fill="#111111"
+        font-family="Georgia, 'Times New Roman', Times, serif" font-size="{{ weekday_size }}">{{ weekday }}</text>
+  <text x="{{ center_x }}" y="{{ date_y }}" text-anchor="middle" fill="#111111"
+        font-family="Georgia, 'Times New Roman', Times, serif" font-size="{{ date_size }}">{{ long_date }}</text>
+  <line x1="{{ rule_x1 }}" y1="{{ rule2_y }}" x2="{{ rule_x2 }}" y2="{{ rule2_y }}" stroke="#111111" stroke-width="{{ hairline }}"/>
+  <text x="{{ center_x }}" y="{{ issue_y }}" text-anchor="middle" fill="#111111"
+        font-family="Georgia, 'Times New Roman', Times, serif" font-size="{{ issue_size }}">No. {{ issue_number }}</text>
+  <text x="{{ center_x }}" y="{{ stats_y }}" text-anchor="middle" fill="#111111"
+        font-family="Georgia, 'Times New Roman', Times, serif" font-size="{{ stats_size }}">{{ stats_line }}</text>
+{% if !edition_tag.is_empty() %}
+  <rect x="{{ badge_x }}" y="{{ badge_y }}" width="{{ badge_width }}" height="{{ badge_height }}"
+        rx="{{ badge_radius }}" fill="#111111"/>
+  <text x="{{ center_x }}" y="{{ badge_text_y }}" text-anchor="middle" fill="#ffffff"
+        font-family="Georgia, 'Times New Roman', Times, serif" font-size="{{ badge_size }}">{{ edition_tag }}</text>
+{% endif %}
+  <text x="{{ center_x }}" y="{{ footer_y }}" text-anchor="middle" fill="#111111"
+        font-family="Georgia, 'Times New Roman', Times, serif" font-size="{{ footer_size }}">{{ footer }}</text>
+</svg>

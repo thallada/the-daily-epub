@@ -1,0 +1,12 @@
+{
+  "picks": [
+    { "id": 101, "section": "Top Stories", "position": 1, "lead_story": true },
+    { "id": 102, "section": "Tech & Engineering", "position": 1, "lead_story": false },
+    { "id": 103, "section": "Tech & Engineering", "position": 2, "lead_story": false },
+    { "id": 104, "section": "AI & Machine Learning", "position": 1, "lead_story": false },
+    { "id": 105, "section": "Boston & Local", "position": 1, "lead_story": false },
+    { "id": 106, "section": "Culture & Essays", "position": 1 },
+    { "section": "Niche Corner", "position": 2, "lead_story": false },
+    "the model sometimes trails off like this"
+  ]
+}

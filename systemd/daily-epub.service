@@ -1,0 +1,70 @@
+# The Daily EPUB — rating endpoints, XTC OPDS feed and static files (spec §3.12, §3.15).
+#
+# Install:
+#   cargo build --release && sudo install -m0755 target/release/daily-epub /usr/local/bin/
+#   sudo install -d -m0750 -o daily-epub -g daily-epub /etc/daily-epub
+#   sudo install -m0640 -o daily-epub -g daily-epub config.example.toml /etc/daily-epub/config.toml
+#   printf 'DAILY_EPUB_SERVER__HMAC_SECRET=%s\n' "$(openssl rand -hex 32)" \
+#     | sudo tee /etc/daily-epub/env >/dev/null   # plus DAILY_EPUB_MINIFLUX__API_KEY etc.
+#   sudo chmod 0600 /etc/daily-epub/env
+#   sudo useradd --system --home /var/lib/daily-epub --shell /usr/sbin/nologin daily-epub
+#   sudo install -m0644 systemd/daily-epub*.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now daily-epub.service
+#
+# Then reverse-proxy daily.hallada.net → 127.0.0.1:3499 (spec §3.15).
+
+[Unit]
+Description=The Daily EPUB server (ratings, XTC OPDS)
+Documentation=https://github.com/thallada/the-daily-epub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=daily-epub
+Group=daily-epub
+ExecStart=/usr/local/bin/daily-epub --config /etc/daily-epub/config.toml serve
+EnvironmentFile=-/etc/daily-epub/env
+Environment=RUST_LOG=info,sqlx=warn,hyper=warn
+Restart=on-failure
+RestartSec=5s
+# SIGTERM triggers the graceful shutdown in server::serve.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+
+# --- state + writable paths ---------------------------------------------
+StateDirectory=daily-epub
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/daily-epub
+# The publish dirs from [publish] in config.toml — keep these in sync.
+# Every path listed here must exist at start, or the unit fails with 226/NAMESPACE.
+ReadWritePaths=/home/thallada/bookorbit/books/daily-epub /var/lib/daily-epub/xtc
+
+# --- hardening (spec §3.15) ---------------------------------------------
+ProtectSystem=strict
+# read-only (not yes): the BookOrbit publish dir lives under /home, and
+# ProtectHome=yes would mask it even with the ReadWritePaths entry above.
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

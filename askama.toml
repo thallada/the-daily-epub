@@ -1,0 +1,4 @@
+[general]
+# EPUB chapter templates live next to the builder that renders them
+# (implementation notes §11).
+dirs = ["src/epub/templates"]

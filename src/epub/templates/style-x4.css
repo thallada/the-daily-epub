@@ -1,0 +1,188 @@
+/* Xteink X4 stylesheet (spec §3.10 "X4 edition").
+   No floats, no flex, no grid, no embedded fonts, larger base font,
+   generous line-height, hyphenation on. 480x800, 2-bit grayscale.
+
+   Selectors are `tag`, `.class` and `tag.class` only — the X4 firmware's CSS
+   engine does not support descendant combinators, so a rule like
+   `.comment-body p` is silently dropped on the device. Where a tag rule needs
+   an exception, the `tag.class` override follows it immediately so the result
+   is right whether the engine resolves by specificity or by source order. */
+
+@page {
+  margin: 0.4em;
+}
+
+body {
+  font-family: serif;
+  font-size: 1.2em;
+  line-height: 1.7;
+  margin: 0 0.5em;
+  text-align: left;
+  hyphens: auto;
+  -webkit-hyphens: auto;
+  adobe-hyphenate: auto;
+  word-wrap: break-word;
+}
+
+.chapter {
+  page-break-before: always;
+  break-before: page;
+}
+
+h1, h2, h3, h4 {
+  font-weight: bold;
+  line-height: 1.3;
+  page-break-after: avoid;
+  break-after: avoid;
+  margin: 0.6em 0 0.35em 0;
+  hyphens: none;
+  -webkit-hyphens: none;
+}
+
+h1 { font-size: 1.35em; }
+h2 { font-size: 1.15em; }
+h3, h4 { font-size: 1em; }
+
+p {
+  margin: 0 0 0.6em 0;
+}
+
+a {
+  color: #000000;
+  text-decoration: underline;
+}
+
+hr.rule {
+  border: 0;
+  border-top: 1px solid #000000;
+  margin: 0.7em 0;
+  height: 0;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+.cover-page {
+  text-align: center;
+  margin: 0;
+}
+
+.masthead {
+  font-size: 1.6em;
+  text-align: center;
+}
+
+.dateline,
+.stats,
+.meta,
+.social,
+.index-meta,
+.discussion-note,
+.attribution,
+.comment-meta {
+  font-size: 0.85em;
+}
+
+.dateline,
+.stats {
+  text-align: center;
+}
+
+.section-page {
+  text-align: center;
+}
+
+.section-title {
+  font-size: 1.5em;
+  margin-top: 1.5em;
+}
+
+.section-intro,
+.summary,
+.byline {
+  font-style: italic;
+}
+
+ul, ol {
+  margin: 0 0 0.5em 1em;
+  padding: 0;
+}
+
+ul.index-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.index-entry {
+  margin: 0 0 0.8em 0;
+}
+
+.index-title,
+.index-meta,
+.index-summary {
+  margin: 0;
+}
+
+figure {
+  margin: 0.6em 0;
+  text-align: center;
+}
+
+figcaption,
+.image-caption,
+.image-placeholder {
+  font-size: 0.85em;
+  font-style: italic;
+  text-align: center;
+}
+
+pre, code {
+  font-family: monospace;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  hyphens: none;
+  -webkit-hyphens: none;
+}
+
+table {
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+td, th {
+  border: 1px solid #666666;
+  padding: 0.15em 0.3em;
+}
+
+blockquote {
+  margin: 0.5em 0 0.5em 0.3em;
+  padding-left: 0.5em;
+  border-left: 2px solid #666666;
+}
+
+blockquote.comment {
+  margin: 0.4em 0;
+  padding-left: 0.5em;
+  border-left: 2px solid #666666;
+}
+
+blockquote.reply {
+  border-left: 1px solid #999999;
+}
+
+p.comment-line {
+  margin: 0 0 0.35em 0;
+}
+
+dt.fact-key {
+  font-weight: bold;
+  margin-top: 0.35em;
+}
+
+dd.fact-value {
+  margin: 0 0 0 0.8em;
+}

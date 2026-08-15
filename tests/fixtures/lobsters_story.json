@@ -1,0 +1,41 @@
+{
+  "short_id": "abcdef",
+  "title": "A Story About Databases",
+  "url": "https://example.com/databases",
+  "score": 48,
+  "comment_count": 4,
+  "comments": [
+    {
+      "short_id": "c1",
+      "comment": "<p>Nice writeup of the write path.</p>",
+      "score": 20,
+      "indent_level": 1,
+      "parent_comment": null,
+      "commenting_user": "pushcx"
+    },
+    {
+      "short_id": "c2",
+      "comment": "<p>Do you have numbers for NVMe?</p>",
+      "score": 9,
+      "indent_level": 2,
+      "parent_comment": "c1",
+      "commenting_user": { "username": "second" }
+    },
+    {
+      "short_id": "c3",
+      "comment": "<p>Yes, in the appendix.</p>",
+      "score": 4,
+      "indent_level": 3,
+      "parent_comment": "c2",
+      "commenting_user": "third"
+    },
+    {
+      "short_id": "c4",
+      "comment": "<p>Unrelated: the site's typography is lovely.</p>",
+      "score": 3,
+      "indent_level": 1,
+      "parent_comment": null,
+      "commenting_user": "other"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{% extends "base.xhtml" %}
+{% block body_class %}discussion{% endblock %}
+{% block content %}
+      <h1 class="discussion-title">{{ heading }}</h1>
+      <p class="discussion-note">Selected threads, truncated for reading on e-ink.</p>
+{{ body_html|safe }}
+      <p class="back-link"><a href="{{ article_href }}">&#8617; Back to the article</a></p>
+{% endblock %}

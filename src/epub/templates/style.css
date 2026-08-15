@@ -1,0 +1,290 @@
+/* Standard-edition stylesheet (spec §3.10 "CSS").
+   Serif body, grayscale only, page-break-before on chapters,
+   blockquote-indent comment styling. Tuned for e-ink readers. */
+
+@page {
+  margin: 1em;
+}
+
+body {
+  font-family: Georgia, "Times New Roman", Times, serif;
+  font-size: 1em;
+  line-height: 1.5;
+  margin: 0 1em;
+  text-align: left;
+  widows: 2;
+  orphans: 2;
+}
+
+.chapter {
+  page-break-before: always;
+  break-before: page;
+}
+
+h1, h2, h3, h4 {
+  font-weight: normal;
+  line-height: 1.25;
+  page-break-after: avoid;
+  break-after: avoid;
+  margin: 0.8em 0 0.4em 0;
+}
+
+h1 { font-size: 1.5em; }
+h2 { font-size: 1.25em; }
+h3 { font-size: 1.1em; }
+h4 { font-size: 1em; font-style: italic; }
+
+p {
+  margin: 0 0 0.7em 0;
+}
+
+a {
+  color: #000000;
+  text-decoration: underline;
+}
+
+hr.rule {
+  border: 0;
+  border-top: 1px solid #000000;
+  margin: 0.9em 0;
+  height: 0;
+}
+
+/* --- cover ------------------------------------------------------------- */
+
+.cover-page {
+  text-align: center;
+  margin: 0;
+  padding: 0;
+}
+
+.cover-image img {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+/* --- front page -------------------------------------------------------- */
+
+.masthead {
+  font-size: 2.1em;
+  text-align: center;
+  letter-spacing: 0.02em;
+  margin-bottom: 0.1em;
+}
+
+.dateline {
+  text-align: center;
+  font-size: 0.9em;
+  font-variant: small-caps;
+  margin-bottom: 0.6em;
+}
+
+.kicker {
+  font-variant: small-caps;
+  text-align: center;
+}
+
+.stats {
+  font-size: 0.85em;
+  font-style: italic;
+  text-align: center;
+  margin-top: 1em;
+}
+
+/* --- in this issue ----------------------------------------------------- */
+
+.index-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.index-entry {
+  margin: 0 0 0.9em 0;
+  page-break-inside: avoid;
+  break-inside: avoid;
+}
+
+.index-title {
+  margin: 0;
+  font-size: 1.05em;
+}
+
+.index-meta {
+  margin: 0;
+  font-size: 0.8em;
+  font-variant: small-caps;
+}
+
+.index-summary {
+  margin: 0.2em 0 0 0;
+  font-size: 0.9em;
+}
+
+/* --- sections and articles --------------------------------------------- */
+
+.section-page {
+  text-align: center;
+}
+
+.section-title {
+  font-size: 2em;
+  font-variant: small-caps;
+  margin-top: 2.5em;
+}
+
+.section-intro {
+  font-style: italic;
+  margin: 0 1.5em;
+}
+
+.article-title {
+  font-size: 1.6em;
+  margin-bottom: 0.2em;
+}
+
+.byline {
+  margin: 0;
+  font-style: italic;
+}
+
+.meta, .social {
+  margin: 0;
+  font-size: 0.8em;
+  font-variant: small-caps;
+}
+
+.summary {
+  margin: 0.5em 0 0 0;
+  font-style: italic;
+}
+
+.notice {
+  font-size: 0.85em;
+  font-style: italic;
+}
+
+.article-body img {
+  max-width: 100%;
+  height: auto;
+}
+
+.article-body figure {
+  margin: 0.8em 0;
+  text-align: center;
+  page-break-inside: avoid;
+  break-inside: avoid;
+}
+
+.article-body figcaption,
+.image-caption {
+  font-size: 0.8em;
+  font-style: italic;
+  text-align: center;
+}
+
+.image-placeholder {
+  font-size: 0.85em;
+  font-style: italic;
+  color: #444444;
+}
+
+.article-body blockquote {
+  margin: 0.6em 0 0.6em 1em;
+  padding-left: 0.6em;
+  border-left: 2px solid #999999;
+  font-style: italic;
+}
+
+.article-body pre,
+.article-body code {
+  font-family: "DejaVu Sans Mono", "Courier New", monospace;
+  font-size: 0.85em;
+}
+
+.article-body pre {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  border-left: 2px solid #cccccc;
+  padding-left: 0.5em;
+}
+
+.article-body table {
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.article-body td,
+.article-body th {
+  border: 1px solid #999999;
+  padding: 0.2em 0.4em;
+}
+
+.article-footer {
+  font-size: 0.9em;
+}
+
+.rating a {
+  text-decoration: none;
+}
+
+/* --- discussion chapters (§3.7) ---------------------------------------- */
+
+.discussion-note {
+  font-size: 0.8em;
+  font-style: italic;
+}
+
+.discussion-source {
+  font-variant: small-caps;
+  font-size: 1.1em;
+  margin-top: 1em;
+}
+
+blockquote.comment {
+  border-left: 2px solid #888888;
+  margin: 0.5em 0 0.5em 0;
+  padding-left: 0.7em;
+  page-break-inside: avoid;
+  break-inside: avoid;
+}
+
+blockquote.comment blockquote.comment {
+  border-left: 1px solid #aaaaaa;
+  margin-left: 0.2em;
+}
+
+.comment-meta {
+  font-size: 0.78em;
+  font-variant: small-caps;
+  margin: 0 0 0.15em 0;
+}
+
+.comment-body p {
+  margin: 0 0 0.4em 0;
+}
+
+/* --- world briefing and colophon --------------------------------------- */
+
+.world-body ul {
+  margin: 0 0 0.6em 1.1em;
+  padding: 0;
+}
+
+.world-body li {
+  margin-bottom: 0.25em;
+}
+
+.attribution {
+  font-size: 0.8em;
+  font-style: italic;
+}
+
+.colophon-facts dt {
+  font-variant: small-caps;
+  margin-top: 0.4em;
+}
+
+.colophon-facts dd {
+  margin: 0 0 0 1em;
+}

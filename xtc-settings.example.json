@@ -1,0 +1,20 @@
+{
+  "device": "xteink-x4",
+  "width": 480,
+  "height": 800,
+  "font": {
+    "path": "/usr/share/fonts/truetype/ibm-plex/IBMPlexSerif-Regular.ttf",
+    "size": 30,
+    "weight": 400
+  },
+  "margins": { "left": 16, "top": 16, "right": 16, "bottom": 16 },
+  "lineHeight": 120,
+  "textAlign": "justify",
+  "hyphenation": { "enabled": true, "language": "en" },
+  "output": {
+    "format": "xtch",
+    "dithering": true,
+    "ditherStrength": 0.7,
+    "negative": false
+  }
+}

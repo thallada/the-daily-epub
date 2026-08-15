@@ -1,0 +1,32 @@
+{
+  "articles": [
+    {
+      "id": 101,
+      "score": 8.5,
+      "category": "Tech & Engineering",
+      "rationale": "first-hand 40TB Postgres migration with numbers, failures and rollback plan",
+      "is_paywalled_guess": false
+    },
+    {
+      "id": 102,
+      "score": 3.0,
+      "category": "AI & Machine Learning",
+      "rationale": "model release announcement, no independent evaluation",
+      "is_paywalled_guess": false
+    },
+    {
+      "id": 103,
+      "score": 6.5,
+      "category": "Boston & Local",
+      "rationale": "MBTA slow-zone data analysis with original charts",
+      "is_paywalled_guess": false
+    },
+    {
+      "id": 104,
+      "score": 5.0,
+      "category": "Culture & Essays",
+      "rationale": "promising essay on typesetting, body appears truncated",
+      "is_paywalled_guess": true
+    }
+  ]
+}

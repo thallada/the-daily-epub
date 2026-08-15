@@ -1,0 +1,22 @@
+# Fires daily-epub-generate.service every morning at 05:30 Eastern (spec §3.15).
+#
+# Install:
+#   sudo install -m0644 systemd/daily-epub-generate.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now daily-epub-generate.timer
+# Check:  systemctl list-timers daily-epub-generate.timer
+
+[Unit]
+Description=Build The Daily EPUB every morning
+Documentation=https://github.com/thallada/the-daily-epub
+
+[Timer]
+Unit=daily-epub-generate.service
+OnCalendar=*-*-* 05:30:00 America/New_York
+# Catch up after downtime — a missed morning still gets its issue.
+Persistent=true
+# Spread the load on the Miniflux/DeepSeek side.
+RandomizedDelaySec=300
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

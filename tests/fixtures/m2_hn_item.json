@@ -1,0 +1,82 @@
+{
+  "id": 41234567,
+  "created_at": "2026-08-14T13:02:11.000Z",
+  "created_at_i": 1786748531,
+  "type": "story",
+  "author": "tylerh",
+  "title": "A Deep Dive Into B-Trees",
+  "url": "https://blog.dev/post",
+  "text": null,
+  "points": 342,
+  "parent_id": null,
+  "story_id": null,
+  "children": [
+    {
+      "id": 41234600,
+      "created_at": "2026-08-14T13:20:00.000Z",
+      "type": "comment",
+      "author": "dbnerd",
+      "title": null,
+      "url": null,
+      "text": "<p>The section on page splits is the clearest I have read. <i>Bookmarked.</i></p>",
+      "points": 88,
+      "parent_id": 41234567,
+      "story_id": 41234567,
+      "children": [
+        {
+          "id": 41234611,
+          "created_at": "2026-08-14T13:41:00.000Z",
+          "type": "comment",
+          "author": "tylerh",
+          "title": null,
+          "url": null,
+          "text": "<p>Thanks &mdash; the diagrams took longer than the prose.</p>",
+          "points": 31,
+          "parent_id": 41234600,
+          "story_id": 41234567,
+          "children": [
+            {
+              "id": 41234620,
+              "created_at": "2026-08-14T14:00:00.000Z",
+              "type": "comment",
+              "author": "gridlines",
+              "title": null,
+              "url": null,
+              "text": "<p>What did you draw them with?</p>",
+              "points": 4,
+              "parent_id": 41234611,
+              "story_id": 41234567,
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 41234700,
+      "created_at": "2026-08-14T15:05:00.000Z",
+      "type": "comment",
+      "author": "deleted_user",
+      "title": null,
+      "url": null,
+      "text": null,
+      "points": null,
+      "parent_id": 41234567,
+      "story_id": 41234567,
+      "children": []
+    },
+    {
+      "id": 41234800,
+      "created_at": "2026-08-14T16:12:00.000Z",
+      "type": "comment",
+      "author": "skeptic",
+      "title": null,
+      "url": null,
+      "text": "<p>Counterpoint: LSM trees win on write-heavy workloads.</p>",
+      "points": 45,
+      "parent_id": 41234567,
+      "story_id": 41234567,
+      "children": []
+    }
+  ]
+}

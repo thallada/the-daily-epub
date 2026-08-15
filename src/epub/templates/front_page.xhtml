@@ -1,0 +1,12 @@
+{% extends "base.xhtml" %}
+{% block body_class %}front-page{% endblock %}
+{% block content %}
+      <h1 class="masthead">The Daily EPUB</h1>
+      <p class="dateline">{{ display_date }} &#183; No. {{ issue_number }}</p>
+      <hr class="rule"/>
+      <h2 class="kicker">From the Editor</h2>
+      <div class="editorial">
+{{ body_html|safe }}
+      </div>
+      <p class="stats">{{ stats_line }}</p>
+{% endblock %}

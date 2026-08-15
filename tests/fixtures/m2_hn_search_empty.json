@@ -1,0 +1,11 @@
+{
+  "hits": [],
+  "nbHits": 0,
+  "page": 0,
+  "nbPages": 0,
+  "hitsPerPage": 20,
+  "exhaustiveNbHits": true,
+  "query": "https://blog.dev/never-submitted",
+  "params": "query=https%3A%2F%2Fblog.dev%2Fnever-submitted&restrictSearchableAttributes=url",
+  "processingTimeMS": 1
+}

@@ -1,0 +1,35 @@
+{
+  "articles": [
+    {
+      "id": 201,
+      "score": 7.0,
+      "category": "Science & Space",
+      "rationale": "careful write-up of an amateur radio occultation measurement",
+      "is_paywalled_guess": false
+    },
+    {
+      "id": "202",
+      "score": "6",
+      "category": "Niche Corner",
+      "rationale": "mailing-list argument about tape drives, oddly gripping",
+      "is_paywalled_guess": "false"
+    },
+    {
+      "id": 203,
+      "score": 4
+    },
+    {
+      "id": 204,
+      "score": 12.5,
+      "category": "Top Stories",
+      "rationale": "model ignored the rubric ceiling here",
+      "is_paywalled_guess": false
+    },
+    {
+      "score": 9.0,
+      "category": "Top Stories",
+      "rationale": "no id at all, unusable"
+    },
+    "a bare string where an object belongs"
+  ]
+}

@@ -1,0 +1,25 @@
+{% extends "base.xhtml" %}
+{% block body_class %}colophon{% endblock %}
+{% block content %}
+      <h1>Colophon</h1>
+      <p>
+        <em>The Daily EPUB</em> is assembled every morning from a personal Miniflux
+        feed reader: entries are deduplicated, read in full, weighed against social
+        proof, then scored, sectioned and introduced by a language model.
+      </p>
+      <dl class="colophon-facts">
+        <dt class="fact-key">Issue</dt><dd class="fact-value">No. {{ issue_number }} &#183; {{ display_date }}</dd>
+        <dt class="fact-key">Generated</dt><dd class="fact-value">{{ generated_at }}</dd>
+        <dt class="fact-key">Curation model</dt><dd class="fact-value">{{ model }}</dd>
+        <dt class="fact-key">Entries considered</dt><dd class="fact-value">{{ entries_fetched }} from {{ feeds_seen }} feeds</dd>
+        <dt class="fact-key">Candidates scored</dt><dd class="fact-value">{{ candidates }}</dd>
+        <dt class="fact-key">Articles selected</dt><dd class="fact-value">{{ article_count }} across {{ section_count }} sections</dd>
+        <dt class="fact-key">Words</dt><dd class="fact-value">{{ total_words }} &#183; {{ reading_line }}</dd>
+        <dt class="fact-key">Token cost</dt><dd class="fact-value">{{ cost_usd }}</dd>
+        <dt class="fact-key">Generator</dt><dd class="fact-value">{{ generator_version }}</dd>
+      </dl>
+      <p class="attribution">
+        Article text belongs to its authors and publications; excerpts and links are
+        provided for personal reading. Comment excerpts belong to their posters.
+      </p>
+{% endblock %}

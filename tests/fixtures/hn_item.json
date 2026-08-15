@@ -1,0 +1,54 @@
+{
+  "id": 40100000,
+  "created_at": "2026-08-15T09:12:00.000Z",
+  "type": "story",
+  "author": "poster",
+  "title": "A Story About Databases",
+  "url": "https://example.com/databases",
+  "points": 342,
+  "text": null,
+  "children": [
+    {
+      "id": 40100001,
+      "type": "comment",
+      "author": "alice",
+      "text": "The <i>write path</i> is the interesting part here.<p>Especially fsync batching.",
+      "points": 61,
+      "children": [
+        {
+          "id": 40100002,
+          "type": "comment",
+          "author": "bob",
+          "text": "Agreed — and the group commit numbers match my own benchmarks.",
+          "points": 24,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": 40100003,
+      "type": "comment",
+      "author": "carol",
+      "text": "Counterpoint: the benchmark hardware is unrealistic.",
+      "points": 12,
+      "children": []
+    },
+    {
+      "id": 40100004,
+      "type": "comment",
+      "author": null,
+      "text": null,
+      "points": null,
+      "children": [
+        {
+          "id": 40100005,
+          "type": "comment",
+          "author": "dana",
+          "text": "Replying to a since-deleted comment, but the point stands.",
+          "points": 3,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

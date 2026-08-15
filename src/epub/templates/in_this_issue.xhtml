@@ -1,0 +1,20 @@
+{% extends "base.xhtml" %}
+{% block body_class %}in-this-issue{% endblock %}
+{% block content %}
+      <h1>In This Issue</h1>
+      <p class="stats">{{ stats_line }}</p>
+{% for section in sections %}
+      <h2 class="index-section">{{ section.name }}</h2>
+      <ul class="index-list">
+{% for entry in section.entries %}
+        <li class="index-entry">
+          <p class="index-title"><a href="{{ entry.href }}">{{ entry.title }}</a></p>
+          <p class="index-meta">{{ entry.source }} &#183; {{ entry.reading_minutes }} min read</p>
+{% if !entry.summary.is_empty() %}
+          <p class="index-summary">{{ entry.summary }}</p>
+{% endif %}
+        </li>
+{% endfor %}
+      </ul>
+{% endfor %}
+{% endblock %}
