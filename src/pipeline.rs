@@ -510,7 +510,7 @@ async fn run_stages(
         );
         None
     } else {
-        let published = publish::publish_issue(db, config, &issue, &artifacts, xtc.as_deref())
+        let published = publish::publish_issue(config, &issue, &artifacts, xtc.as_deref())
             .await
             .context("publishing the issue")?;
         record_issue(db, &issue, &published)

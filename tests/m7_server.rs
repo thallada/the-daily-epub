@@ -41,6 +41,7 @@ impl Server {
         let dir = tempfile::tempdir().expect("tempdir");
         let xtc_dir = dir.path().join("xtc");
         std::fs::create_dir_all(&xtc_dir).expect("xtc dir");
+        std::fs::create_dir_all(dir.path().join("bookorbit")).expect("epub dir");
         let log = std::fs::File::create(dir.path().join("server.log")).expect("log file");
 
         let port = free_port();
@@ -59,10 +60,7 @@ impl Server {
                 format!("http://127.0.0.1:{port}"),
             )
             .env("DAILY_EPUB_PUBLISH__XTC_DIR", &xtc_dir)
-            .env(
-                "DAILY_EPUB_PUBLISH__BOOKORBIT_DIR",
-                dir.path().join("bookorbit"),
-            )
+            .env("DAILY_EPUB_PUBLISH__EPUB_DIR", dir.path().join("bookorbit"))
             .stdout(Stdio::null())
             .stderr(Stdio::from(log));
         if basic_auth {
@@ -78,6 +76,10 @@ impl Server {
 
     fn xtc_dir(&self) -> std::path::PathBuf {
         self.dir.path().join("xtc")
+    }
+
+    fn epub_dir(&self) -> std::path::PathBuf {
+        self.dir.path().join("bookorbit")
     }
 
     fn wait_until_ready(&self) {
@@ -217,22 +219,38 @@ fn binary_serves_health_issues_and_rating_endpoints() {
 #[test]
 fn binary_serves_opds_and_files_behind_basic_auth() {
     let server = Server::start(true);
-    let name = "The Daily EPUB - 2026-08-15 (X4).xtch";
-    write(&server.xtc_dir().join("xtc.xml"), FEED);
-    write(&server.xtc_dir().join(name), "XTCH");
+    write(
+        &server.epub_dir().join("The Daily EPUB - 2026-08-15.epub"),
+        "STANDARD",
+    );
+    write(
+        &server
+            .epub_dir()
+            .join("The Daily EPUB - 2026-08-15 (X4).epub"),
+        "X4EPUB",
+    );
+    write(
+        &server
+            .xtc_dir()
+            .join("The Daily EPUB - 2026-08-15 (X4).xtch"),
+        "XTCH",
+    );
     write(&server.dir.path().join("secret"), "top secret");
 
     // No credentials → challenge.
-    let res = server.get("/opds/xtc.xml");
+    let res = server.get("/opds/daily.xml");
     assert_eq!(res.status, 401);
     assert_eq!(
         res.header("www-authenticate"),
         Some("Basic realm=\"The Daily EPUB\", charset=\"UTF-8\"")
     );
-    assert_eq!(server.get_auth("/opds/xtc.xml", "bm9wZTpub3Bl").status, 401);
+    assert_eq!(
+        server.get_auth("/opds/daily.xml", "bm9wZTpub3Bl").status,
+        401
+    );
 
-    // Correct credentials → the feed, typed as OPDS.
-    let res = server.get_auth("/opds/xtc.xml", BASIC_AUTH);
+    // Correct credentials → a feed built from the publish dir, typed as OPDS.
+    let res = server.get_auth("/opds/daily.xml", BASIC_AUTH);
     assert_eq!(res.status, 200);
     assert!(
         res.header("content-type")
@@ -242,8 +260,27 @@ fn binary_serves_opds_and_files_behind_basic_auth() {
         res.headers
     );
     assert!(res.body.contains("opds-spec.org/acquisition"));
+    // Both editions, and only as `application/epub+zip` — the one acquisition
+    // type CrossPoint's parser accepts.
+    assert_eq!(res.body.matches("<entry>").count(), 2, "{}", res.body);
+    assert_eq!(
+        res.body.matches("type=\"application/epub+zip\"").count(),
+        2,
+        "{}",
+        res.body
+    );
+    assert!(!res.body.contains(".xtch"), "{}", res.body);
 
     // The acquisition link in the feed resolves to the file itself.
+    let res = server.get_auth(
+        "/files/epub/The%20Daily%20EPUB%20-%202026-08-15%20%28X4%29.epub",
+        BASIC_AUTH,
+    );
+    assert_eq!(res.status, 200);
+    assert_eq!(res.body, "X4EPUB");
+    assert_eq!(res.header("content-type"), Some("application/epub+zip"));
+
+    // XTC stays reachable by URL for sideloading, just unlisted.
     let res = server.get_auth(
         "/files/xtc/The%20Daily%20EPUB%20-%202026-08-15%20%28X4%29.xtch",
         BASIC_AUTH,
@@ -272,18 +309,3 @@ fn binary_serves_opds_and_files_behind_basic_auth() {
 fn write(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
 }
-
-/// A feed shaped like the one `publish::write_xtc_opds` generates.
-const FEED: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-  <id>urn:daily-epub:xtc</id>
-  <title>The Daily EPUB — XTC editions</title>
-  <updated>2026-08-15T05:40:00Z</updated>
-  <entry>
-    <title>The Daily EPUB — 2026-08-15</title>
-    <id>urn:daily-epub:xtc:x</id>
-    <updated>2026-08-15T05:40:00Z</updated>
-    <link rel="http://opds-spec.org/acquisition" href="http://127.0.0.1/files/xtc/x.xtch" type="application/octet-stream" length="4"/>
-  </entry>
-</feed>
-"#;

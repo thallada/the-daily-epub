@@ -31,6 +31,25 @@ This file records implementation-time decisions and verified external facts. Fol
   - **Output size.** XTCH is a pre-rendered page bitmap: 480×800 at 2bpp = ~96 KB/page. A
     20-article issue rendered at `font.size = 34` came to 1,088 pages ≈ **104 MB**, in ~13 s.
     `retention_days = 21` therefore implies ~2 GB in `publish.xtc_dir`.
+- **CrossPoint's OPDS browser can only acquire EPUBs.** Verified against the
+  `yokki-vans/InkPointX` sources (an open fork of CrossPoint/CrossInk). Two independent
+  blockers, either one fatal for serving XTC over OPDS:
+  1. `lib/OpdsParser/OpdsParser.cpp` sets an entry's `href` only for an acquisition link
+     whose `type` is **exactly** `application/epub+zip` (`strcmp`), or for a navigation
+     link (`application/atom+xml`). `endElement` then drops any entry with an empty
+     `href`. An `application/octet-stream` acquisition link therefore yields an empty
+     list and the UI reports `STR_NO_ENTRIES` — **"No entries found"**.
+  2. `OpdsBookBrowserActivity::downloadBook` builds the destination filename as
+     `sanitizeFilename(author + " - " + title) + ".epub"` — hardcoded, ignoring the URL
+     and `Content-Disposition` — and `ReaderActivity` dispatches on extension only
+     (`FsHelpers::hasXtcExtension` → `.xtc`/`.xtch`, no magic-byte sniffing). So even a
+     mistyped XTC link downloads into a file the device will not open.
+  The three OPDS failure strings are distinct and worth reading precisely:
+  `STR_FETCH_FEED_FAILED` ("Failed to fetch feed"), `STR_PARSE_FEED_FAILED`
+  ("Failed to parse feed") and `STR_NO_ENTRIES` ("No entries found") — only the last is
+  reachable after a *successful* fetch **and** parse.
+  Consequence: the built-in feed serves EPUBs (both editions), XTC is published but not
+  advertised, and `publish.xtc_dir` is swept by count. See the amendment in spec §3.11.
 - **X4 firmware rendering limits** (from the `epub-to-xtc-converter` optimizer's header, which
   cites papyrix-reader): 464×788 usable viewport, max image decode 2048×3072, **baseline JPEG
   only**, no GIF/SVG/WebP, **max 1500 CSS rules and simple selectors only** (`tag`, `.class`,

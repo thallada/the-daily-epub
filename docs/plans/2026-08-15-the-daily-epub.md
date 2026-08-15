@@ -10,7 +10,7 @@
 3. Applies cheap heuristic pre-filters, then uses **DeepSeek V4 Flash** to score, select, and organize ~15–25 articles into newspaper sections.
 4. Generates editorial framing: a front-page "day in brief," section intros, and per-article summaries.
 5. Builds two EPUB editions (standard + Xteink X4-optimized), converts the X4 edition to XTC/XTCH.
-6. Publishes into a dedicated **BookOrbit** library via watched folder (→ OPDS for KOReader devices) and serves XTC via a minimal built-in OPDS feed.
+6. Publishes both EPUB editions into a folder that its own built-in OPDS feed serves (and that **BookOrbit** can optionally watch for a richer library UI). *(Amended: the built-in feed serves EPUBs, not XTC — see §3.11.)*
 7. Collects 👍/👎 feedback via rating links inside the EPUB to continuously improve curation.
 
 **Reader profile (bake into curation prompts):** prefers long-form, high-effort, well-written articles on *any* topic; uses social proof (HN/Reddit upvotes+comments) as a quality proxy; wants tech news, light general/US world news (prefers Wikipedia Current Events for world news), Boston-area news, and ultra-niche community news. The full interest list lives in `data/scour-interests.opml` (~220 Scour interests: Rust, systems programming, e-ink, self-hosting, PKM, sci-fi, creative coding, space, running, board games, Boston Tech, etc.) — compile it into the taste profile at build time.
@@ -21,7 +21,7 @@
 |---|---|---|---|
 | Miniflux | `127.0.0.1:8082` | `miniflux.hallada.net` | Installed via PPA. API auth via `X-Auth-Token` header. |
 | BookOrbit | `127.0.0.1:3498` | `bookorbit.hallada.net` | NestJS/Vue/Postgres. Supports multiple isolated libraries, per-library watched folders, OPDS at `/api/v1/opds` (Basic auth, `opds_access` permission). |
-| The Daily EPUB (new) | `127.0.0.1:<port, e.g. 3499>` | `daily.hallada.net` (reverse proxy to be added) | Rating endpoints + XTC OPDS + static files. |
+| The Daily EPUB (new) | `127.0.0.1:<port, e.g. 3499>` | `daily.hallada.net` (reverse proxy to be added) | Rating endpoints + OPDS catalog + downloads. |
 
 ### Secrets/config the operator must provide
 
@@ -46,7 +46,7 @@ Single Rust binary crate `daily-epub` (workspace not needed yet) with clap subco
 
 ```
 daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm]
-daily-epub serve                # long-running: rating endpoints + XTC OPDS + static
+daily-epub serve                # long-running: rating endpoints + OPDS catalog + downloads
 daily-epub profile rebuild      # regenerate taste profile from ratings (also runs weekly inside generate)
 daily-epub backfill-social      # re-poll social scores for recent entries (optional helper)
 daily-epub db migrate           # run sqlx migrations (also auto-run on start)
@@ -60,7 +60,7 @@ daily-epub db migrate           # run sqlx migrations (also auto-run on start)
 Miniflux ingest → normalize/dedupe → content extraction → social enrichment
   → heuristic pre-filter (500 → ~120) → LLM scoring (batched) → LLM selection (~120 → 15–25)
   → comment fetching for selected → LLM editorial (summaries, section intros, front page)
-  → EPUB build (standard + X4 editions) → XTC conversion → publish (BookOrbit folder, XTC dir, OPDS xml)
+  → EPUB build (standard + X4 editions) → XTC conversion → publish (EPUB dir, XTC dir) → OPDS feed served from the EPUB dir
   → retention pruning → run report logged + stored
 ```
 
@@ -103,8 +103,8 @@ the-daily-epub/
 │   │   ├── templates/                 # askama XHTML templates + CSS
 │   │   ├── images.rs                  # download, resize, grayscale, re-encode
 │   │   └── x4.rs                      # X4 edition transforms + XTC CLI invocation
-│   ├── publish.rs                     # copy to BookOrbit folder, OPDS xml gen, retention
-│   ├── server.rs                      # axum: /r/… ratings, /opds/xtc.xml, /files/…
+│   ├── publish.rs                     # copy to the publish dirs, OPDS feed rendering, retention
+│   ├── server.rs                      # axum: /r/… ratings, /opds/daily.xml, /files/…
 │   └── report.rs                      # run summary (counts, cost, timings)
 └── tests/                             # integration tests with fixture JSON
 ```
@@ -248,15 +248,40 @@ TOC: nav depth 2 (sections → articles, discussions nested). Metadata: `dc:titl
 ### 3.11 XTC conversion & publishing (`publish.rs`)
 
 - Run the `epub-to-xtc-converter` CLI (Node 18+) on the X4 edition: invoke via `tokio::process::Command`, config keys `xtc.command` (default `epub-to-xtc`) and `xtc.args` (verify exact CLI name/flags from the repo README at implementation time; support both `.xtc` 1-bit and `.xtch` 4-level grayscale via config, default XTCH for image quality). Non-zero exit → log error, continue (XTC is a bonus artifact).
-- **Publish standard + X4 EPUBs** by atomic copy (`write temp + rename`) into the BookOrbit "The Daily EPUB" library watched folder (`publish.bookorbit_dir`), filenames `The Daily EPUB - 2026-08-15.epub` and `The Daily EPUB - 2026-08-15 (X4).epub`. BookOrbit's watcher auto-imports; the library appears as its own section in BookOrbit's OPDS catalog (`/api/v1/opds`, Basic auth with an OPDS account) — KOReader on Kindle/Palma and CrossPoint on the X4 browse that. Main library stays uncluttered.
-- **XTC delivery:** copy `.xtch/.xtc` into `publish.xtc_dir`; regenerate a static **OPDS 1.2 acquisition feed** (`xtc.xml`, entries typed `application/octet-stream`, newest first, last 14) served by `daily-epub serve` at `/opds/xtc.xml` with files under `/files/xtc/` (optional Basic auth from config). CrossPoint's OPDS browser can fetch these; worst case the X4 uses the X4 EPUB from BookOrbit instead.
+- **Publish standard + X4 EPUBs** by atomic copy (`write temp + rename`) into the BookOrbit "The Daily EPUB" library watched folder (`publish.epub_dir`), filenames `The Daily EPUB - 2026-08-15.epub` and `The Daily EPUB - 2026-08-15 (X4).epub`. BookOrbit's watcher auto-imports; the library appears as its own section in BookOrbit's OPDS catalog (`/api/v1/opds`, Basic auth with an OPDS account) — KOReader on Kindle/Palma and CrossPoint on the X4 browse that. Main library stays uncluttered.
+- **XTC delivery** *(superseded — see the amendment below; kept for the record)*: copy `.xtch/.xtc` into `publish.xtc_dir`; regenerate a static **OPDS 1.2 acquisition feed** (`xtc.xml`, entries typed `application/octet-stream`, newest first, last 14) served by `daily-epub serve` at `/opds/xtc.xml` with files under `/files/xtc/` (optional Basic auth from config). CrossPoint's OPDS browser can fetch these; worst case the X4 uses the X4 EPUB from BookOrbit instead.
 - **Retention:** delete issue files older than `retention_days` (default 21) from both dirs (BookOrbit's scan removes the DB entries); SQLite issue/rating history is kept forever (it's the training data).
+
+> **Amended 2026-08-15 (post-M8), after testing against a real X4.** The XTC
+> delivery bullet above does not work and has been replaced. CrossPoint's OPDS
+> browser cannot acquire XTC at all — see the implementation notes' "Verified
+> external facts" for the two firmware reasons — so:
+>
+> - The built-in feed lists **EPUBs, both editions**, from `publish.epub_dir`,
+>   with every acquisition link typed exactly `application/epub+zip` and files
+>   served from `/files/epub/{name}`. Canonical path `/opds/daily.xml`, with
+>   `/opds` and `/opds/` as aliases.
+> - The feed is **rendered per request** from the directory rather than written to
+>   disk, so it cannot go stale behind a failed publish and the retention sweep has
+>   no generated index to step around.
+> - This makes BookOrbit **optional**: the feed needs only the folder, and it puts
+>   the day's issue one screen from the X4's home rather than several clicks down a
+>   library tree.
+> - XTC is still generated and still published to `publish.xtc_dir`, just not
+>   advertised. It stays fetchable at `/files/xtc/{name}` for sideloading.
+> - `publish.xtc_dir` is swept by **count** (`xtc_retention_count`, default 5)
+>   rather than by age: an XTCH issue measured 79–104 MB, so disk is the binding
+>   constraint. EPUBs keep the dated `retention_days` sweep.
+> - `publish.bookorbit_dir` was renamed **`publish.epub_dir`** to match: the feed
+>   needs the directory, not BookOrbit. The old key is rejected outright
+>   (`deny_unknown_fields`) rather than silently falling back to the default,
+>   which would publish into a directory the feed does not read.
 
 ### 3.12 Server (`server.rs`)
 
 axum on `127.0.0.1:3499`:
 - `GET /r/{date}/{article_id}/{vote}?t=` — verify HMAC, upsert rating, tiny HTML response. No auth beyond the token (links live inside a private EPUB; tokens are per-article+vote and unguessable).
-- `GET /opds/xtc.xml`, `GET /files/xtc/{name}` — optional Basic auth.
+- `GET /opds/daily.xml` (aliases `/opds`, `/opds/`), `GET /files/epub/{name}`, `GET /files/xtc/{name}` — optional Basic auth. *(Amended: was `/opds/xtc.xml` + `/files/xtc/` only; see §3.11.)*
 - `GET /healthz`, `GET /issues.json` (recent run reports; handy for debugging).
 - `tower-http` request tracing; graceful shutdown on SIGTERM.
 
@@ -317,7 +342,7 @@ sections = ["Top Stories", "Tech & Engineering", "Science & Space",
   "Niche Corner", "From the Blogroll"]
 
 [publish]
-bookorbit_dir = "/srv/bookorbit/libraries/daily-epub"
+epub_dir = "/srv/bookorbit/libraries/daily-epub"
 xtc_dir = "/var/lib/daily-epub/xtc"
 
 [xtc]
@@ -346,7 +371,7 @@ public_url = "https://daily.hallada.net"
 3. **M3 — Pre-filter + LLM scoring/selection:** end-to-end lineup JSON printed in dry-run; token/cost report. *Verify: lineup is sane; cost < $0.50.*
 4. **M4 — EPUB standard edition + publish:** full issue EPUB with cover, front page (temporary plain summaries), sections, articles, images; lands in BookOrbit, visible via OPDS on Kindle. *Verify: epubcheck clean; opens in KOReader with working TOC.*
 5. **M5 — Editorial + comments:** DeepSeek summaries/intros/front page wired in; discussion chapters. *Verify: read an issue; comments legible on e-ink.*
-6. **M6 — X4 edition + XTC + XTC OPDS:** second edition, converter invocation, static OPDS feed. *Verify: X4 fetches and renders both.*
+6. **M6 — X4 edition + XTC + OPDS:** second edition, converter invocation, OPDS feed. *Verify: X4 fetches and renders both.*
 7. **M7 — Feedback loop:** `serve` rating endpoints, links in chapters, feed priors in pre-filter, weekly profile rebuild. *Verify: tap 👍 in KOReader → row in `ratings` → prior changes next run.*
 8. **M8 — Hardening & ops:** systemd units, retention, cost guardrail, run reports, `issues.json`, README.
 
@@ -354,7 +379,7 @@ public_url = "https://daily.hallada.net"
 
 - `cargo test` — unit tests: URL canonicalization, dedupe clustering, HMAC round-trip, comment-tree truncation, prefilter scoring; integration tests over fixture JSON (recorded Miniflux/Algolia/Reddit responses) with the LLM stage mocked (`--skip-llm` uses prefilter order).
 - `daily-epub generate --dry-run --out ./out --max-articles 6` with real keys → inspect `./out/*.epub` in Calibre + run `epubcheck` (if installed) → zero errors.
-- Full live run: `daily-epub generate` → file appears in BookOrbit UI under the Daily EPUB library only → browse BookOrbit OPDS from KOReader (Kindle/Palma), download, read; X4: CrossPoint OPDS → both the X4 EPUB (via BookOrbit) and XTC (via `daily.hallada.net/opds/xtc.xml`).
+- Full live run: `daily-epub generate` → both editions appear in the publish dir (and in BookOrbit's UI if it is running) → browse `daily.hallada.net/opds/daily.xml` from KOReader (Kindle/Palma) or the X4's CrossPoint, download, read.
 - Tap a rating link on the Kindle → confirmation page loads → `sqlite3 … 'select * from ratings'` shows the vote.
 - Watch `runs` for a week: cost per day, selection quality; tune `prefilter_keep`/prompts.
 

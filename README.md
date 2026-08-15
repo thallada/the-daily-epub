@@ -8,9 +8,9 @@ the articles, enriches them with HackerNews/Lobsters/Reddit social proof, filter
 300–500 candidates down to ~120 with cheap heuristics, and asks DeepSeek to score,
 select and introduce 15–25 of them. It assembles two EPUB editions (a standard one
 and one tuned for the Xteink X4 e-ink reader), converts the X4 edition to XTC, and
-drops everything into a [BookOrbit](https://github.com/thallada/bookorbit) watched
-folder so KOReader can pick it up over OPDS. Each article chapter ends with 👍/👎
-links that feed back into tomorrow's curation.
+publishes the lot over its own OPDS catalog — which doubles as a
+[BookOrbit](https://github.com/thallada/bookorbit) watched folder if you run one.
+Each article chapter ends with 👍/👎 links that feed back into tomorrow's curation.
 
 Steady-state cost is roughly **$0.05–0.30/day** in DeepSeek tokens, hard-capped by
 `max_daily_usd`.
@@ -49,7 +49,7 @@ selects, feed excerpts stand in for summaries) instead of losing the day's issue
 | **Miniflux** with an API key | the only content source | Settings → API Keys. The client is read-only and never mutates read state. |
 | **DeepSeek API key** | curation + editorial | <https://platform.deepseek.com>. Optional: `--skip-llm` runs the whole pipeline without it. |
 | A 32+ byte random secret | signs the 👍/👎 rating links | `openssl rand -hex 32` |
-| **BookOrbit** library + watched folder | delivery to KOReader over OPDS | Create a dedicated "The Daily EPUB" library, enable *Watch folders*, note the folder path. |
+| **BookOrbit** library + watched folder | *optional* — a richer library UI on top of the same folder | Delivery does not need it: `daily-epub serve` has its own OPDS catalog over `publish.epub_dir`. If you do run it, create a dedicated "The Daily EPUB" library, enable *Watch folders*, and point `publish.epub_dir` at it. |
 | **Node.js 18+** and a clone of [`epub-to-xtc-converter`](https://github.com/bigbag/epub-to-xtc-converter) | XTC/XTCH output for the Xteink X4 | Optional (`xtc.enabled = false` turns it off). Needs `npm install` **inside `cli/`**, and a settings JSON naming a real TTF/OTF — see below. It has **no global npm bin** — it is invoked as `node <repo>/cli/index.js convert …`, which is why `xtc.command`/`xtc.args` are fully general. |
 | A reverse proxy for `daily.hallada.net` → `127.0.0.1:3499` | rating links must be reachable from e-readers on the internet | TLS via your existing setup. |
 
@@ -71,7 +71,7 @@ sudo install -m0755 target/release/daily-epub /usr/local/bin/
 
 ```
 daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm]
-daily-epub serve                # rating endpoints + XTC OPDS + static files
+daily-epub serve                # rating endpoints + OPDS catalog + downloads
 daily-epub profile rebuild      # regenerate the taste profile from ratings (weekly inside generate)
 daily-epub backfill-social      # re-poll social scores for recent articles
 daily-epub db migrate           # run migrations (also automatic on every start)
@@ -108,7 +108,8 @@ Secrets belong in the environment file, never in the TOML.
 | `lookback_hours` | `26` | Size of the ingest window ending at the issue day's end (clamped to now). |
 | `target_article_count` | `20` | Lineup size the selector aims for. `--max-articles` overrides it. |
 | `prefilter_keep` | `120` | Candidates surviving the heuristic pre-filter. Must be ≥ `target_article_count`. |
-| `retention_days` | `21` | Published files older than this are deleted from both publish dirs. SQLite history is kept forever. |
+| `retention_days` | `21` | EPUBs older than this are deleted from `publish.epub_dir`. SQLite history is kept forever. |
+| `xtc_retention_count` | `5` | How many XTC issues to keep in `publish.xtc_dir`. Counted, not dated: each `.xtch` is ~80–100 MB, so the binding constraint is disk, not age. |
 | `max_daily_usd` | `2.0` | Hard ceiling on DeepSeek spend **per day**, not per run — a re-run inherits what earlier runs for that date already spent. Tripping it skips remaining LLM work and degrades to excerpts. |
 | `world_briefing` | `true` | Include the Wikipedia Current Events section. |
 | `database_path` | `/var/lib/daily-epub/daily-epub.db` | SQLite file; parent dirs are created. |
@@ -130,8 +131,8 @@ Secrets belong in the environment file, never in the TOML.
 | `curation.blocked_domains` | `[]` | Hosts excluded outright. |
 | `curation.paywall_domains` | `[]` | Extra paywalled hosts, merged with the built-in list (nytimes, wsj, ft, economist, …). |
 | `curation.sections` | 8 sections | The **only** section names the model may use. `World Briefing` is reserved and never offered. |
-| `publish.bookorbit_dir` | `/srv/bookorbit/libraries/daily-epub` | BookOrbit watched folder. Both EPUB editions land here by atomic copy, distinguished by a `(X4)` tag in **both** the filename and `dc:title` — libraries and OPDS clients list books by title, so the filename alone would make them look identical. |
-| `publish.xtc_dir` | `/var/lib/daily-epub/xtc` | XTC artifacts + the generated `xtc.xml` OPDS feed. |
+| `publish.epub_dir` | `/srv/bookorbit/libraries/daily-epub` | Both EPUB editions land here by atomic copy, and this is the directory the OPDS feed lists. The editions are distinguished by a `(X4)` tag in **both** the filename and `dc:title` — libraries and OPDS clients list books by title, so the filename alone would make them look identical. Point a BookOrbit watched folder at it if you want its UI too. **Renamed from `bookorbit_dir`**; the old key is a hard config error. |
+| `publish.xtc_dir` | `/var/lib/daily-epub/xtc` | XTC artifacts. **Not** listed in the OPDS feed — CrossPoint cannot acquire them — but downloadable at `/files/xtc/<name>` for sideloading. |
 | `xtc.enabled` | `true` | Set `false` to skip the converter entirely. |
 | `xtc.command` | `node` | Converter executable. |
 | `xtc.args` | `["/opt/epub-to-xtc-converter/cli/index.js", "convert"]` | Prefix; the code appends `<input.epub> -o <output> -f <format>` (plus `-c <settings>`). |
@@ -140,7 +141,7 @@ Secrets belong in the environment file, never in the TOML.
 | `server.bind` | `127.0.0.1:3499` | Listen address. |
 | `server.public_url` | `https://daily.hallada.net` | Base URL the rating links inside the EPUB are built from. |
 | `server.hmac_secret` | — | **`DAILY_EPUB_SERVER__HMAC_SECRET`** (or `DAILY_EPUB_SECRET`). Without it, generated links are rejected with 403. |
-| `server.basic_auth_user` / `_pass` | unset | Optional Basic auth for `/opds/xtc.xml` and `/files/xtc/`. |
+| `server.basic_auth_user` / `_pass` | unset | Optional Basic auth for `/opds/*` and `/files/*`. |
 
 ---
 
@@ -185,7 +186,7 @@ sudo systemctl enable --now daily-epub.service daily-epub-generate.timer
 > ```
 > ReadWritePaths=/home/thallada/bookorbit/books/daily-epub /var/lib/daily-epub/xtc
 > ```
-> If you change `publish.bookorbit_dir` or `publish.xtc_dir` in the config, change
+> If you change `publish.epub_dir` or `publish.xtc_dir` in the config, change
 > these lines too and `systemctl daemon-reload`, or publishing fails with
 > `Read-only file system`.
 
@@ -196,7 +197,7 @@ Node for the XTC converter, whose JIT needs W+X pages.
 
 The rating links baked into every article chapter point at
 `server.public_url`, so `daily.hallada.net` must resolve and serve TLS from the
-internet (e-readers tap these links). The XTC OPDS feed rides on the same host.
+internet (e-readers tap these links). The OPDS catalog rides on the same host.
 With an existing certificate, a minimal nginx site is:
 
 ```nginx
@@ -266,23 +267,43 @@ sudo -u daily-epub node /opt/epub-to-xtc-converter/cli/index.js convert \
 > Running as `daily-epub` both avoids the trap and proves the *service* can read
 > everything it needs.
 
-### How the XTC edition reaches the X4
+### The OPDS catalog
 
-The `.xtch` file in `publish.xtc_dir` is **not** meant for BookOrbit — BookOrbit
-only watches the EPUB folder and wouldn't import the XTC binary format anyway.
-`daily-epub serve` publishes its own OPDS 1.2 feed for it: point the X4's
-CrossPoint OPDS browser at `https://daily.hallada.net/opds/xtc.xml` (the bare
-`https://daily.hallada.net/opds` works too) and it will list the last 14 issues,
-newest first, with the files served from `/files/xtc/`. (The X4 can also fall
-back to the "(X4)" EPUB via BookOrbit's own OPDS catalog.)
+`daily-epub serve` publishes its own OPDS 1.2 acquisition feed at
+**`https://daily.hallada.net/opds/daily.xml`** (the bare
+`https://daily.hallada.net/opds`, with or without a trailing slash, serves the
+same feed — one less thing to type on a seven-button keyboard). Point any OPDS
+client — the X4's CrossPoint browser, KOReader, Calibre — at it and you get the
+last 14 issues, newest first, **both editions of each**, with the standard
+edition listed first and the files served from `/files/epub/`.
 
-`xtc.xml` is not an issue — it is a generated index, rewritten from scratch at
-the end of every run by scanning `publish.xtc_dir` for `.xtc`/`.xtch` files. The
-issues themselves are the dated files beside it; `/files/xtc/` is a route, not a
-directory on disk. So the feed always carries the back catalogue, capped at the
-last 14 days by `XTC_FEED_ENTRIES` and bounded by `retention_days` on disk. An
-empty `<feed>` with no `<entry>` elements means the converter never produced a
-file — check the run's warnings, not the server.
+The feed is not a file. It is rendered per request by scanning
+`publish.epub_dir` for `The Daily EPUB - YYYY-MM-DD*.epub`, so it cannot go
+stale behind a failed publish and there is no generated index for the retention
+sweep to step around. Entries are titled exactly like each EPUB's `dc:title`, so
+the two editions of one issue are distinguishable in the list.
+
+This is deliberately independent of BookOrbit: it needs only the directory, so
+BookOrbit is optional, and it puts the day's issue one screen from the X4's home
+instead of several clicks down a library tree.
+
+### Why XTC is not in the feed
+
+XTC files are still generated and still land in `publish.xtc_dir` — they are just
+not advertised over OPDS, because **CrossPoint's OPDS browser can only acquire
+EPUBs**. Two independent reasons, both in the firmware:
+
+- its OPDS parser marks an entry as a book only when an acquisition link's `type`
+  is exactly `application/epub+zip` (a `strcmp`), and drops the entry otherwise —
+  which surfaces as *"No entries found"*;
+- `OpdsBookBrowserActivity` hardcodes `.epub` as the saved filename regardless of
+  the URL or `Content-Disposition`, and the reader dispatches on extension, so a
+  downloaded `.xtch` would land under a name it then refuses to open.
+
+XTC remains a first-class format *on the device* — the file browser lists
+`.xtc`/`.xtch` and there is a dedicated XTC reader — so the artifacts stay
+downloadable at `/files/xtc/<name>` (same Basic auth) for sideloading by SD card,
+WebDAV or the device's web upload UI.
 
 **Budget the disk.** XTCH is a pre-rendered 2-bit page bitmap — 480×800 px is
 ~96 KB per page regardless of what is on it — so an issue is large and its size
@@ -294,8 +315,9 @@ tracks the page count, which `font.size` drives:
 | 30 (`xtc-settings.example.json`) | 820 | 79 MB | ~39 MB |
 
 Measured on the 20-article issue of 2026-08-15; conversion took ~13 s either way.
-At `retention_days = 21` that is 1.7–2.2 GB in `publish.xtc_dir`, and it is also
-what the X4 downloads over WiFi per issue.
+That is why `xtc_dir` is swept by **count** rather than age: at the default
+`xtc_retention_count = 5` it holds ~0.4–0.5 GB, while the EPUBs beside it age out
+on the much longer `retention_days`.
 
 ---
 
@@ -329,9 +351,9 @@ ls -la /srv/bookorbit/libraries/daily-epub /var/lib/daily-epub/xtc
 
 # 6. Delivery
 #    KOReader (Kindle/Palma): browse BookOrbit's OPDS, download, read.
-#    Xteink X4 / CrossPoint: OPDS → https://daily.hallada.net/opds/xtc.xml
+#    Xteink X4 / CrossPoint: OPDS → https://daily.hallada.net/opds/daily.xml
 curl -s https://daily.hallada.net/healthz
-curl -s https://daily.hallada.net/opds/xtc.xml | head
+curl -s https://daily.hallada.net/opds/daily.xml | head
 curl -s https://daily.hallada.net/issues.json | jq '.[0]'
 
 # 7. Feedback loop: tap 👍 in KOReader, then
@@ -356,7 +378,8 @@ from what you see in step 8.
 | Run status `degraded` | a best-effort stage failed; the warnings are in the report (`/issues.json`, `runs.error`, the journal). |
 | No XTC file | `xtc.enabled = false`, Node missing, wrong `xtc.args` path, or `xtc.settings` unset/pointing at a font that does not exist. Non-fatal — the X4 can read the X4 EPUB from BookOrbit instead. The report warning quotes the converter's own error. |
 | `Font path is required` for a settings file that *does* set `font.path` | The process cannot read the file, and the converter cannot tell that apart from the file not existing. Almost always running the converter as yourself instead of `daily-epub` (see above), or a font path that has moved. `sudo -u daily-epub cat /etc/daily-epub/xtc-settings.json` and `sudo -u daily-epub test -r <font> && echo ok` settle it. |
-| The X4's OPDS browser says "Failed to fetch feed" | Usually an *empty* feed: `curl -s https://daily.hallada.net/opds/xtc.xml` and count the `<entry>` elements. Zero means no `.xtch` has ever been published — fix the converter, not the server. |
+| The X4's OPDS browser says "No entries found" | It fetched and parsed the feed but accepted no entry. Every acquisition link must be typed exactly `application/epub+zip`; anything else is dropped silently. `curl -s -u user:pass https://daily.hallada.net/opds/daily.xml \| grep -c "<entry>"` — zero means nothing has been published yet. |
+| The X4's OPDS browser says "Failed to fetch feed" | The request never completed: wrong URL, TLS, or credentials. "Failed to parse feed" means malformed XML. The three messages are distinct — read which one you got. |
 | No World Briefing | The portal page for the issue's own date is an empty stub until midday UTC, so the run falls back up to `world::MAX_LOOKBACK_DAYS` days. A warning means even those were empty or Wikipedia was unreachable. |
 
 ---

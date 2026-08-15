@@ -31,7 +31,7 @@ struct Cli {
 enum Command {
     /// Build (and publish) one issue.
     Generate(GenerateArgs),
-    /// Run the rating endpoints, XTC OPDS feed and static files.
+    /// Run the rating endpoints, the OPDS catalog and downloads.
     Serve,
     /// Taste-profile maintenance.
     #[command(subcommand)]
@@ -166,9 +166,6 @@ fn print_outcome(outcome: &GenerateOutcome) {
             }
             if let Some(xtc) = &published.xtc {
                 println!("published: {}", xtc.display());
-            }
-            if let Some(opds) = &published.opds {
-                println!("opds:      {}", opds.display());
             }
             if published.pruned > 0 {
                 println!("pruned:    {} expired files", published.pruned);

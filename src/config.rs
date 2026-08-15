@@ -51,8 +51,13 @@ pub struct Config {
     pub target_article_count: usize,
     /// How many articles survive the heuristic pre-filter (§3.5).
     pub prefilter_keep: usize,
-    /// Days of published files kept in the publish dirs (§3.11).
+    /// Days of published EPUBs kept in `publish.epub_dir` (§3.11).
     pub retention_days: u32,
+    /// How many XTC issues to keep in `publish.xtc_dir` (§3.11).
+    ///
+    /// Counted, not dated, because an XTCH issue is ~80–100 MB of pre-rendered
+    /// page bitmaps: the constraint is disk, not age.
+    pub xtc_retention_count: u32,
     /// Hard cost ceiling per run (§3.6 guardrail).
     pub max_daily_usd: f64,
     /// Include the Wikipedia Current Events section (§3.8).
@@ -81,6 +86,7 @@ impl Default for Config {
             target_article_count: 20,
             prefilter_keep: 120,
             retention_days: 21,
+            xtc_retention_count: 5,
             max_daily_usd: 2.0,
             world_briefing: true,
             database_path: PathBuf::from("/var/lib/daily-epub/daily-epub.db"),
@@ -195,16 +201,20 @@ impl Default for CurationConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PublishConfig {
-    /// BookOrbit "The Daily EPUB" library watched folder.
-    pub bookorbit_dir: PathBuf,
-    /// Directory served at `/files/xtc/`.
+    /// Where both EPUB editions land: the source of the OPDS feed, served at
+    /// `/files/epub/`, and a BookOrbit watched folder if one is configured.
+    ///
+    /// Renamed from `bookorbit_dir` once the built-in feed started serving this
+    /// directory directly — BookOrbit is optional, the directory is not.
+    pub epub_dir: PathBuf,
+    /// Directory served at `/files/xtc/`. Not listed in the OPDS feed (§3.11).
     pub xtc_dir: PathBuf,
 }
 
 impl Default for PublishConfig {
     fn default() -> Self {
         Self {
-            bookorbit_dir: PathBuf::from("/srv/bookorbit/libraries/daily-epub"),
+            epub_dir: PathBuf::from("/srv/bookorbit/libraries/daily-epub"),
             xtc_dir: PathBuf::from("/var/lib/daily-epub/xtc"),
         }
     }
@@ -274,7 +284,7 @@ pub struct ServerConfig {
     pub public_url: String,
     /// HMAC key for rating tokens; supply via `DAILY_EPUB_SERVER__HMAC_SECRET`.
     pub hmac_secret: Option<String>,
-    /// Optional Basic auth for `/opds/xtc.xml` and `/files/xtc/`.
+    /// Optional Basic auth for `/opds/*` and `/files/*`.
     pub basic_auth_user: Option<String>,
     pub basic_auth_pass: Option<String>,
 }
@@ -429,6 +439,26 @@ mod tests {
             Config::load(Some(Path::new("/nonexistent/daily-epub.toml"))),
             Err(ConfigError::Missing(_))
         ));
+    }
+
+    /// `publish.bookorbit_dir` was renamed to `publish.epub_dir`. A config still
+    /// using the old key must fail loudly and name both — silently falling back
+    /// to the default would publish the issue into the wrong directory, where
+    /// the OPDS feed would then find nothing.
+    #[test]
+    fn the_renamed_publish_key_fails_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[publish]\nbookorbit_dir = \"/srv/books\"\nxtc_dir = \"/srv/xtc\"\n",
+        )
+        .unwrap();
+
+        let err = Config::load(Some(&path)).expect_err("the stale key must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("bookorbit_dir"), "{message}");
+        assert!(message.contains("epub_dir"), "{message}");
     }
 
     #[test]

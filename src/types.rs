@@ -411,7 +411,10 @@ pub const WORLD_BRIEFING_SECTION: &str = "World Briefing";
 // ---------------------------------------------------------------------------
 
 /// Which of the two editions is being built (§3.10).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The declaration order is the listing order: standard first, then X4. The
+/// OPDS feed sorts on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Edition {
     /// 1200px images, full CSS.
@@ -421,11 +424,26 @@ pub enum Edition {
 }
 
 impl Edition {
+    /// Every edition, in the order they are listed and built (§3.10).
+    pub const ALL: [Edition; 2] = [Edition::Standard, Edition::X4];
+
     /// Filename suffix: `""` / `" (X4)"` (§3.11).
     pub fn file_suffix(self) -> &'static str {
         match self {
             Edition::Standard => "",
             Edition::X4 => " (X4)",
+        }
+    }
+
+    /// Recover the edition from a published filename's stem (§3.11).
+    ///
+    /// The OPDS feed is rebuilt by scanning the publish directory, so the
+    /// filename is the only record of which edition a file is.
+    pub fn from_file_stem(stem: &str) -> Edition {
+        if stem.ends_with(Edition::X4.file_suffix()) {
+            Edition::X4
+        } else {
+            Edition::Standard
         }
     }
 }

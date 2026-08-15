@@ -59,7 +59,7 @@ fn test_config(root: &Path) -> Config {
         prefilter_keep: 20,
         world_briefing: false,
         publish: PublishConfig {
-            bookorbit_dir: root.join("bookorbit"),
+            epub_dir: root.join("bookorbit"),
             xtc_dir: root.join("xtc"),
         },
         xtc: XtcConfig {
@@ -305,35 +305,44 @@ async fn assemble_build_publish(
     );
 
     // --- Publish (§3.11) ---
-    let published = publish::publish_issue(db, cfg, &issue, &artifacts, None)
+    let published = publish::publish_issue(cfg, &issue, &artifacts, None)
         .await
         .expect("publish");
     assert_eq!(published.epubs.len(), 2);
     for artifact in &published.epubs {
-        assert!(artifact.path.starts_with(&cfg.publish.bookorbit_dir));
+        assert!(artifact.path.starts_with(&cfg.publish.epub_dir));
         assert!(artifact.path.exists(), "{}", artifact.path.display());
     }
     assert!(
         cfg.publish
-            .bookorbit_dir
+            .epub_dir
             .join("The Daily EPUB - 2026-08-15.epub")
             .exists()
     );
     assert!(
         cfg.publish
-            .bookorbit_dir
+            .epub_dir
             .join("The Daily EPUB - 2026-08-15 (X4).epub")
             .exists()
     );
     assert!(published.xtc.is_none(), "the converter is disabled here");
 
-    // The OPDS feed is regenerated on every publish, even with no XTC files yet.
-    let opds = published.opds.clone().expect("an OPDS feed was written");
-    assert_eq!(opds, cfg.publish.xtc_dir.join("xtc.xml"));
-    let feed = std::fs::read_to_string(&opds).expect("read the OPDS feed");
+    // The OPDS feed is derived from what was just published — both editions,
+    // typed so CrossPoint will accept them (§3.11).
+    let feed = publish::build_opds(db, cfg).await.expect("build the feed");
     assert!(feed.starts_with("<?xml"), "{feed}");
     assert!(feed.contains("<feed xmlns=\"http://www.w3.org/2005/Atom\""));
     assert!(feed.contains(&cfg.server.public_url));
+    assert_eq!(feed.matches("<entry>").count(), 2, "{feed}");
+    assert_eq!(feed.matches("application/epub+zip").count(), 2, "{feed}");
+    assert!(
+        feed.contains("The Daily EPUB — 2026-08-15</title>"),
+        "{feed}"
+    );
+    assert!(
+        feed.contains("The Daily EPUB — 2026-08-15 (X4)</title>"),
+        "{feed}"
+    );
 
     // --- Record (§3.13) ---
     let epub_path = published
@@ -438,7 +447,6 @@ async fn skip_llm_pipeline_produces_a_published_issue() {
 
     // Re-running the same date replaces rather than duplicates (notes §12).
     let republished = publish::publish_issue(
-        &db,
         &cfg,
         &issue,
         &[
@@ -458,7 +466,7 @@ async fn skip_llm_pipeline_produces_a_published_issue() {
     .await
     .expect("republish");
     assert_eq!(republished.epubs.len(), 2);
-    let files: Vec<String> = std::fs::read_dir(&cfg.publish.bookorbit_dir)
+    let files: Vec<String> = std::fs::read_dir(&cfg.publish.epub_dir)
         .expect("read bookorbit dir")
         .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect();

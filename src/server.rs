@@ -1,4 +1,4 @@
-//! axum server: rating endpoints, XTC OPDS, static files (spec §3.9, §3.12).
+//! axum server: rating endpoints, the OPDS catalog, downloads (spec §3.9, §3.12).
 //!
 //! Rating links must work from an e-reader's built-in browser, so every rating
 //! endpoint is a `GET` and the response is a tiny e-ink-sized HTML page.
@@ -7,8 +7,9 @@
 //! | route | behaviour |
 //! |---|---|
 //! | `GET /r/{date}/{article_id}/{vote}?t=` | verify HMAC, upsert rating, rebuild feed priors |
-//! | `GET /opds/xtc.xml` | static OPDS 1.2 acquisition feed from `publish.xtc_dir` |
-//! | `GET /files/xtc/{name}` | XTC artifact download (no path traversal) |
+//! | `GET /opds/daily.xml` (also `/opds`, `/opds/`) | OPDS 1.2 acquisition feed over `publish.epub_dir` |
+//! | `GET /files/epub/{name}` | EPUB download — what the feed's acquisition links point at |
+//! | `GET /files/xtc/{name}` | XTC artifact download, unlisted (no path traversal) |
 //! | `GET /healthz` | liveness |
 //! | `GET /issues.json` | the last 30 run reports, newest first |
 //!
@@ -81,16 +82,18 @@ pub use crate::auth::{constant_time_eq, rating_token, rating_url, verify_token};
 // Router (§3.12)
 // ---------------------------------------------------------------------------
 
-/// Build the router: `/r/{date}/{article_id}/{vote}`, `/opds/xtc.xml`,
-/// `/files/xtc/{name}`, `/healthz`, `/issues.json`, with `tower-http` tracing (§3.12).
+/// Build the router: `/r/{date}/{article_id}/{vote}`, `/opds/daily.xml`,
+/// `/files/epub/{name}`, `/files/xtc/{name}`, `/healthz`, `/issues.json`, with
+/// `tower-http` tracing (§3.12).
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/r/{date}/{article_id}/{vote}", get(handle_rating))
-        .route("/opds/xtc.xml", get(handle_opds))
+        .route(crate::publish::OPDS_PATH, get(handle_opds))
         // OPDS browsers are typed into by hand on a 6" e-ink keyboard: serve the
         // same feed from the catalog root so a URL without the filename works.
         .route("/opds", get(handle_opds))
         .route("/opds/", get(handle_opds))
+        .route("/files/epub/{name}", get(handle_epub_file))
         .route("/files/xtc/{name}", get(handle_xtc_file))
         .route("/healthz", get(handle_healthz))
         .route("/issues.json", get(handle_issues_json))
@@ -284,44 +287,64 @@ async fn handle_rating(
     )
 }
 
-/// `GET /opds/xtc.xml` — the static feed written by [`crate::publish`] (§3.11).
+/// `GET /opds/daily.xml` — both EPUB editions of the last issues, newest first,
+/// rendered from the publish directory on each request (§3.11).
 async fn handle_opds(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(challenge) = check_basic_auth(&state.config, &headers) {
         return challenge;
     }
-    let path = state
-        .config
-        .publish
-        .xtc_dir
-        .join(crate::publish::XTC_OPDS_FILENAME);
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => (
+    match crate::publish::build_opds(&state.db, &state.config).await {
+        Ok(feed) => (
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, OPDS_CONTENT_TYPE),
                 (header::CACHE_CONTROL, "no-cache"),
             ],
-            bytes,
+            feed,
         )
             .into_response(),
         Err(e) => {
-            tracing::warn!(error = %e, path = %path.display(), "no XTC OPDS feed yet");
-            (StatusCode::NOT_FOUND, "no feed yet").into_response()
+            tracing::error!(error = %e, "could not build the OPDS feed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not build the feed",
+            )
+                .into_response()
         }
     }
 }
 
+/// `GET /files/epub/{name}` — download one published EPUB; this is what the
+/// OPDS acquisition links point at (§3.11).
+async fn handle_epub_file(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let dir = state.config.publish.epub_dir.clone();
+    serve_file(&state, &dir, &name, &headers).await
+}
+
 /// `GET /files/xtc/{name}` — download one XTC artifact (§3.11).
+///
+/// Not listed in the OPDS feed — CrossPoint's browser cannot acquire XTC — but
+/// kept so the artifacts can still be fetched by URL for sideloading.
 async fn handle_xtc_file(
     State(state): State<AppState>,
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(challenge) = check_basic_auth(&state.config, &headers) {
+    let dir = state.config.publish.xtc_dir.clone();
+    serve_file(&state, &dir, &name, &headers).await
+}
+
+/// Stream one file out of `dir`, behind the OPDS Basic auth (§3.11).
+async fn serve_file(state: &AppState, dir: &FsPath, name: &str, headers: &HeaderMap) -> Response {
+    if let Some(challenge) = check_basic_auth(&state.config, headers) {
         return challenge;
     }
-    let Some(path) = safe_join(&state.config.publish.xtc_dir, &name) else {
-        tracing::warn!(name, "rejected an unsafe XTC file name");
+    let Some(path) = safe_join(dir, name) else {
+        tracing::warn!(name, "rejected an unsafe file name");
         return (StatusCode::BAD_REQUEST, "bad file name").into_response();
     };
     // An XTCH issue is a pre-rendered page bitmap per page — ~100 MB for a full
@@ -332,12 +355,14 @@ async fn handle_xtc_file(
             (file, len)
         }
         Err(e) => {
-            tracing::warn!(error = %e, path = %path.display(), "XTC file not found");
+            tracing::warn!(error = %e, path = %path.display(), "file not found");
             return (StatusCode::NOT_FOUND, "not found").into_response();
         }
     };
-    let content_type = if name.ends_with(".xml") {
-        OPDS_CONTENT_TYPE
+    // CrossPoint dispatches on the saved file's extension, not on this header,
+    // but Calibre and KOReader both use it.
+    let content_type = if name.ends_with(".epub") {
+        crate::publish::EPUB_CONTENT_TYPE
     } else {
         "application/octet-stream"
     };
@@ -629,7 +654,9 @@ mod tests {
         async fn start(with_auth: bool) -> TestServer {
             let dir = tempfile::tempdir().unwrap();
             let xtc_dir = dir.path().join("xtc");
+            let epub_dir = dir.path().join("epub");
             std::fs::create_dir_all(&xtc_dir).unwrap();
+            std::fs::create_dir_all(&epub_dir).unwrap();
             let db = Db::open_and_migrate(&dir.path().join("db.sqlite"))
                 .await
                 .unwrap();
@@ -637,6 +664,8 @@ mod tests {
             let mut config = Config::default();
             config.server.hmac_secret = Some(VECTOR_SECRET.into());
             config.publish.xtc_dir = xtc_dir;
+            config.publish.epub_dir = epub_dir;
+            config.server.public_url = "https://daily.hallada.net".into();
             if with_auth {
                 config.server.basic_auth_user = Some("opds".into());
                 config.server.basic_auth_pass = Some("hunter2".into());
@@ -661,6 +690,10 @@ mod tests {
 
         fn xtc_dir(&self) -> PathBuf {
             self._dir.path().join("xtc")
+        }
+
+        fn epub_dir(&self) -> PathBuf {
+            self._dir.path().join("epub")
         }
 
         async fn seed_article(&self) -> ArticleId {
@@ -847,11 +880,10 @@ mod tests {
     #[tokio::test]
     async fn opds_and_files_are_served_behind_basic_auth() {
         let server = TestServer::start(true).await;
-        std::fs::write(
-            server.xtc_dir().join(crate::publish::XTC_OPDS_FILENAME),
-            "<feed/>",
-        )
-        .unwrap();
+        for edition in crate::types::Edition::ALL {
+            let name = crate::publish::issue_filename(date(), edition, "epub");
+            std::fs::write(server.epub_dir().join(name), b"EPUB").unwrap();
+        }
         std::fs::write(
             server
                 .xtc_dir()
@@ -861,7 +893,7 @@ mod tests {
         .unwrap();
 
         let res = client()
-            .get(format!("{}/opds/xtc.xml", server.base))
+            .get(format!("{}/opds/daily.xml", server.base))
             .send()
             .await
             .unwrap();
@@ -875,7 +907,7 @@ mod tests {
         );
 
         let res = client()
-            .get(format!("{}/opds/xtc.xml", server.base))
+            .get(format!("{}/opds/daily.xml", server.base))
             .basic_auth("opds", Some("wrong"))
             .send()
             .await
@@ -883,7 +915,7 @@ mod tests {
         assert_eq!(res.status(), 401);
 
         let res = client()
-            .get(format!("{}/opds/xtc.xml", server.base))
+            .get(format!("{}/opds/daily.xml", server.base))
             .basic_auth("opds", Some("hunter2"))
             .send()
             .await
@@ -895,7 +927,11 @@ mod tests {
                 .unwrap()
                 .starts_with("application/atom+xml")
         );
-        assert_eq!(res.text().await.unwrap(), "<feed/>");
+        let feed = res.text().await.unwrap();
+        assert_eq!(feed.matches("<entry>").count(), 2, "{feed}");
+        assert_eq!(feed.matches("application/epub+zip").count(), 2, "{feed}");
+        // XTC exists on disk but is never advertised (§3.11).
+        assert!(!feed.contains(".xtch"), "{feed}");
 
         // The catalog root serves the same feed, behind the same auth.
         for alias in ["/opds", "/opds/"] {
@@ -912,9 +948,29 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(res.status(), 200, "{alias}");
-            assert_eq!(res.text().await.unwrap(), "<feed/>", "{alias}");
+            assert_eq!(res.text().await.unwrap(), feed, "{alias}");
         }
 
+        // The acquisition link resolves, typed as an EPUB.
+        let res = client()
+            .get(format!(
+                "{}/files/epub/The%20Daily%20EPUB%20-%202026-08-15%20(X4).epub",
+                server.base
+            ))
+            .basic_auth("opds", Some("hunter2"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        // CrossPoint needs the size up front to show download progress.
+        assert_eq!(res.content_length(), Some(4));
+        assert_eq!(
+            res.headers()[header::CONTENT_TYPE].to_str().unwrap(),
+            "application/epub+zip"
+        );
+        assert_eq!(res.bytes().await.unwrap().as_ref(), b"EPUB");
+
+        // XTC is still fetchable by URL for sideloading, just not listed.
         let res = client()
             .get(format!(
                 "{}/files/xtc/The%20Daily%20EPUB%20-%202026-08-15%20(X4).xtch",
@@ -925,8 +981,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
-        // CrossPoint needs the size up front to show download progress.
-        assert_eq!(res.content_length(), Some(4));
         assert_eq!(res.bytes().await.unwrap().as_ref(), b"XTCH");
 
         // Ratings are not behind auth (the token is the credential).

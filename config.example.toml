@@ -11,7 +11,8 @@ timezone = "America/New_York"
 lookback_hours = 26
 target_article_count = 20
 prefilter_keep = 120
-retention_days = 21
+retention_days = 21                  # EPUBs, by age
+xtc_retention_count = 5              # XTC issues, by count (~80-100 MB each)
 max_daily_usd = 2.0
 world_briefing = true
 
@@ -59,7 +60,12 @@ sections = [
 ]
 
 [publish]
-bookorbit_dir = "/srv/bookorbit/libraries/daily-epub"
+# Where both EPUB editions land, and what the OPDS feed lists. BookOrbit is
+# optional — it just watches this folder if you run it.
+# (Renamed from `bookorbit_dir`; the old key is now a hard config error.)
+epub_dir = "/srv/bookorbit/libraries/daily-epub"
+# XTC artifacts. Not listed in OPDS (CrossPoint cannot acquire them); reachable
+# at /files/xtc/<name> for sideloading.
 xtc_dir = "/var/lib/daily-epub/xtc"
 
 [xtc]
