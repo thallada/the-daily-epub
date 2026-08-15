@@ -182,7 +182,6 @@ mod tests {
                 "OEBPS/toc.ncx",
                 "OEBPS/nav.xhtml",
                 "OEBPS/stylesheet.css",
-                "OEBPS/cover.png",
                 "OEBPS/cover.xhtml",
                 "OEBPS/front.xhtml",
                 "OEBPS/in-this-issue.xhtml",
@@ -197,6 +196,11 @@ mod tests {
                     "missing {entry} in {edition:?}"
                 );
             }
+            let cover_entry = match edition {
+                Edition::Standard => "OEBPS/cover.png",
+                Edition::X4 => "OEBPS/cover.jpg",
+            };
+            assert!(contains_entry(&zip, cover_entry), "missing {cover_entry}");
             // No leftover temp file.
             assert!(
                 !dir.path()

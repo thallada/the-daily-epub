@@ -178,11 +178,15 @@ p.comment-line {
   margin: 0 0 0.35em 0;
 }
 
-dt.fact-key {
-  font-weight: bold;
-  margin-top: 0.35em;
+.world-summary {
+  margin: 0.2em 0 0.45em 0;
+  font-style: italic;
 }
 
-dd.fact-value {
-  margin: 0 0 0 0.8em;
+.world-overview {
+  margin-bottom: 0.7em;
+}
+
+.fact-line {
+  margin: 0 0 0.35em 0;
 }

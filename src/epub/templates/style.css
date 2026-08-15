@@ -275,16 +275,20 @@ blockquote.comment blockquote.comment {
   margin-bottom: 0.25em;
 }
 
+.world-summary {
+  margin: 0.2em 0 0.45em 0;
+  font-style: italic;
+}
+
+.world-overview {
+  margin-bottom: 0.7em;
+}
+
 .attribution {
   font-size: 0.8em;
   font-style: italic;
 }
 
-.colophon-facts dt {
-  font-variant: small-caps;
-  margin-top: 0.4em;
-}
-
-.colophon-facts dd {
-  margin: 0 0 0 1em;
+.fact-line {
+  margin: 0 0 0.35em 0;
 }

@@ -16,6 +16,15 @@ fn contains_entry(zip: &[u8], name: &str) -> bool {
 }
 
 /// Read one entry out of the archive, inflating it.
+fn read_entry_bytes(zip: &[u8], name: &str) -> Vec<u8> {
+    use std::io::Read as _;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).expect("zip opens");
+    let mut file = archive.by_name(name).expect("entry exists");
+    let mut out = Vec::new();
+    file.read_to_end(&mut out).expect("entry reads");
+    out
+}
+
 fn read_entry(zip: &[u8], name: &str) -> String {
     use std::io::Read as _;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).expect("zip opens");
@@ -96,7 +105,24 @@ fn x4_edition_is_built_alongside_the_standard_one() {
     );
     assert_eq!(&zip[30..38], b"mimetype");
     assert!(contains_entry(&zip, "OEBPS/art-1001.xhtml"));
-    assert!(contains_entry(&zip, "OEBPS/cover.png"));
+    assert!(contains_entry(&zip, "OEBPS/cover.jpg"));
+    assert!(!contains_entry(&zip, "OEBPS/cover.png"));
+    let jpeg = read_entry_bytes(&zip, "OEBPS/cover.jpg");
+    let decoded = image::load_from_memory(&jpeg).expect("X4 cover decodes");
+    assert_eq!((decoded.width(), decoded.height()), (480, 800));
+    assert_eq!(decoded.color(), image::ColorType::Rgb8);
+    assert!(jpeg.windows(2).any(|marker| marker == [0xff, 0xc0]));
+    assert!(!jpeg.windows(2).any(|marker| marker == [0xff, 0xc2]));
+    let opf = read_entry(&zip, "OEBPS/content.opf");
+    let cover_page = read_entry(&zip, "OEBPS/cover.xhtml");
+    assert!(opf.contains("href=\"cover.jpg\""), "{opf}");
+    assert!(opf.contains("media-type=\"image/jpeg\""), "{opf}");
+    assert!(opf.contains("properties=\"cover-image\""), "{opf}");
+    assert!(
+        opf.contains("<meta name=\"cover\" content=\"cover-image\"/>"),
+        "{opf}"
+    );
+    assert!(cover_page.contains("src=\"cover.jpg\""), "{cover_page}");
 }
 
 /// Both editions land in the same BookOrbit library, which lists books by
@@ -126,6 +152,8 @@ fn the_two_editions_have_distinct_titles_in_the_opf() {
     for opf in [&standard_opf, &x4_opf] {
         assert!(opf.contains("belongs-to-collection"), "{opf}");
         assert!(opf.contains("<dc:date>2026-08-15</dc:date>"), "{opf}");
+        assert!(opf.contains("<dc:language>en</dc:language>"), "{opf}");
+        assert_eq!(opf.matches("id=\"epub-creator-0\"").count(), 1, "{opf}");
     }
 }
 
@@ -272,7 +300,27 @@ fn comment_and_world_fixtures_feed_real_chapters() {
         "/tests/fixtures/wikipedia_current_events.html"
     ))
     .expect("fixture");
-    let body = world::extract_events(&html).expect("events");
-    assert!(body.contains("<li>"));
-    assert!(!body.contains("<a "));
+    let sections = world::extract_events(
+        &html,
+        "https://en.wikipedia.org/wiki/Portal:Current_events/2026_August_14",
+    )
+    .expect("events");
+    assert_eq!(sections.len(), 3);
+    assert_eq!(sections[0].events[0].children.len(), 1);
+    assert!(!sections[0].events[0].links.is_empty());
+}
+
+#[test]
+fn colophon_facts_are_x4_safe_distinct_paragraphs() {
+    let issue = fixtures::issue();
+    for edition in [Edition::Standard, Edition::X4] {
+        let (_dir, _, zip) = build_edition_to_bytes(&issue, edition);
+        let colophon = read_entry(&zip, "OEBPS/colophon.xhtml");
+        assert_eq!(colophon.matches("<p class=\"fact-line\">").count(), 9);
+        assert!(!colophon.contains("<dl"));
+        assert!(!colophon.contains("<dt"));
+        assert!(!colophon.contains("<dd"));
+        assert!(colophon.contains("<strong>Issue:</strong>"));
+        assert!(colophon.contains("<strong>Generator:</strong>"));
+    }
 }

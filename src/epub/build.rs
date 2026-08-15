@@ -27,8 +27,19 @@ pub const CREATOR: &str = "The Daily EPUB";
 pub const LANGUAGE: &str = "en";
 /// Characters of the hex HMAC kept in rating links (§3.9).
 pub const TOKEN_LEN: usize = crate::auth::TOKEN_LEN;
-/// Cover image path inside the EPUB.
-pub const COVER_HREF: &str = "cover.png";
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoverAsset {
+    pub bytes: Vec<u8>,
+    pub filename: &'static str,
+    pub mime: &'static str,
+}
+
+pub fn cover_href(edition: Edition) -> &'static str {
+    match edition {
+        Edition::Standard => "cover.png",
+        Edition::X4 => "cover.jpg",
+    }
+}
 
 /// One rendered chapter ready to be added to the EPUB (§3.10).
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +114,7 @@ struct CoverSvg {
 struct CoverPage {
     title: String,
     alt: String,
+    cover_href: &'static str,
 }
 
 #[derive(Template)]
@@ -298,21 +310,27 @@ fn cover_svg(
     Ok(tpl.render()?)
 }
 
-/// Render the cover SVG and rasterize it with `resvg` + `tiny-skia`:
-/// 1200×1600 for `Standard`, 480×800 grayscale for `X4` (§3.10).
-pub fn render_cover(issue: &Issue, edition: Edition) -> Result<Vec<u8>, EpubError> {
+/// Render the standard cover as RGB PNG and the X4 cover as baseline RGB JPEG.
+pub fn render_cover(issue: &Issue, edition: Edition) -> Result<CoverAsset, EpubError> {
     let (width, height) = cover_size(edition);
-    let grayscale = edition == Edition::X4;
     let svg = cover_svg(issue, edition, width, height)?;
-    match rasterize(&svg, width, height) {
-        Some(pixmap) => encode_cover(pixmap, grayscale),
+    let pixmap = match rasterize(&svg, width, height) {
+        Some(pixmap) => pixmap,
         None => {
             tracing::warn!("no usable system fonts: falling back to a geometric cover");
-            let pixmap = draw_fallback_cover(width, height, edition)
-                .ok_or_else(|| EpubError::Build("could not allocate the cover".into()))?;
-            encode_cover(pixmap, grayscale)
+            draw_fallback_cover(width, height, edition)
+                .ok_or_else(|| EpubError::Build("could not allocate the cover".into()))?
         }
-    }
+    };
+    Ok(CoverAsset {
+        bytes: encode_cover(pixmap, edition)?,
+        filename: cover_href(edition),
+        mime: if edition == Edition::X4 {
+            "image/jpeg"
+        } else {
+            "image/png"
+        },
+    })
 }
 
 fn rasterize(svg: &str, width: u32, height: u32) -> Option<tiny_skia::Pixmap> {
@@ -410,21 +428,22 @@ fn draw_fallback_cover(width: u32, height: u32, edition: Edition) -> Option<tiny
     Some(pixmap)
 }
 
-fn encode_cover(pixmap: tiny_skia::Pixmap, grayscale: bool) -> Result<Vec<u8>, EpubError> {
+fn encode_cover(pixmap: tiny_skia::Pixmap, edition: Edition) -> Result<Vec<u8>, EpubError> {
     let (w, h) = (pixmap.width(), pixmap.height());
     let rgba = image::RgbaImage::from_raw(w, h, pixmap.take_demultiplied())
         .ok_or_else(|| EpubError::Build("cover pixel buffer had the wrong size".into()))?;
-    let dynamic = image::DynamicImage::ImageRgba8(rgba);
-    let dynamic = if grayscale {
-        image::DynamicImage::ImageLuma8(dynamic.to_luma8())
-    } else {
-        image::DynamicImage::ImageRgb8(dynamic.to_rgb8())
-    };
-    let mut out = std::io::Cursor::new(Vec::new());
-    dynamic
-        .write_to(&mut out, image::ImageFormat::Png)
-        .map_err(|e| EpubError::Build(format!("cover encoding failed: {e}")))?;
-    Ok(out.into_inner())
+    let rgb = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+    let mut bytes = Vec::new();
+    match edition {
+        Edition::Standard => image::DynamicImage::ImageRgb8(rgb).write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        ),
+        Edition::X4 => image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 92)
+            .encode_image(&image::DynamicImage::ImageRgb8(rgb)),
+    }
+    .map_err(|e| EpubError::Build(format!("cover encoding failed: {e}")))?;
+    Ok(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +778,7 @@ fn render_cover_page(issue: &Issue, edition: Edition) -> Result<Chapter, EpubErr
             "The Daily EPUB, {} \u{2014} No. {}",
             issue.meta.display_date, issue.meta.issue_number
         ),
+        cover_href: cover_href(edition),
     };
     Ok(Chapter {
         id: "cover".into(),
@@ -854,6 +874,7 @@ fn date_metadata(date: Date) -> MetadataOpfV3 {
         "dcterms:date",
         &format!(
             "{date}</meta>\n    <dc:date>{date}</dc:date>\n    \
+             <dc:language>{LANGUAGE}</dc:language>\n    \
              <meta property=\"dcterms:issued\">{date}"
         ),
         None,
@@ -889,7 +910,7 @@ pub fn assemble(
     edition: Edition,
     chapters: &[Chapter],
     images_: &[ImageAsset],
-    cover_png: &[u8],
+    cover: &CoverAsset,
 ) -> Result<Vec<u8>, EpubError> {
     let zip = ZipLibrary::new().map_err(|e| epub_err("zip library", e))?;
     let mut builder = EpubBuilder::new(zip).map_err(|e| epub_err("epub builder", e))?;
@@ -900,9 +921,6 @@ pub fn assemble(
     builder
         .metadata("author", CREATOR)
         .map_err(|e| epub_err("author metadata", e))?;
-    builder
-        .metadata("lang", LANGUAGE)
-        .map_err(|e| epub_err("lang metadata", e))?;
     builder
         .metadata(
             "generator",
@@ -948,7 +966,7 @@ pub fn assemble(
         .stylesheet(stylesheet(edition).as_bytes())
         .map_err(|e| epub_err("stylesheet", e))?;
     builder
-        .add_cover_image(COVER_HREF, cover_png, "image/png")
+        .add_cover_image(cover.filename, cover.bytes.as_slice(), cover.mime)
         .map_err(|e| epub_err("cover image", e))?;
     for asset in images_ {
         builder
@@ -1104,7 +1122,17 @@ pub mod fixtures {
                 date: "2026-08-15".parse().expect("fixed date"),
                 source_url: "https://en.wikipedia.org/wiki/Portal:Current_events/2026_August_15"
                     .into(),
-                body_html: "<ul><li>Something happened somewhere.</li></ul>".into(),
+                overview: Some("A concise view of the day.".into()),
+                sections: vec![WorldBriefingSection {
+                    title: "Top Stories".into(),
+                    events: vec![WorldEvent {
+                        id: "s1-e1".into(),
+                        source_text: "Something happened somewhere.".into(),
+                        links: vec![],
+                        children: vec![],
+                        summary: Some("The event in context.".into()),
+                    }],
+                }],
             }),
             colophon: Colophon {
                 model: "deepseek-v4-flash".into(),
@@ -1363,22 +1391,39 @@ mod tests {
     fn covers_rasterize_for_both_editions() {
         let issue = issue();
         for edition in [Edition::Standard, Edition::X4] {
-            let png = render_cover(&issue, edition).expect("cover");
-            let decoded = image::load_from_memory(&png).expect("cover is a valid png");
+            let cover = render_cover(&issue, edition).expect("cover");
+            let decoded = image::load_from_memory(&cover.bytes).expect("cover is a valid image");
             assert_eq!(
                 (decoded.width(), decoded.height()),
                 cover_size(edition),
                 "cover size for {edition:?}"
             );
+            assert_eq!(decoded.color(), image::ColorType::Rgb8);
             if edition == Edition::X4 {
-                assert_eq!(decoded.color(), image::ColorType::L8);
+                assert_eq!(cover.filename, "cover.jpg");
+                assert_eq!(cover.mime, "image/jpeg");
+                assert!(
+                    cover.bytes.windows(2).any(|marker| marker == [0xff, 0xc0]),
+                    "baseline SOF0 missing"
+                );
+                assert!(
+                    !cover.bytes.windows(2).any(|marker| marker == [0xff, 0xc2]),
+                    "progressive SOF2 present"
+                );
+            } else {
+                assert_eq!(cover.filename, "cover.png");
+                assert_eq!(cover.mime, "image/png");
             }
         }
     }
 
     #[test]
     fn fallback_cover_is_drawn_without_fonts() {
-        let png = encode_cover(draw_fallback_cover(480, 800, Edition::X4).unwrap(), true).unwrap();
+        let png = encode_cover(
+            draw_fallback_cover(480, 800, Edition::X4).unwrap(),
+            Edition::X4,
+        )
+        .unwrap();
         let decoded = image::load_from_memory(&png).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (480, 800));
         // Some ink actually landed on the page.
@@ -1426,8 +1471,8 @@ mod tests {
         assert_eq!(standard.matches("fill=\"#ffffff\"").count(), 1);
 
         // The badge sits between the stats line and the footer, inside the frame.
-        let png = render_cover(&issue, Edition::X4).unwrap();
-        let gray = image::load_from_memory(&png).unwrap().to_luma8();
+        let cover = render_cover(&issue, Edition::X4).unwrap();
+        let gray = image::load_from_memory(&cover.bytes).unwrap().to_luma8();
         let dark_in_badge = (584..634)
             .flat_map(|y| (144..336).map(move |x| (x, y)))
             .filter(|&(x, y)| gray.get_pixel(x, y)[0] < 32)

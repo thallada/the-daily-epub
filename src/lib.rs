@@ -8,8 +8,8 @@
 //!
 //! ```text
 //! Miniflux ingest → dedupe → extraction → persist → social enrichment
-//!   → pre-filter → LLM scoring → selection → comments → world briefing
-//!   → editorial → EPUB build (standard + X4) → XTC → publish → report
+//!   → pre-filter → LLM scoring → selection → comments → editorial
+//!   → world briefing → EPUB build (standard + X4) → XTC → publish → report
 //! ```
 
 pub mod auth;

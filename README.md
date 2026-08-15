@@ -24,8 +24,8 @@ Steady-state cost is roughly **$0.05–0.30/day** in DeepSeek tokens, hard-cappe
 
 ```
 Miniflux ingest ─▶ dedupe ─▶ extraction ─▶ persist ─▶ social enrichment
-  ─▶ pre-filter ─▶ LLM scoring ─▶ selection ─▶ comments ─▶ world briefing
-  ─▶ editorial ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
+  ─▶ pre-filter ─▶ LLM scoring ─▶ selection ─▶ comments ─▶ editorial
+  ─▶ world briefing ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
 ```
 
 Every stage writes to SQLite, so a run is idempotent per date: re-running
@@ -380,7 +380,8 @@ from what you see in step 8.
 | `Font path is required` for a settings file that *does* set `font.path` | The process cannot read the file, and the converter cannot tell that apart from the file not existing. Almost always running the converter as yourself instead of `daily-epub` (see above), or a font path that has moved. `sudo -u daily-epub cat /etc/daily-epub/xtc-settings.json` and `sudo -u daily-epub test -r <font> && echo ok` settle it. |
 | The X4's OPDS browser says "No entries found" | It fetched and parsed the feed but accepted no entry. Every acquisition link must be typed exactly `application/epub+zip`; anything else is dropped silently. `curl -s -u user:pass https://daily.hallada.net/opds/daily.xml \| grep -c "<entry>"` — zero means nothing has been published yet. |
 | The X4's OPDS browser says "Failed to fetch feed" | The request never completed: wrong URL, TLS, or credentials. "Failed to parse feed" means malformed XML. The three messages are distinct — read which one you got. |
-| No World Briefing | The portal page for the issue's own date is an empty stub until midday UTC, so the run falls back up to `world::MAX_LOOKBACK_DAYS` days. A warning means even those were empty or Wikipedia was unreachable. |
+| No World Briefing | Retrieval begins with the previous calendar day (the latest completed page) and falls back up to `world::MAX_LOOKBACK_DAYS` days. A warning means those pages were empty or Wikipedia was unreachable. |
+| An X4 cover still shows an old black band after regeneration | CrossInk caches its generated home-screen thumbnail under the EPUB path. Delete that book's cache before retesting the same filename, reopen the EPUB, then return to the Minimal home screen. |
 
 ---
 

@@ -399,8 +399,29 @@ pub struct WorldBriefing {
     pub date: Date,
     /// Portal URL the content came from (also used for CC BY-SA attribution).
     pub source_url: String,
-    /// Sanitized `<ul>`-style markup of the day's events.
-    pub body_html: String,
+    /// Optional synthesized overview of the completed day's events.
+    pub overview: Option<String>,
+    /// Categories in portal order, including every nested list item.
+    pub sections: Vec<WorldBriefingSection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldBriefingSection {
+    pub title: String,
+    pub events: Vec<WorldEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldEvent {
+    /// Stable positional key such as `s1-e2-1`.
+    pub id: String,
+    /// Plain source text from the Wikipedia list item (excluding child lists).
+    pub source_text: String,
+    /// Same-host English Wikipedia article links found in this list item.
+    pub links: Vec<String>,
+    pub children: Vec<WorldEvent>,
+    /// LLM enrichment, attached only to leaf news statements.
+    pub summary: Option<String>,
 }
 
 /// Reserved section name for [`WorldBriefing`] — never offered to the LLM (§3.6).

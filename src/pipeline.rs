@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! Miniflux ingest ─▶ dedupe ─▶ extraction ─▶ persist ─▶ social enrichment
-//!   ─▶ pre-filter ─▶ LLM scoring ─▶ selection ─▶ comments ─▶ world briefing
-//!   ─▶ editorial ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
+//!   ─▶ pre-filter ─▶ LLM scoring ─▶ selection ─▶ comments ─▶ editorial
+//!   ─▶ world briefing ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
 //! ```
 //!
 //! Failure policy (notes §3):
@@ -422,15 +422,7 @@ async fn run_stages(
     report.counts.discussions = comments::fetch_all(&http, &mut lineup.picks).await as i64;
     report.timings.record("comments", elapsed_ms(stage));
 
-    // --- Stage 9: world briefing (§3.8) — non-fatal by construction ---
-    let stage = Timestamp::now();
-    let world_briefing = world::fetch_optional(&http, date, config.world_briefing).await;
-    if config.world_briefing && world_briefing.is_none() {
-        report.warn("the world briefing was unavailable; the section is omitted");
-    }
-    report.timings.record("world", elapsed_ms(stage));
-
-    // --- Stage 10: editorial (§3.6 C) ---
+    // --- Stage 9: editorial (§3.6 C) ---
     let stage = Timestamp::now();
     let editorial = match curator.editorial(&lineup).await {
         Ok(editorial) => editorial,
@@ -443,6 +435,23 @@ async fn run_stages(
     };
     apply_summaries(&mut lineup, &editorial);
     report.timings.record("editorial", elapsed_ms(stage));
+
+    // --- Stage 10: completed-day World Briefing (§3.8), best effort ---
+    // Editorial retains budget priority; only the remaining metered budget is
+    // available for per-event summaries and the overview.
+    let stage = Timestamp::now();
+    let mut world_briefing = world::fetch_optional(&http, date, config.world_briefing).await;
+    if config.world_briefing {
+        match world_briefing.as_mut() {
+            Some(briefing) => {
+                for warning in world::enrich(&http, briefing, curator.llm.as_ref()).await {
+                    report.warn(warning);
+                }
+            }
+            None => report.warn("the world briefing was unavailable; the section is omitted"),
+        }
+    }
+    report.timings.record("world", elapsed_ms(stage));
 
     // --- Stage 11: assemble the issue (§3.10) ---
     let issue_number = db
