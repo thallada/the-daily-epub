@@ -9,7 +9,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::curate::llm::{LlmClient, LlmError};
-use crate::epub::images::text_escape;
+use crate::html::text_escape;
 use crate::types::{WorldBriefing, WorldBriefingSection, WorldEvent};
 
 type NodeRef<'a> = <scraper::ElementRef<'a> as std::ops::Deref>::Target;

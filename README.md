@@ -399,10 +399,32 @@ extraction → prefilter → selection (both the `--skip-llm` route and a
 `MockBackend` DeepSeek route) → editorial → both EPUB editions → publish → OPDS
 and database rows, with no network access anywhere.
 
-Layout: `src/pipeline.rs` wires the stages; `src/{dedupe,extract,social,curate,
-comments,world,epub,publish,server}` implement them; `src/auth.rs` owns the rating
-token formula used by both the EPUB writer and the server; `src/types.rs` is the
-contract between stages.
+### Layout
+
+`src/pipeline.rs` wires the stages; `src/types.rs` is the contract between them;
+`src/auth.rs` owns the rating token formula, shared by the EPUB writer and the
+server. The stages themselves:
+
+```text
+miniflux.rs   ingest            curate/       scoring and selection
+dedupe.rs     clustering          prefilter, llm, score, select, editorial
+extract.rs    body text           profile/    the reader's taste profile
+images/       article images    comments.rs   discussion chapters
+  normalize     usable <img>    world.rs      the world briefing
+  refs          what's there    epub/         the two editions
+  fetch         download          chapters, cover, build, x4
+  encode        re-encode       publish.rs    BookOrbit + XTC
+  embed         into the page   server.rs     ratings, OPDS
+html.rs       markup helpers    db.rs         SQLite
+```
+
+Two modules are worth knowing about before you go looking for their contents.
+`src/html.rs` holds the generic markup helpers — tag scanning, escaping, entity
+decoding, XHTML fixups — that extraction, images, comments and the world briefing
+all need; put anything that works on markup without caring what the markup is
+*about* there. `src/images/` owns every stage of an article's images, which is
+otherwise the kind of concern that smears itself across extraction and EPUB
+building; see its module docs for the order the stages run in.
 
 ### Auditing images against real articles
 
@@ -419,7 +441,9 @@ cargo run --release --example image_audit -- \
 It prints per-article `refs / embedded / shown / placeholders`, a tally of loss
 reasons, and totals. Pages are cached on first run, so a change can be measured
 against byte-identical input; `--dump <title substring>` lists the URLs one
-article resolved to. It needs the network and is not part of `cargo test`.
+article resolved to, and `--epub-out DIR` writes a readable EPUB of the audited
+articles so the images can be looked at on a device rather than counted in a
+table. It needs the network and is not part of `cargo test`.
 
 ---
 

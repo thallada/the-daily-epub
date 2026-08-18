@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 use super::llm::{LlmClient, LlmError};
-use super::{escape_html, html_to_text, text_to_paragraphs, truncate_tokens, truncate_words};
+use super::{escape_html, prompt_text, text_to_paragraphs, truncate_tokens, truncate_words};
 use crate::types::{ArticleId, Editorial, Lineup, Pick};
 
 /// Article text is truncated to roughly this many tokens per summary call (§3.6).
@@ -116,7 +116,7 @@ pub async fn summarize_article(
     temperature: f32,
 ) -> Result<String, LlmError> {
     llm.meter.check_budget()?;
-    let body = truncate_tokens(&html_to_text(body_html), SUMMARY_INPUT_TOKEN_BUDGET);
+    let body = truncate_tokens(&prompt_text(body_html), SUMMARY_INPUT_TOKEN_BUDGET);
     let mut prompt = String::with_capacity(body.len() + SUMMARY_INSTRUCTIONS.len() + 256);
     prompt.push_str(SUMMARY_INSTRUCTIONS);
     let _ = write!(
@@ -309,7 +309,7 @@ fn social_note(pick: &Pick) -> String {
 /// The article's own opening words, used when no LLM summary exists (§3.6).
 pub fn excerpt_summary(pick: &Pick) -> String {
     let text = truncate_words(
-        &html_to_text(&pick.article.content_html),
+        &prompt_text(&pick.article.content_html),
         FALLBACK_SUMMARY_WORDS,
     );
     if text.is_empty() {

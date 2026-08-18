@@ -16,7 +16,7 @@ use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 
 use super::llm::{LlmClient, LlmError, strip_code_fence};
-use super::{html_to_text, truncate_words};
+use super::{prompt_text, truncate_words};
 use crate::types::{ArticleId, Lineup, Pick, ScoredArticle, SourceKind, WORLD_BRIEFING_SECTION};
 
 /// How many candidates are offered to stage B (§3.6).
@@ -154,7 +154,7 @@ fn render_candidate(candidate: &ScoredArticle) -> String {
             ""
         }
     );
-    let blurb = truncate_words(&html_to_text(&a.content_html), BLURB_WORDS);
+    let blurb = truncate_words(&prompt_text(&a.content_html), BLURB_WORDS);
     if !blurb.is_empty() {
         let _ = writeln!(block, "opening: {blurb}");
     }

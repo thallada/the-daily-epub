@@ -164,7 +164,11 @@ pub fn approx_tokens(text: &str) -> usize {
 
 /// Strip markup and collapse whitespace, so article bodies can go into prompts
 /// as plain text (cheaper and less confusing for the model than raw HTML).
-pub fn html_to_text(html: &str) -> String {
+///
+/// Deliberately not [`crate::html::html_to_text`]: this one collapses runs of
+/// whitespace and never builds a DOM, because it runs over every candidate
+/// body on every run and only has to be good enough to size a prompt.
+pub fn prompt_text(html: &str) -> String {
     /// Does `tail` open the named element, i.e. `<name` or `</name`?
     fn opens(tail: &str, name: &str) -> bool {
         let bytes = tail.as_bytes();
@@ -272,11 +276,11 @@ mod tests {
     fn html_becomes_readable_text() {
         let html = "<h1>Title</h1><p>First &amp; best.</p><script>alert('x')</script>\
                     <p>Second<br/>line</p><style>p{color:red}</style>";
-        assert_eq!(html_to_text(html), "Title First & best. Second line");
-        assert_eq!(html_to_text(""), "");
-        assert_eq!(html_to_text("no markup at all"), "no markup at all");
+        assert_eq!(prompt_text(html), "Title First & best. Second line");
+        assert_eq!(prompt_text(""), "");
+        assert_eq!(prompt_text("no markup at all"), "no markup at all");
         // Unicode survives byte-wise walking.
-        assert_eq!(html_to_text("<p>café — naïve</p>"), "café — naïve");
+        assert_eq!(prompt_text("<p>café — naïve</p>"), "café — naïve");
     }
 
     #[test]

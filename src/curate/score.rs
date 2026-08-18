@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::llm::{LlmClient, LlmError, strip_code_fence};
-use super::{html_to_text, truncate_words};
+use super::{prompt_text, truncate_words};
 use crate::types::{ArticleId, LlmScore, ScoredArticle, SourceKind};
 
 /// Words of article text sent per candidate in stage A (§3.6).
@@ -155,7 +155,7 @@ fn render_candidate(candidate: &ScoredArticle) -> String {
     );
     let _ = writeln!(block, "social: {}", social_line(candidate));
     let _ = writeln!(block, "came via: {}", sources_line(candidate));
-    let excerpt = truncate_words(&html_to_text(&a.content_html), EXCERPT_WORDS);
+    let excerpt = truncate_words(&prompt_text(&a.content_html), EXCERPT_WORDS);
     let _ = writeln!(
         block,
         "excerpt: {}",

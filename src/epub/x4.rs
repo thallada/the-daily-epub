@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::XtcConfig;
 
-use super::images::tag_end;
+use crate::html::tag_end;
 
 /// Native X4 screen size, used for the cover and image fitting (§3.10).
 pub const X4_SCREEN: (u32, u32) = (480, 800);

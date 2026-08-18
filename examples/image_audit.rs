@@ -20,9 +20,14 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use daily_epub::epub::{build, images};
+use daily_epub::epub::build;
 use daily_epub::extract::{self, Extractor};
-use daily_epub::types::{Article, EntryId, ExtractMethod, ImageAsset, Pick, SourceKind, SourceRef};
+use daily_epub::html;
+use daily_epub::images;
+use daily_epub::types::{
+    Article, Colophon, Editorial, EntryId, ExtractMethod, ImageAsset, Issue, IssueMeta, Lineup,
+    Pick, SourceKind, SourceRef,
+};
 
 /// One article we are auditing, pulled back out of a published EPUB.
 #[derive(Debug, Clone)]
@@ -60,17 +65,23 @@ async fn main() {
 
     let mut cache = PathBuf::from("/tmp/daily-epub-audit-cache");
     let mut dump: Option<String> = None;
+    let mut epub_out: Option<PathBuf> = None;
     let mut epubs: Vec<PathBuf> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cache" => cache = PathBuf::from(args.next().expect("--cache needs a path")),
             "--dump" => dump = Some(args.next().expect("--dump needs a title substring")),
+            "--epub-out" => {
+                epub_out = Some(PathBuf::from(args.next().expect("--epub-out needs a path")))
+            }
             other => epubs.push(PathBuf::from(other)),
         }
     }
     if epubs.is_empty() {
-        eprintln!("usage: image_audit [--cache DIR] <issue.epub>...");
+        eprintln!(
+            "usage: image_audit [--cache DIR] [--dump TITLE] [--epub-out DIR] <issue.epub>..."
+        );
         std::process::exit(2);
     }
     std::fs::create_dir_all(&cache).expect("cache dir");
@@ -212,6 +223,10 @@ async fn main() {
     for (kind, n) in &kinds {
         println!("  {n:>4}  {kind}");
     }
+    if let Some(dir) = &epub_out {
+        write_audit_epub(dir, &picks, &assets);
+    }
+
     if !skipped.is_empty() {
         println!("\n== unfetchable ({})", skipped.len());
         for (t, e) in &skipped {
@@ -286,7 +301,7 @@ async fn body_for(
     let _ = extractor;
     let readable = extract::readability(&html, &base).map_err(|e| e.to_string())?;
     Ok(extract::sanitize_with_base(
-        &extract::normalize_img_tags(&readable),
+        &images::normalize_img_tags(&readable),
         &base,
     ))
 }
@@ -320,8 +335,8 @@ async fn raw_fetch(url: &str) -> Result<(Vec<u8>, String), String> {
 }
 
 fn pick_for(target: &Target, content_html: String) -> Pick {
-    let word_count = extract::word_count(&content_html);
-    let image_urls = extract::collect_image_urls(&content_html, &target.url);
+    let word_count = html::word_count(&content_html);
+    let image_urls = images::collect_image_urls(&content_html, &target.url);
     Pick {
         article: Article {
             id: target.entry_id,
@@ -336,7 +351,7 @@ fn pick_for(target: &Target, content_html: String) -> Pick {
             sources: vec![SourceRef {
                 entry_id: target.entry_id,
                 feed_id: 1,
-                feed_title: "Feed".into(),
+                feed_title: target.issue.clone(),
                 category: None,
                 kind: SourceKind::Feed,
             }],
@@ -344,19 +359,80 @@ fn pick_for(target: &Target, content_html: String) -> Pick {
             url: target.url.clone(),
             author: None,
             feed_id: 1,
-            feed_title: "Feed".into(),
+            feed_title: host(&target.url),
             category: None,
             published_at: None,
             comments_url: None,
             social: vec![],
             extract_method: ExtractMethod::Readability,
         },
-        section: "Audit".into(),
+        section: target.issue.clone(),
         position: 0,
         is_lead: false,
         summary: None,
         llm: None,
         discussion: None,
+    }
+}
+
+/// Build a readable EPUB out of the audited articles (`--epub-out DIR`).
+///
+/// Not a regenerated issue — there is no editorial, no discussion chapters and
+/// no world briefing here, and the real thing needs the database. It exists so
+/// the images can be looked at on a device rather than counted in a table.
+fn write_audit_epub(out_dir: &Path, picks: &[Pick], assets: &[ImageAsset]) {
+    let sections: Vec<String> = {
+        let mut seen: Vec<String> = Vec::new();
+        for p in picks {
+            if !seen.contains(&p.section) {
+                seen.push(p.section.clone());
+            }
+        }
+        seen
+    };
+    let issue = Issue {
+        meta: IssueMeta {
+            date: "2026-08-16".parse().unwrap(),
+            issue_number: 0,
+            generated_at: jiff::Timestamp::now(),
+            display_date: "Image audit rebuild".into(),
+            article_count: picks.len() as i64,
+            section_count: sections.len() as i64,
+            total_words: picks.iter().map(|p| p.article.word_count).sum(),
+            reading_minutes: picks.iter().map(|p| p.article.reading_minutes()).sum(),
+        },
+        lineup: Lineup {
+            date: "2026-08-16".parse().unwrap(),
+            picks: picks.to_vec(),
+            section_order: sections,
+        },
+        editorial: Editorial {
+            front_page_html: "<p>Rebuilt from published issues by \
+                 <code>examples/image_audit.rs</code> to check image handling. \
+                 Articles are re-extracted live; editorial, discussions and the \
+                 world briefing are absent by design.</p>"
+                .into(),
+            section_intros: Default::default(),
+            summaries: Default::default(),
+        },
+        world_briefing: None,
+        colophon: Colophon::default(),
+    };
+    let cfg = daily_epub::config::Config::default();
+    match daily_epub::epub::build_edition_with_images(
+        &issue,
+        daily_epub::types::Edition::Standard,
+        &cfg,
+        out_dir,
+        assets,
+    ) {
+        Ok(artifact) => println!(
+            "\nwrote {} ({:.1} MB, {} images)",
+            artifact.path.display(),
+            artifact.bytes as f64 / 1_048_576.0,
+            assets.len()
+        ),
+        Err(e) => eprintln!("epub build failed: {e}"),
     }
 }
 

@@ -162,7 +162,7 @@ fn is_enclosure_only(raw_content: &str) -> bool {
         || lower.contains("<video")
         || lower.contains("<embed")
         || lower.contains("<iframe");
-    embeds && crate::extract::word_count(raw_content) < 25
+    embeds && crate::html::word_count(raw_content) < 25
 }
 
 /// Classify which kind of feed an entry arrived through, for the sources list (§3.2, §3.5).
@@ -345,7 +345,7 @@ fn build_article(members: Vec<(Entry, String)>, feed_urls: &FeedUrls) -> Article
     let best = members
         .iter()
         .enumerate()
-        .max_by_key(|(_, (entry, _))| (crate::extract::word_count(&entry.raw_content), -(entry.id)))
+        .max_by_key(|(_, (entry, _))| (crate::html::word_count(&entry.raw_content), -(entry.id)))
         .map(|(i, _)| i)
         .unwrap_or(0);
     let (best_entry, canonical) = &members[best];
@@ -385,7 +385,7 @@ fn build_article(members: Vec<(Entry, String)>, feed_urls: &FeedUrls) -> Article
         .filter_map(|(e, _)| e.author.clone())
         .find(|a| !a.trim().is_empty());
 
-    let word_count = crate::extract::word_count(&best_entry.raw_content);
+    let word_count = crate::html::word_count(&best_entry.raw_content);
 
     Article {
         id: 0,

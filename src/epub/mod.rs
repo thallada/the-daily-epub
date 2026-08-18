@@ -5,12 +5,15 @@
 //! `art-{entry_id}` so rating links stay stable across regenerations.
 
 pub mod build;
-pub mod images;
+pub mod chapters;
+pub mod cover;
+pub mod fixtures;
 pub mod x4;
 
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
+use crate::images;
 use crate::types::{Artifact, Edition, ImageAsset, Issue};
 
 /// Chapter order inside an issue (§3.10).

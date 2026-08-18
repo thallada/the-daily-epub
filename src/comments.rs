@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use futures::StreamExt;
 use serde_json::Value;
 
-use crate::epub::images::{text_escape, to_xhtml};
+use crate::html::{text_escape, to_xhtml};
 use crate::types::{Comment, CommentThread, Discussion, Pick, SocialSource};
 
 /// Top-level threads kept per source (§3.7).
