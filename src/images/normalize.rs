@@ -16,7 +16,7 @@
 //! Candidates are judged by *shape*, never by publisher: a string with braces,
 //! whitespace or quotes in it cannot resolve, whoever wrote it.
 
-use crate::html::{html_to_text, parse_attrs, tag_end, tag_name};
+use crate::html::{html_to_text, parse_attrs, tag_end, tag_name, truncate_utf8};
 
 /// Elements that readability deletes outright, and which a page may nevertheless
 /// have wrapped around an image (lightbox triggers, mostly).
@@ -181,7 +181,7 @@ pub fn normalize_img_tags(html: &str) -> String {
                     }
                     out.push_str("/>");
                 } else {
-                    tracing::debug!(tag = %&raw[..raw.len().min(120)], "dropping unusable img");
+                    tracing::debug!(tag = %truncate_utf8(raw, 120), "dropping unusable img");
                 }
             }
             _ => out.push_str(raw),

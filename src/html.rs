@@ -122,7 +122,15 @@ pub fn decode_entities(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
-        let Some(end) = tail[..tail.len().min(12)].find(';') else {
+        // Entity names are ASCII, but malformed input is not necessarily so.
+        // Search the bounded byte window for the ASCII delimiter instead of
+        // slicing at byte 12, which may fall in the middle of a UTF-8 scalar.
+        let Some(end) = tail
+            .as_bytes()
+            .iter()
+            .take(12)
+            .position(|&byte| byte == b';')
+        else {
             out.push('&');
             rest = &tail[1..];
             continue;
@@ -156,6 +164,20 @@ pub fn decode_entities(s: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Prefix of `s` that fits within `max_bytes` without splitting a UTF-8
+/// character.
+///
+/// This is intended for byte-budgeted logs and excerpts. The returned string
+/// may be shorter than the limit by up to three bytes.
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    // `end` is explicitly adjusted to a character boundary above.
+    s.get(..end).unwrap_or_default()
 }
 
 /// Escape a string for use inside a double-quoted XML attribute.
@@ -313,6 +335,28 @@ mod tests {
         // Nothing to do, and nothing invented for what we do not know.
         assert_eq!(decode_entities("plain"), "plain");
         assert_eq!(decode_entities("&unknown; &"), "&unknown; &");
+    }
+
+    #[test]
+    fn entity_decoding_handles_unicode_at_the_scan_boundary() {
+        // The curly apostrophe begins at byte 11 after `&`. The bounded entity
+        // scan must leave malformed/non-entity text alone rather than slicing
+        // through the apostrophe and panicking.
+        let input = "&abcdefghij’ rest";
+        assert_eq!(decode_entities(input), input);
+
+        // A semicolon after non-ASCII text is likewise safe and remains
+        // unchanged because it is not one of the entities we decode.
+        assert_eq!(decode_entities("&é;"), "&é;");
+    }
+
+    #[test]
+    fn utf8_truncation_respects_byte_limits_and_character_boundaries() {
+        assert_eq!(truncate_utf8("abcdef", 4), "abcd");
+        assert_eq!(truncate_utf8("ab’cd", 4), "ab");
+        assert_eq!(truncate_utf8("ab’cd", 5), "ab’");
+        assert_eq!(truncate_utf8("éclair", 0), "");
+        assert_eq!(truncate_utf8("éclair", usize::MAX), "éclair");
     }
 
     #[test]
