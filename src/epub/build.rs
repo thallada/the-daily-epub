@@ -451,7 +451,7 @@ fn encode_cover(pixmap: tiny_skia::Pixmap, edition: Edition) -> Result<Vec<u8>, 
 // ---------------------------------------------------------------------------
 
 /// Prepare article markup for XHTML: rewrite images, sanitize, self-close voids.
-fn prepare_body(html: &str, images_: &[ImageAsset]) -> String {
+pub fn prepare_body(html: &str, images_: &[ImageAsset]) -> String {
     // Sanitize first: image rewriting emits our own trusted markup (including the
     // `image-placeholder` class, which ammonia would otherwise strip).
     let cleaned = ammonia::clean(html);
@@ -1013,7 +1013,7 @@ pub mod fixtures {
             title: title.to_string(),
             best_entry_id: entry_id,
             content_html: format!(
-                "<p>Body of <em>{title}</em> with an image.</p><img src=\"https://img.example/{entry_id}.png\" alt=\"A chart\"><p>More words &amp; things.</p>"
+                "<p>Body of <em>{title}</em> with an image.</p><img src=\"https://img.example/{entry_id}.png\" alt=\"A chart of the daily figures\"><p>More words &amp; things.</p>"
             ),
             word_count: 1200,
             excerpt_only: false,
@@ -1307,7 +1307,11 @@ mod tests {
         assert!(chapter.xhtml.contains("Read online"));
         assert!(chapter.xhtml.contains("href=\"disc-1001.xhtml\""));
         // The un-downloaded image degrades to a placeholder.
-        assert!(chapter.xhtml.contains("[image: A chart]"));
+        assert!(
+            chapter
+                .xhtml
+                .contains("[image: A chart of the daily figures]")
+        );
         assert_xml_ok(&chapter.xhtml);
     }
 

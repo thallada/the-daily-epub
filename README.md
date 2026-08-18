@@ -404,6 +404,23 @@ comments,world,epub,publish,server}` implement them; `src/auth.rs` owns the rati
 token formula used by both the EPUB writer and the server; `src/types.rs` is the
 contract between stages.
 
+### Auditing images against real articles
+
+Image handling fails in ways no synthetic fixture predicts, because every
+publisher invents its own lazy-loading scheme. `examples/image_audit.rs` replays
+the extraction and image pipeline over the articles of issues already published
+and counts what actually reaches the page:
+
+```sh
+cargo run --release --example image_audit -- \
+    --cache /tmp/pagecache ~/bookorbit/books/daily-epub/*.epub
+```
+
+It prints per-article `refs / embedded / shown / placeholders`, a tally of loss
+reasons, and totals. Pages are cached on first run, so a change can be measured
+against byte-identical input; `--dump <title substring>` lists the URLs one
+article resolved to. It needs the network and is not part of `cargo test`.
+
 ---
 
 ## Known limitations
@@ -425,6 +442,10 @@ From spec §7, plus what implementation turned up:
   falls back to matching the feed title.
 - **Images are downloaded once per edition** (the two editions need different
   resolutions and colour profiles), so an image-heavy issue makes two passes.
+- **An image that cannot be embedded is dropped, not announced,** unless its alt
+  text is a real description — decorative rules, spacers and dead links would
+  otherwise litter the page with `[image: …]` lines. Verify image handling with
+  `examples/image_audit.rs` after touching extraction.
 - **`dc:date` rides inside a `dcterms:date` metadata fragment** because
   `epub-builder` neither exposes `dc:date` nor accepts a non-`chrono` date. The
   OPF output is correct; the mechanism is a workaround.

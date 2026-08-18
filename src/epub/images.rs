@@ -22,8 +22,8 @@ pub const CONCURRENCY: usize = 8;
 pub const ISSUE_ASSET_BUDGET_BYTES: usize = 25 * 1024 * 1024;
 /// Images smaller than this in either dimension are decorative — skipped (§3.10).
 pub const MIN_DIMENSION_PX: u32 = 24;
-/// Images referenced per article are already capped at 12 by extraction (§3.3).
-pub const MAX_IMAGES_PER_ARTICLE: usize = 12;
+/// Width/height an SVG is rasterized to when it declares no intrinsic size.
+const SVG_FALLBACK_SIZE: u32 = 1000;
 
 /// HTML void elements: XHTML requires them self-closed (§3.10 "valid XHTML").
 pub const VOID_ELEMENTS: &[&str] = &[
@@ -136,6 +136,8 @@ pub fn extract_img_refs(html: &str) -> Vec<ImgRef> {
 pub async fn download(http: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
     let resp = http
         .get(url)
+        // Some CDNs answer `Accept: */*` with an HTML interstitial (§3.10).
+        .header(reqwest::header::ACCEPT, "image/*,*/*;q=0.8")
         .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
         .send()
         .await
@@ -175,8 +177,14 @@ pub async fn download(http: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
 /// Decode, resize/grayscale, flatten transparency to white and re-encode (§3.10).
 ///
 /// Line art with transparency is kept as PNG after flattening; everything else
-/// becomes JPEG. Returns `None` for undecodable sources (SVG/WebP without support).
+/// becomes JPEG. SVG is rasterized first — charts and diagrams are frequently
+/// vector-only, and dropping them loses the point of the article. Returns `None`
+/// for sources no decoder handles.
 pub fn reencode(bytes: &[u8], profile: ImageProfile) -> Option<(Vec<u8>, &'static str)> {
+    if looks_like_svg(bytes) {
+        let raster = rasterize_svg(bytes, profile)?;
+        return reencode(&raster, profile);
+    }
     let format = image::guess_format(bytes).ok();
     let decoded = image::load_from_memory(bytes)
         .map_err(|e| tracing::debug!("undecodable image: {e}"))
@@ -237,6 +245,74 @@ pub fn reencode(bytes: &[u8], profile: ImageProfile) -> Option<(Vec<u8>, &'stati
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, profile.jpeg_quality);
     enc.encode_image(&rgb).ok()?;
     Some((out.into_inner(), "image/jpeg"))
+}
+
+/// True when `bytes` are an SVG document (possibly behind an XML prolog or BOM).
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1024)];
+    let text = String::from_utf8_lossy(head);
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    text.starts_with("<svg")
+        || (text.starts_with("<?xml") || text.starts_with("<!DOCTYPE svg")) && text.contains("<svg")
+}
+
+/// Rasterize an SVG to a PNG at the profile's target width (§3.10).
+///
+/// The profile's own resize pass then handles the height cap, so this only has
+/// to land in the right ballpark.
+fn rasterize_svg(bytes: &[u8], profile: ImageProfile) -> Option<Vec<u8>> {
+    let mut options = resvg::usvg::Options::default();
+    options.fontdb_mut().load_system_fonts();
+    let tree = resvg::usvg::Tree::from_data(bytes, &options)
+        .map_err(|e| tracing::debug!("svg did not parse: {e}"))
+        .ok()?;
+
+    // An `<svg>` that parses but draws nothing is not an image, it is a stray
+    // tag: rasterizing it would embed a blank rectangle.
+    if tree.root().children().is_empty() {
+        tracing::debug!("svg has nothing to draw");
+        return None;
+    }
+    let size = tree.size();
+    let (sw, sh) = (size.width(), size.height());
+    if !(sw.is_finite() && sh.is_finite()) || sw <= 0.0 || sh <= 0.0 {
+        return None;
+    }
+    // Judge "decorative" by the declared size, before scaling: a 16×16 icon is
+    // an icon however large we choose to draw it.
+    if sw < MIN_DIMENSION_PX as f32 || sh < MIN_DIMENSION_PX as f32 {
+        tracing::debug!(sw, sh, "skipping decorative svg");
+        return None;
+    }
+    // Vector art has no native resolution, so render straight at the edition's
+    // target width — upscaling a rasterized copy afterwards would only blur it.
+    let target_w = profile
+        .max_width
+        .max(SVG_FALLBACK_SIZE.min(profile.max_width));
+    let scale = (target_w as f32 / sw).min(profile.max_height as f32 / sh);
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let (w, h) = (
+        (sw * scale).round().max(1.0) as u32,
+        (sh * scale).round().max(1.0) as u32,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
+    // E-ink has no transparency; render onto white so alpha never becomes black.
+    pixmap.fill(tiny_skia::Color::WHITE);
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let rgba = image::RgbaImage::from_raw(w, h, pixmap.take_demultiplied())?;
+    let mut png = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut png, ImageFormat::Png)
+        .ok()?;
+    Some(png.into_inner())
 }
 
 /// Composite over an opaque white page — e-ink has no transparency (§3.10).
@@ -302,7 +378,6 @@ fn pending_for_pick(pick: &Pick) -> Vec<PendingImage> {
     }
     refs.into_iter()
         .filter(|r| r.src.starts_with("http://") || r.src.starts_with("https://"))
-        .take(MAX_IMAGES_PER_ARTICLE)
         .enumerate()
         .map(|(i, r)| PendingImage {
             id: format!("img-{entry_id}-{i}"),
@@ -409,8 +484,12 @@ pub(crate) fn tag_name(inner: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Parse `name="value"` pairs out of a tag body.
-fn parse_attrs(inner: &str) -> Vec<(String, String)> {
+/// Parse `name="value"` pairs out of a tag body, with entity-decoded values.
+///
+/// Decoding matters: this scanner reads markup that ammonia has serialized, and
+/// ammonia writes `&` in a URL as `&amp;`. A raw comparison against a URL that
+/// came out of a real HTML parser would never match (§3.10).
+pub(crate) fn parse_attrs(inner: &str) -> Vec<(String, String)> {
     let mut attrs = Vec::new();
     let bytes: Vec<char> = inner.chars().collect();
     let mut i = 0;
@@ -457,9 +536,58 @@ fn parse_attrs(inner: &str) -> Vec<(String, String)> {
                 }
             }
         }
-        attrs.push((name, value));
+        attrs.push((name, decode_entities(&value)));
     }
     attrs
+}
+
+/// Decode the handful of entities an HTML serializer emits inside attributes.
+///
+/// Numeric forms are included because feeds and WordPress write `&#038;` for
+/// `&`; anything else is left alone rather than guessed at.
+pub(crate) fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let Some(end) = tail[..tail.len().min(12)].find(';') else {
+            out.push('&');
+            rest = &tail[1..];
+            continue;
+        };
+        let entity = &tail[1..end];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            "nbsp" => Some('\u{a0}'),
+            _ => entity
+                .strip_prefix('#')
+                .and_then(|n| match n.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                    None => n.parse::<u32>().ok(),
+                })
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Escape a string for use inside a double-quoted XML attribute.
@@ -489,6 +617,40 @@ pub fn text_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// Whether an image we could not embed is worth telling the reader about.
+///
+/// Only descriptive alt text qualifies. A filename, a bare label like `red line`
+/// on a divider rule, or no alt at all carries nothing the reader loses by not
+/// seeing the picture — announcing those turns every decorative graphic and
+/// dead link into a line of clutter, which is how the placeholders got out of
+/// hand in the first place.
+fn alt_is_worth_announcing(alt: &str) -> bool {
+    const MIN_DESCRIPTIVE_WORDS: usize = 4;
+    !alt.is_empty()
+        && !is_filename_alt(alt)
+        && alt.split_whitespace().count() >= MIN_DESCRIPTIVE_WORDS
+}
+
+/// True for alt text that is really just the uploaded filename — `IMG_0808.JPG`,
+/// `cut pieces v01.JPG`, `chart-final-2.png`.
+fn is_filename_alt(alt: &str) -> bool {
+    let alt = alt.trim();
+    if alt.contains(' ') && alt.split_whitespace().count() > 4 {
+        return false;
+    }
+    let Some((stem, ext)) = alt.rsplit_once('.') else {
+        return false;
+    };
+    let ext = ext.to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" | "avif" | "bmp" | "heic"
+    ) && !stem.is_empty()
+        && stem
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
 }
 
 /// Rewrite `<img src>` to the embedded hrefs, replacing misses with the
@@ -531,15 +693,15 @@ pub fn rewrite_img_srcs(html: &str, assets: &[ImageAsset]) -> String {
                         attr_escape(alt)
                     ));
                 }
+                // An image we could not embed is only worth announcing when its
+                // alt text tells the reader something; otherwise the `<img>`
+                // just goes away. That covers the decorative graphics the
+                // re-encoder deliberately skips as well as genuine misses (§3.10).
+                None if !alt_is_worth_announcing(&alt) => {}
                 None => {
-                    let label = if alt.is_empty() {
-                        "image unavailable"
-                    } else {
-                        &alt
-                    };
                     out.push_str(&format!(
                         "<p class=\"image-placeholder\">[image: {}]</p>",
-                        text_escape(label)
+                        text_escape(&alt)
                     ));
                 }
             }
@@ -618,20 +780,76 @@ mod tests {
     #[test]
     fn rewrites_hits_and_placeholders_misses() {
         let assets = vec![asset("https://e.g/a.png", "images/img-1-0.jpg")];
-        let html = r#"<p>x</p><img src="https://e.g/a.png" alt="Alt &amp; more"><img src="https://e.g/gone.png" alt="Missing">"#;
+        let html = r#"<p>x</p><img src="https://e.g/a.png" alt="Alt &amp; more"><img src="https://e.g/gone.png" alt="A chart of missing things">"#;
         let out = rewrite_img_srcs(html, &assets);
-        assert!(out.contains(r#"<img src="images/img-1-0.jpg" alt="Alt &amp;amp; more"/>"#));
-        assert!(out.contains(r#"<p class="image-placeholder">[image: Missing]</p>"#));
+        // The alt round-trips through one level of escaping, not two.
+        assert!(out.contains(r#"<img src="images/img-1-0.jpg" alt="Alt &amp; more"/>"#));
+        assert!(
+            out.contains(r#"<p class="image-placeholder">[image: A chart of missing things]</p>"#)
+        );
         assert!(!out.contains("gone.png"));
     }
 
+    /// The whole point of the fix: ammonia writes `&amp;` into the markup, and
+    /// the asset was keyed on the URL a real parser produced.
     #[test]
-    fn placeholder_falls_back_when_alt_is_missing() {
-        let out = rewrite_img_srcs(r#"<img src="https://e.g/x.png">"#, &[]);
+    fn entity_encoded_urls_still_match_their_asset() {
+        let assets = vec![asset(
+            "https://e.g/a.jpg?id=1&width=980",
+            "images/img-1-0.jpg",
+        )];
+        let html = r#"<img src="https://e.g/a.jpg?id=1&amp;width=980" alt="Chart"/>"#;
+        assert!(rewrite_img_srcs(html, &assets).contains(r#"src="images/img-1-0.jpg""#));
+        // The numeric spelling WordPress emits works too.
+        let html = r#"<img src="https://e.g/a.jpg?id=1&#038;width=980" alt="Chart"/>"#;
+        assert!(rewrite_img_srcs(html, &assets).contains(r#"src="images/img-1-0.jpg""#));
+    }
+
+    #[test]
+    fn unembeddable_images_only_speak_up_when_the_alt_says_something() {
+        // No alt at all: the image simply disappears.
         assert_eq!(
-            out,
-            r#"<p class="image-placeholder">[image: image unavailable]</p>"#
+            rewrite_img_srcs(r#"<img src="https://e.g/x.png">"#, &[]),
+            ""
         );
+        // A filename is not a description.
+        assert_eq!(
+            rewrite_img_srcs(r#"<img src="https://e.g/x.png" alt="IMG_0808.JPG">"#, &[]),
+            ""
+        );
+        // Neither is the label on a decorative divider rule.
+        assert_eq!(
+            rewrite_img_srcs(r#"<img src="https://e.g/rule.png" alt="red line">"#, &[]),
+            ""
+        );
+        // A real description is worth keeping.
+        assert!(
+            rewrite_img_srcs(
+                r#"<img src="https://e.g/x.png" alt="A man in a hard hat stands over a well hole">"#,
+                &[]
+            )
+            .contains("[image: A man in a hard hat stands over a well hole]")
+        );
+    }
+
+    #[test]
+    fn filename_alt_detection() {
+        for yes in [
+            "IMG_0808.JPG",
+            "cut pieces v01.JPG",
+            "chart-final-2.png",
+            "diagram.svg",
+        ] {
+            assert!(is_filename_alt(yes), "{yes} should read as a filename");
+        }
+        for no in [
+            "A hydrogen well head",
+            "",
+            "Fig. 3",
+            "The lion-man of Hohlenstein-Stadel, carved from mammoth ivory.",
+        ] {
+            assert!(!is_filename_alt(no), "{no} should read as a description");
+        }
     }
 
     #[test]
@@ -685,7 +903,37 @@ mod tests {
             .write_to(&mut png, ImageFormat::Png)
             .unwrap();
         assert!(reencode(&png.into_inner(), ImageProfile::STANDARD).is_none());
+        // A bare `<svg>` tag with nothing to draw is markup, not a picture.
         assert!(reencode(b"<svg>not an image</svg>", ImageProfile::STANDARD).is_none());
+        assert!(reencode(b"not an image at all", ImageProfile::STANDARD).is_none());
+    }
+
+    #[test]
+    fn svg_charts_are_rasterized_rather_than_dropped() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">
+            <rect x="10" y="10" width="380" height="280" fill="#3355bb"/>
+            <circle cx="200" cy="150" r="60" fill="#ffcc00"/>
+        </svg>"##;
+        let (bytes, mime) = reencode(svg, ImageProfile::STANDARD).expect("svg rasterizes");
+        assert_eq!(mime, "image/png", "flat colour art stays lossless");
+        let decoded = image::load_from_memory(&bytes).expect("decodable output");
+        // Drawn at the edition's target width, not at the SVG's nominal size.
+        assert_eq!(decoded.dimensions(), (1200, 900));
+        assert!(!decoded.color().has_alpha(), "rendered onto white");
+
+        // An XML prolog and a leading BOM must not hide the format.
+        let with_prolog = format!(
+            "\u{feff}<?xml version=\"1.0\"?>{}",
+            String::from_utf8_lossy(svg)
+        );
+        let (x4, _) = reencode(with_prolog.as_bytes(), ImageProfile::X4).expect("x4 rasterizes");
+        let x4 = image::load_from_memory(&x4).unwrap();
+        assert!(x4.width() <= 480 && x4.height() <= 800);
+
+        // A 16×16 icon is decorative however large we could draw it.
+        let icon = br#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect width="16" height="16"/></svg>"#;
+        assert!(reencode(icon, ImageProfile::STANDARD).is_none());
     }
 
     #[test]
