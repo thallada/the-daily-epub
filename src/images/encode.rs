@@ -6,12 +6,16 @@
 
 use std::io::Cursor;
 
-use image::{DynamicImage, GenericImageView, ImageFormat};
+use image::{DynamicImage, GenericImageView, ImageFormat, ImageReader, Limits};
 
 use crate::types::Edition;
 
 /// Images smaller than this in either dimension are decorative — skipped (§3.10).
 pub const MIN_DIMENSION_PX: u32 = 24;
+/// Maximum width or height accepted from a decoded raster source.
+pub const MAX_DECODED_DIMENSION_PX: u32 = 16_384;
+/// Maximum memory the image decoder may allocate for one source image.
+pub const MAX_DECODE_ALLOC_BYTES: u64 = 512 * 1024 * 1024;
 /// Width an SVG is rendered at when the profile asks for less than this.
 const SVG_FALLBACK_SIZE: u32 = 1000;
 
@@ -60,8 +64,18 @@ pub fn reencode(bytes: &[u8], profile: ImageProfile) -> Option<(Vec<u8>, &'stati
         let raster = rasterize_svg(bytes, profile)?;
         return reencode(&raster, profile);
     }
-    let format = image::guess_format(bytes).ok();
-    let decoded = image::load_from_memory(bytes)
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| tracing::debug!("unrecognized image: {e}"))
+        .ok()?;
+    let format = reader.format();
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_DECODED_DIMENSION_PX);
+    limits.max_image_height = Some(MAX_DECODED_DIMENSION_PX);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
         .map_err(|e| tracing::debug!("undecodable image: {e}"))
         .ok()?;
 
@@ -265,6 +279,20 @@ mod tests {
         // A bare `<svg>` tag with nothing to draw is markup, not a picture.
         assert!(reencode(b"<svg>not an image</svg>", ImageProfile::STANDARD).is_none());
         assert!(reencode(b"not an image at all", ImageProfile::STANDARD).is_none());
+    }
+
+    #[test]
+    fn reencode_rejects_excessive_source_dimensions() {
+        // A narrow image keeps the fixture cheap while exercising the strict
+        // source-dimension limit before any large decoded buffer is allocated.
+        let img = image::GrayImage::new(MAX_DECODED_DIMENSION_PX + 1, MIN_DIMENSION_PX);
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageLuma8(img)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+
+        assert!(reencode(&png.into_inner(), ImageProfile::STANDARD).is_none());
+        assert_eq!(MAX_DECODE_ALLOC_BYTES, 512 * 1024 * 1024);
     }
 
     #[test]

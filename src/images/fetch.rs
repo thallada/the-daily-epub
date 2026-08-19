@@ -11,12 +11,20 @@ use super::refs::{ImgRef, extract_img_refs};
 
 /// Per-image download timeout (§3.10).
 pub const DOWNLOAD_TIMEOUT_SECS: u64 = 10;
-/// Per-image size cap (§3.10).
-pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// Per-image compressed download cap (§3.10).
+///
+/// Source screenshots and lossless artwork can be much larger than the asset we
+/// ultimately embed. Decoded dimensions and allocations are capped separately
+/// by the encoder, and the original bytes are discarded after re-encoding.
+pub const MAX_IMAGE_BYTES: usize = 100 * 1024 * 1024;
 /// Concurrent downloads (§3.10).
 pub const CONCURRENCY: usize = 8;
 /// Whole-issue asset budget (§3.10).
 pub const ISSUE_ASSET_BUDGET_BYTES: usize = 25 * 1024 * 1024;
+
+fn exceeds_download_cap(bytes: usize) -> bool {
+    bytes > MAX_IMAGE_BYTES
+}
 
 /// Download one image, honoring the timeout and size cap (§3.10).
 pub async fn download(http: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
@@ -34,7 +42,7 @@ pub async fn download(http: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
         return None;
     }
     if let Some(len) = resp.content_length()
-        && len as usize > MAX_IMAGE_BYTES
+        && usize::try_from(len).map_or(true, exceeds_download_cap)
     {
         tracing::debug!(url, len, "image exceeds the size cap");
         return None;
@@ -44,7 +52,7 @@ pub async fn download(http: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
     loop {
         match resp.chunk().await {
             Ok(Some(chunk)) => {
-                if buf.len() + chunk.len() > MAX_IMAGE_BYTES {
+                if exceeds_download_cap(buf.len().saturating_add(chunk.len())) {
                     tracing::debug!(url, "image exceeds the size cap mid-stream");
                     return None;
                 }
@@ -156,4 +164,17 @@ pub async fn collect_for_issue(
         "issue images ready"
     );
     assets
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compressed_download_cap_is_large_but_bounded() {
+        assert_eq!(MAX_IMAGE_BYTES, 100 * 1024 * 1024);
+        assert!(!exceeds_download_cap(MAX_IMAGE_BYTES));
+        assert!(exceeds_download_cap(MAX_IMAGE_BYTES + 1));
+        assert!(!exceeds_download_cap(5_790_082));
+    }
 }
