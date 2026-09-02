@@ -44,9 +44,15 @@ End with a concise report (this is what the orchestrator reads): what you implem
 deviation from the plan and why, anything from the step you could not finish, and the exact
 `cargo test` summary line(s). Keep it under 60 lines.
 
-## Host quirk (important)
+## Host notes
 
-On this machine the built-in `apply_patch` tool's filesystem helper fails with
-`bwrap: ... Operation not permitted`. Do not keep retrying it. Edit files through shell commands
-instead (the `apply_patch` CLI invoked from bash works, as do `python3 - <<'EOF'` rewrite scripts,
-`sed -i`, and heredocs). Shell commands, `cargo build`, `cargo test` and `cargo clippy` all work.
+- The `openai-codex` Claude Code plugin sandbox works on this host (bubblewrap fixed 2026-09-02):
+  `apply_patch`, the shell, `cargo build/test/clippy` and the warm `~/.cargo/registry` all work.
+- Inside that sandbox `bind()` on 127.0.0.1 is forbidden, so ten pre-existing tests fail there for
+  environmental reasons: the four `curate::llm::tests::anthropic_*` tests,
+  `extract::tests::relative_urls_resolve_against_the_url_we_landed_on`, and the five
+  `server::tests::*` (the two `tests/m7_server.rs` tests likewise). They are out of scope; do not
+  touch them. Every other test must pass; the orchestrator runs the full suite outside the sandbox.
+- Cargo's registry is already warm; do not add dependencies that would need a network fetch.
+- Work autonomously to completion. Do not stop to ask questions; make the closest-to-plan choice
+  and record it in the final report.
