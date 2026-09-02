@@ -1,6 +1,6 @@
 [package]
 name = "daily-epub"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -20,7 +20,15 @@ image = "0.25.10"
 jiff = { version = "0.2.35", features = ["serde"] }
 libc = "0.2.189"
 rand = "0.10.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "gzip", "json", "charset", "http2", "query", "system-proxy"] }
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "rustls",
+    "gzip",
+    "json",
+    "charset",
+    "http2",
+    "query",
+    "system-proxy",
+] }
 resvg = "0.48.1"
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
