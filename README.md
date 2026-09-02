@@ -15,10 +15,10 @@ publishes the lot over its own OPDS catalog — which doubles as a
 Each article chapter ends with Loved it / Good / Not for me links that feed back into tomorrow's curation.
 
 Steady-state cost is roughly **$1/day**: $0.05–0.30 in DeepSeek tokens plus
-~$0.50–0.80 for the Claude editor, each with its own per-UTC-day ceiling
-(`max_daily_usd` and `anthropic.max_daily_usd`). Those ceilings are runaway
-guards, not accounting — set hard spend limits in both providers' dashboards as
-the real backstop.
+~$0.50–0.80 for the Claude editor and a few cents of Voyage AI embeddings, each
+with its own per-UTC-day ceiling (`max_daily_usd`, `anthropic.max_daily_usd` and
+`voyage.max_daily_usd`). Those ceilings are runaway guards, not accounting — set
+hard spend limits in the providers' dashboards as the real backstop.
 
 - Full design: [`docs/plans/2026-08-15-the-daily-epub.md`](docs/plans/2026-08-15-the-daily-epub.md)
 - Implementation decisions: [`docs/plans/2026-08-15-implementation-notes.md`](docs/plans/2026-08-15-implementation-notes.md)
@@ -29,7 +29,8 @@ the real backstop.
 
 ```
 Miniflux ingest ─▶ dedupe ─▶ extraction ─▶ persist ─▶ social enrichment
-  ─▶ pre-filter ─▶ scoring (DeepSeek) ─▶ editor (Claude) ─▶ comments ─▶ editorial (Claude)
+  ─▶ hygiene ─▶ embeddings (Voyage) + cheap signals ─▶ pre-filter ─▶ scoring (DeepSeek)
+  ─▶ editor (Claude) ─▶ comments ─▶ editorial (Claude)
   ─▶ world briefing ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
 ```
 
@@ -57,6 +58,7 @@ fallback (`fallbacks = "default"`) is enabled on every editor request.
 | **Miniflux** with an API key | the only content source | Settings → API Keys. The client is read-only and never mutates read state. |
 | **DeepSeek API key** | scoring, and the fallback for every editor call | <https://platform.deepseek.com>. Optional: `--skip-llm` runs the whole pipeline without it. |
 | **Anthropic API key** | the editor: selection, summaries, The Brief, the weekly profile rebuild | <https://console.anthropic.com>. Optional: without it every editor call runs on DeepSeek. Set a dashboard spend limit; `anthropic.max_daily_usd` is only a runaway guard. |
+| **Voyage AI API key** | article and interest embeddings behind the learned ranking signals | <https://www.voyageai.com>. Optional: without it (or with `--skip-embeddings`) the run uses cached vectors only and the learned signals are absent, never a penalty. |
 | A 32+ byte random secret | signs the article rating links | `openssl rand -hex 32` |
 | **BookOrbit** library + watched folder | *optional* — a richer library UI on top of the same folder | Delivery does not need it: `daily-epub serve` has its own OPDS catalog over `publish.epub_dir`. If you do run it, create a dedicated "The Daily EPUB" library, enable *Watch folders*, and point `publish.epub_dir` at it. |
 | **Node.js 18+** and a clone of [`epub-to-xtc-converter`](https://github.com/bigbag/epub-to-xtc-converter) | XTC/XTCH output for the Xteink X4 | Optional (`xtc.enabled = false` turns it off). Needs `npm install` **inside `cli/`**, and a settings JSON naming a real TTF/OTF — see below. It has **no global npm bin** — it is invoked as `node <repo>/cli/index.js convert …`, which is why `xtc.command`/`xtc.args` are fully general. |
@@ -79,12 +81,16 @@ sudo install -m0755 target/release/daily-epub /usr/local/bin/
 ### Commands
 
 ```
-daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm]
+daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm] [--skip-embeddings]
 daily-epub serve                # rating endpoints + OPDS catalog + downloads
 daily-epub profile rebuild      # regenerate learned profile adjustments
 daily-epub ratings list --days 90
 daily-epub ratings set --article 42 --label loved --note "excellent"
 daily-epub ratings clear --url https://example.com/article
+daily-epub explain --date YYYY-MM-DD (--article ID | --url URL) [--run-id N]
+daily-epub explain --date YYYY-MM-DD --near-misses [N]
+daily-epub features backfill [--days 30] [--rated-only] [--all] [--yes]
+daily-epub features prune       # stale embeddings + old candidate telemetry
 daily-epub backfill-social      # re-poll social scores for recent articles
 daily-epub db migrate           # run migrations (also automatic on every start)
 ```
@@ -93,6 +99,25 @@ daily-epub db migrate           # run migrations (also automatic on every start)
 articles, curates and **builds both EPUBs into `--out`**, but it does not copy to
 BookOrbit, does not run the retention sweep, does not write the `issues` row and
 does not advance the ingest watermark. It prints the lineup and the cost report.
+
+`--skip-embeddings` reads the embedding cache but makes zero Voyage calls.
+
+`explain` answers "why was this (not) in the paper" from the `candidate_runs`
+row the run persisted for every considered article: the stage it reached and the
+reason it stopped, every raw and normalized signal with its presence and
+effective weight, the top interests, the nearest rated neighbours, any cached
+LLM assessments, and the editor's reason for a pick. `--url` canonicalizes the
+address; an article that is not in the database at all is reported as never
+ingested (a feed problem, not a ranking one). `--near-misses` lists the highest
+ranked articles that were not selected.
+
+`features backfill` embeds the rated and published articles first (the learned
+set), then the standing interests, then — only with `--all` — every other
+article first seen in the window. It prints an estimate and asks before spending
+more than 5M tokens unless `--yes`; a warm cache makes zero calls. `features
+prune` drops embeddings of articles neither rated nor published that are older
+than `curation.ranking.embedding_retention_days`, and `candidate_runs` rows of
+runs older than `curation.ranking.telemetry_retention_days`.
 
 ---
 
@@ -152,6 +177,15 @@ Secrets belong in the environment file, never in the TOML.
 | `anthropic.price_output_per_mtok` | `25.0` | USD per 1M output tokens. |
 | `anthropic.max_daily_usd` | `3.0` | Claude ceiling per UTC day; tripping it moves the remaining editor work to DeepSeek. |
 | `anthropic.max_concurrent_requests` | `4` | Reserved for the parallel editor stages. |
+| `voyage.enabled` | `true` | Embed articles and interests with Voyage AI. `false` ⇒ cached vectors only. |
+| `voyage.base_url` | `https://api.voyageai.com/v1` | `POST {base_url}/embeddings`. |
+| `voyage.model` | `voyage-4-lite` | Embedding model; changing it invalidates the cache. |
+| `voyage.api_key` | — | **`DAILY_EPUB_VOYAGE__API_KEY`**. Absent ⇒ cached vectors only. |
+| `voyage.output_dimension` | `512` | One of 256, 512, 1024, 2048. |
+| `voyage.batch_size` | `32` | Texts per request. |
+| `voyage.max_concurrent_requests` | `4` | Requests in flight. |
+| `voyage.max_input_chars` | `60000` | Per-article cut, on a char boundary. |
+| `voyage.max_daily_usd` | `0.50` | Runaway guard at $0.02/M tokens. |
 | `curation.max_article_count` | `28` | Hard ceiling on issue size. `--max-articles N` lowers it to `min(28, N)` and drags the soft target down with it. Must be ≥ `target_article_count`. |
 | `curation.always_include_feeds` | `[]` | Miniflux feed ids or URL substrings that can never be dropped. |
 | `curation.blocked_domains` | `[]` | Hosts excluded outright. |
@@ -161,6 +195,7 @@ Secrets belong in the environment file, never in the TOML.
 | `curation.feedback.good_value` | `0.35` | Weight for a Good verdict. |
 | `curation.feedback.not_for_me_value` | `-1.0` | Weight for a Not for me verdict. |
 | `curation.feedback.verdicts_in_prompt` | `60` | Recent explicit verdicts included in the system prompt. |
+| `curation.ranking.*` | see below | Every weight, quota, gate and threshold of the personalized ranker. |
 | `editorial.summary_model` | `editor` | `editor` (Claude) or `bulk` (DeepSeek) for the per-article summaries. |
 | `editorial.summary_input_tokens` | `3000` | Article text offered to the summary prompt. |
 | `publish.epub_dir` | `/srv/bookorbit/libraries/daily-epub` | Both EPUB editions land here by atomic copy, and this is the directory the OPDS feed lists. The editions are distinguished by a `(X4)` tag in **both** the filename and `dc:title` — libraries and OPDS clients list books by title, so the filename alone would make them look identical. Point a BookOrbit watched folder at it if you want its UI too. **Renamed from `bookorbit_dir`**; the old key is a hard config error. |
@@ -174,6 +209,27 @@ Secrets belong in the environment file, never in the TOML.
 | `server.public_url` | `https://daily.hallada.net` | Base URL the rating links inside the EPUB are built from. |
 | `server.hmac_secret` | — | **`DAILY_EPUB_SERVER__HMAC_SECRET`** (or `DAILY_EPUB_SECRET`). Without it, generated links are rejected with 403. |
 | `server.basic_auth_user` / `_pass` | unset | Optional Basic auth for `/opds/*` and `/files/*`. |
+
+`[curation.ranking]` holds the ranker's tunables. The learned signals are
+gated: `knn` (rated-neighbour preference) ramps from `knn_floor` (8) to
+`knn_full` (25) rated articles with embeddings, `feed` (feed affinity) from
+`feed_floor` (15) to `feed_full` (40) attributable ratings; below the floor the
+signal is absent. Ratings decay with `rating_half_life_days` (60) over
+`rating_lookback_days` (180); `neighbour_k` (5) neighbours per side and
+`negative_coefficient` (0.75) shape the signal. `triage_max` (800),
+`deep_keep` (120), `shortlist_keep` (60), `assessment_reuse_days` (3),
+`semantic_min_words` (300), `exploration_slots` (5), `[curation.ranking.quotas]`
+(`triage` 60 · `interest` 20 · `knn` 20), `[curation.ranking.weights.utility]`
+and `[curation.ranking.diversity]` (`cluster_threshold` 0.85, `per_cluster_cap`
+2, `utility_protected` 10) are validated now and drive the LLM triage, deep
+assessment and diversification stages as they land.
+`[curation.ranking.weights.preliminary]` (`interest` 0.35 · `knn` 0.25 ·
+`heuristic` 0.20 · `feed` 0.10 · `social` 0.10) blends the cheap signals; weights
+are renormalized over the signals present for each article, so they need not sum
+to 1. `embedding_retention_days` (120) and `telemetry_retention_days` (180) are
+what `features prune` enforces. Validation: weights non-negative; `deep_keep ≥
+shortlist_keep ≥ target_article_count`; `*_full > *_floor`; `0 ≤
+cluster_threshold ≤ 1`; `per_cluster_cap ≥ 1`; Voyage batch size and concurrency ≥ 1.
 
 ---
 
@@ -199,6 +255,7 @@ sudo tee /etc/daily-epub/env >/dev/null <<EOF
 DAILY_EPUB_MINIFLUX__API_KEY=…
 DAILY_EPUB_DEEPSEEK__API_KEY=…
 DAILY_EPUB_ANTHROPIC__API_KEY=…
+DAILY_EPUB_VOYAGE__API_KEY=…
 DAILY_EPUB_SERVER__HMAC_SECRET=$(openssl rand -hex 32)
 EOF
 sudo chown daily-epub:daily-epub /etc/daily-epub/env && sudo chmod 0600 /etc/daily-epub/env
@@ -440,7 +497,8 @@ server. The stages themselves:
 
 ```text
 miniflux.rs   ingest            curate/       scoring and selection
-dedupe.rs     clustering          prefilter, llm, score, select, editorial
+dedupe.rs     clustering          prefilter, llm, score, select, editorial,
+                                  embedding, signals, telemetry
 extract.rs    body text           profile/    the reader's taste profile
 images/       article images    comments.rs   discussion chapters
   normalize     usable <img>    world.rs      the world briefing
@@ -511,10 +569,15 @@ From spec §7, plus what implementation turned up:
   stack, so `curate/llm.rs` speaks the OpenAI-compatible wire protocol over the
   shared `reqwest` client instead, behind a `ChatBackend` trait. The dependency
   was removed.
-- **Two providers are wired**, DeepSeek (bulk) and Anthropic (editor), each a
-  `ChatBackend` impl with its own `UsageMeter` and price table. A third means
-  another impl.
-- **No embedding-based personal ranker yet** (spec §3.9 future work); the schema
-  is ready for it once ~200 ratings exist.
+- **Two chat providers are wired**, DeepSeek (bulk) and Anthropic (editor),
+  each a `ChatBackend` impl with its own `UsageMeter` and price table. A third
+  means another impl. Voyage AI embeddings sit behind the analogous
+  `EmbeddingBackend` trait in `curate/embedding.rs`.
+- **The learned signals are computed but do not yet gate selection.** Every
+  eligible article gets interest, rated-neighbour, feed-affinity, social and
+  heuristic signals persisted to `candidate_runs.signals_json` (read them with
+  `explain`), while the heuristic pre-filter still decides what the LLM sees.
+  The rated-neighbour and feed signals stay absent until their gates open
+  (8 and 15 ratings respectively).
 - **One reader, one issue per day.** There is no multi-user support and no
   weekly/retrospective edition (spec §6).

@@ -3,6 +3,7 @@
 //! Everything of substance lives in the library (`src/lib.rs`); this binary only
 //! parses flags, loads config, opens the database and dispatches.
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -10,6 +11,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 use daily_epub::config::Config;
+use daily_epub::curate::embedding::{self, BACKFILL_CONFIRM_TOKENS};
+use daily_epub::curate::telemetry;
 use daily_epub::db::Db;
 use daily_epub::pipeline::{self, GenerateOptions, GenerateOutcome};
 use daily_epub::report::RunReport;
@@ -40,6 +43,11 @@ enum Command {
     /// Inspect and edit explicit article verdicts.
     #[command(subcommand)]
     Ratings(RatingsCommand),
+    /// Why an article was (not) in the paper, from persisted run telemetry.
+    Explain(ExplainArgs),
+    /// Embedding cache and telemetry maintenance.
+    #[command(subcommand)]
+    Features(FeaturesCommand),
     /// Re-poll social scores for recent entries.
     BackfillSocial(BackfillSocialArgs),
     /// Database maintenance.
@@ -64,6 +72,9 @@ struct GenerateArgs {
     /// Skip every LLM call: prefilter order selects, excerpts stand in for summaries.
     #[arg(long)]
     skip_llm: bool,
+    /// Use cached embeddings only: zero Voyage calls.
+    #[arg(long)]
+    skip_embeddings: bool,
 }
 
 impl From<&GenerateArgs> for GenerateOptions {
@@ -74,6 +85,7 @@ impl From<&GenerateArgs> for GenerateOptions {
             out: args.out.clone(),
             max_articles: args.max_articles,
             skip_llm: args.skip_llm,
+            skip_embeddings: args.skip_embeddings,
         }
     }
 }
@@ -158,6 +170,55 @@ struct RatingsClearArgs {
     url: Option<String>,
 }
 
+/// `explain --date D (--article ID | --url URL) [--run-id N]` or
+/// `explain --date D --near-misses [N]` (plan §15.2).
+#[derive(Debug, clap::Args)]
+struct ExplainArgs {
+    /// Issue date whose run to read.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    date: String,
+    /// Article id, as printed by `ratings list` or `explain --near-misses`.
+    #[arg(
+        long,
+        required_unless_present_any = ["url", "near_misses"],
+        conflicts_with_all = ["url", "near_misses"]
+    )]
+    article: Option<ArticleId>,
+    /// Article URL; canonicalized before lookup.
+    #[arg(long, conflicts_with = "near_misses")]
+    url: Option<String>,
+    /// A specific run of that date instead of the latest non-dry one.
+    #[arg(long, value_name = "N")]
+    run_id: Option<i64>,
+    /// The top N articles that were considered but not selected (default 10).
+    #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "10")]
+    near_misses: Option<usize>,
+}
+
+#[derive(Debug, Subcommand)]
+enum FeaturesCommand {
+    /// Embed rated and published articles, then interests, into the cache.
+    Backfill(BackfillArgs),
+    /// Drop stale embeddings and old candidate telemetry per the retention config.
+    Prune,
+}
+
+#[derive(Debug, clap::Args)]
+struct BackfillArgs {
+    /// Window for published (and, with --all, other) articles.
+    #[arg(long, default_value_t = 30)]
+    days: i64,
+    /// Only the rated set.
+    #[arg(long, conflicts_with = "all")]
+    rated_only: bool,
+    /// Also every other article first seen inside the window.
+    #[arg(long)]
+    all: bool,
+    /// Skip the confirmation prompt above the token threshold.
+    #[arg(long)]
+    yes: bool,
+}
+
 #[derive(Debug, clap::Args)]
 struct BackfillSocialArgs {
     /// How many days back to re-poll.
@@ -195,6 +256,14 @@ async fn main() -> Result<()> {
         Command::Ratings(command) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
             cmd_ratings(&config, &db, command).await?;
+        }
+        Command::Explain(args) => {
+            let db = Db::open_and_migrate(&config.database_path).await?;
+            cmd_explain(&db, args).await?;
+        }
+        Command::Features(command) => {
+            let db = Db::open_and_migrate(&config.database_path).await?;
+            cmd_features(&config, &db, command).await?;
         }
         Command::BackfillSocial(args) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
@@ -270,18 +339,27 @@ fn print_report(report: &RunReport) {
         report.counts.duplicates_merged,
         report.counts.entries_dropped,
     );
-    if report.counts.llm_unscored > 0 {
-        println!(
-            "curation: {} scored · {} unscored · {} selected",
-            report.counts.llm_scored, report.counts.llm_unscored, report.counts.selected,
-        );
-    }
+    let unscored = if report.counts.llm_unscored > 0 {
+        format!(" ({} unscored)", report.counts.llm_unscored)
+    } else {
+        String::new()
+    };
     println!(
-        "tokens: {} input · {} cache read · {} cache write · {} output = ${:.4}",
+        "curation: {} eligible · {} embedded · {} rated w/ embeddings → {} candidates → {} scored{unscored} → {} selected",
+        report.counts.eligible,
+        report.counts.embedded,
+        report.counts.rated_with_embeddings,
+        report.counts.candidates,
+        report.counts.llm_scored,
+        report.counts.selected,
+    );
+    println!(
+        "tokens: {} input · {} cache read · {} cache write · {} output · {} voyage = ${:.4}",
         report.usage.input_tokens,
         report.usage.cached_tokens,
         report.usage.cache_write_tokens,
         report.usage.output_tokens,
+        report.voyage_tokens,
         report.cost_usd,
     );
     for (provider, usage) in &report.provider_costs {
@@ -294,6 +372,10 @@ fn print_report(report: &RunReport) {
             usage.cost_usd,
         );
     }
+    println!(
+        "  voyage: {} tokens = ${:.4}",
+        report.voyage_tokens, report.voyage_cost_usd
+    );
     for warning in &report.warnings {
         println!("warning: {warning}");
     }
@@ -478,6 +560,101 @@ async fn cmd_ratings(config: &Config, db: &Db, command: RatingsCommand) -> Resul
     Ok(())
 }
 
+async fn cmd_explain(db: &Db, args: ExplainArgs) -> Result<()> {
+    let date: jiff::civil::Date = args
+        .date
+        .parse()
+        .with_context(|| format!("invalid --date {:?}, expected YYYY-MM-DD", args.date))?;
+    let text = if let Some(limit) = args.near_misses {
+        telemetry::explain_near_misses(db, date, args.run_id, limit).await?
+    } else {
+        let target = match (args.article, args.url) {
+            (Some(id), _) => telemetry::ExplainTarget::Article(id),
+            (None, Some(url)) => telemetry::ExplainTarget::Url(url),
+            (None, None) => anyhow::bail!("provide --article, --url or --near-misses"),
+        };
+        telemetry::explain(db, date, args.run_id, &target).await?
+    };
+    print!("{text}");
+    Ok(())
+}
+
+async fn cmd_features(config: &Config, db: &Db, command: FeaturesCommand) -> Result<()> {
+    match command {
+        FeaturesCommand::Backfill(args) => {
+            if !config.voyage.enabled {
+                anyhow::bail!("voyage.enabled is false; nothing to backfill");
+            }
+            let service = embedding::EmbeddingService::real(db.clone(), config.voyage.clone())
+                .context("building the Voyage client")?;
+            let opts = embedding::BackfillOptions {
+                days: args.days,
+                rated_only: args.rated_only,
+                all: args.all,
+            };
+            let plan = embedding::plan_backfill(db, config, &service, &opts).await?;
+            println!(
+                "backfill: {} articles ({} learned, {} other) + {} interests to embed, {} already cached",
+                plan.article_count(),
+                plan.learned.len(),
+                plan.others.len(),
+                plan.interests.len(),
+                plan.cached
+            );
+            if plan.is_empty() {
+                println!("cache is warm; nothing to do");
+                return Ok(());
+            }
+            println!(
+                "estimate: ~{} tokens ≈ ${:.4} with {} at ${:.2}/M",
+                plan.estimated_tokens,
+                plan.estimated_cost_usd(),
+                config.voyage.model,
+                embedding::VOYAGE_PRICE_PER_MTOK
+            );
+            if plan.estimated_tokens > BACKFILL_CONFIRM_TOKENS
+                && !args.yes
+                && !confirm("continue?")?
+            {
+                println!("aborted");
+                return Ok(());
+            }
+            let outcome = embedding::run_backfill(&service, &plan).await?;
+            println!(
+                "embedded {} articles and {} interests · {} tokens · ${:.4}",
+                outcome.articles_embedded,
+                outcome.interests_embedded,
+                outcome.tokens,
+                outcome.cost_usd
+            );
+        }
+        FeaturesCommand::Prune => {
+            let ranking = &config.curation.ranking;
+            let (embeddings, rows) = telemetry::prune(
+                db,
+                ranking.embedding_retention_days,
+                ranking.telemetry_retention_days,
+                jiff::Timestamp::now(),
+            )
+            .await?;
+            println!(
+                "pruned {embeddings} embeddings older than {} days and {rows} candidate rows older than {} days",
+                ranking.embedding_retention_days, ranking.telemetry_retention_days
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A y/N question on stdin; anything but a leading `y` is a no.
+fn confirm(question: &str) -> Result<bool> {
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().to_lowercase().starts_with('y'))
+}
+
 async fn cmd_backfill_social(db: &Db, days: u32) -> Result<()> {
     let http = http::build_client(http::DEFAULT_TIMEOUT)?;
     let enricher = social::SocialEnricher::new(http, db.clone());
@@ -509,6 +686,7 @@ mod tests {
             "--max-articles",
             "6",
             "--skip-llm",
+            "--skip-embeddings",
         ])
         .unwrap();
         match cli.command {
@@ -518,10 +696,11 @@ mod tests {
                 assert_eq!(a.out, Some(PathBuf::from("./out")));
                 assert_eq!(a.max_articles, Some(6));
                 assert!(a.skip_llm);
+                assert!(a.skip_embeddings);
 
                 let opts = GenerateOptions::from(&a);
                 assert_eq!(opts.date.as_deref(), Some("2026-08-15"));
-                assert!(opts.dry_run && opts.skip_llm);
+                assert!(opts.dry_run && opts.skip_llm && opts.skip_embeddings);
                 assert_eq!(opts.max_articles, Some(6));
             }
             other => panic!("expected generate, got {other:?}"),
@@ -581,6 +760,129 @@ mod tests {
 
         let cli = Cli::try_parse_from(["daily-epub", "--config", "/tmp/x.toml", "serve"]).unwrap();
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/x.toml")));
+    }
+
+    #[test]
+    fn parses_explain_and_features() {
+        match Cli::try_parse_from([
+            "daily-epub",
+            "explain",
+            "--date",
+            "2026-09-02",
+            "--article",
+            "42",
+            "--run-id",
+            "7",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Explain(args) => {
+                assert_eq!(args.date, "2026-09-02");
+                assert_eq!(args.article, Some(42));
+                assert_eq!(args.run_id, Some(7));
+                assert_eq!(args.near_misses, None);
+            }
+            other => panic!("expected explain, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "daily-epub",
+            "explain",
+            "--date",
+            "2026-09-02",
+            "--url",
+            "https://example.com/post",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Explain(args) => {
+                assert_eq!(args.url.as_deref(), Some("https://example.com/post"))
+            }
+            other => panic!("expected explain, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "daily-epub",
+            "explain",
+            "--date",
+            "2026-09-02",
+            "--near-misses",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Explain(args) => assert_eq!(args.near_misses, Some(10)),
+            other => panic!("expected explain, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "daily-epub",
+            "explain",
+            "--date",
+            "2026-09-02",
+            "--near-misses",
+            "3",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Explain(args) => assert_eq!(args.near_misses, Some(3)),
+            other => panic!("expected explain, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["daily-epub", "explain", "--date", "2026-09-02"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "daily-epub",
+                "explain",
+                "--date",
+                "2026-09-02",
+                "--article",
+                "1",
+                "--near-misses"
+            ])
+            .is_err()
+        );
+
+        match Cli::try_parse_from([
+            "daily-epub",
+            "features",
+            "backfill",
+            "--days",
+            "60",
+            "--all",
+            "--yes",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Features(FeaturesCommand::Backfill(args)) => {
+                assert_eq!(args.days, 60);
+                assert!(args.all && args.yes && !args.rated_only);
+            }
+            other => panic!("expected features backfill, got {other:?}"),
+        }
+        match Cli::try_parse_from(["daily-epub", "features", "backfill"])
+            .unwrap()
+            .command
+        {
+            Command::Features(FeaturesCommand::Backfill(args)) => assert_eq!(args.days, 30),
+            other => panic!("expected features backfill, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "daily-epub",
+                "features",
+                "backfill",
+                "--rated-only",
+                "--all"
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["daily-epub", "features", "prune"])
+                .unwrap()
+                .command,
+            Command::Features(FeaturesCommand::Prune)
+        ));
     }
 
     #[tokio::test]

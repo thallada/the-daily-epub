@@ -125,6 +125,16 @@ pub fn load_profile(path: &Path) -> anyhow::Result<ProfileFile> {
     }
 }
 
+/// Load the exact standing-interest union used in the system prompt.
+pub fn load_standing_interests(
+    opml_path: &Path,
+    profile_path: &Path,
+) -> anyhow::Result<Vec<String>> {
+    let opml = parse_interests(opml_path)?;
+    let profile = load_profile(profile_path)?;
+    Ok(union_interests(opml, profile.interests))
+}
+
 fn union_interests(opml: Vec<String>, profile: Vec<String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();

@@ -67,6 +67,12 @@ pub struct StageCounts {
     pub excerpt_only: i64,
     /// Social lookups that returned a hit (§3.4).
     pub social_hits: i64,
+    /// Articles passing hygiene and eligible for personalized signals.
+    pub eligible: i64,
+    /// Eligible articles with a valid embedding.
+    pub embedded: i64,
+    /// Current rated articles with a valid embedding.
+    pub rated_with_embeddings: i64,
     /// Articles surviving the heuristic pre-filter (§3.5).
     pub candidates: i64,
     /// Articles scored by the LLM (§3.6 stage A).
@@ -113,10 +119,13 @@ pub struct RunReport {
     pub counts: StageCounts,
     /// Aggregate usage retained for the legacy `runs` columns.
     pub usage: TokenUsage,
-    /// Provider-keyed usage and cost written to `runs.provider_costs_json`.
+    /// LLM provider-keyed usage and cost written to `runs.provider_costs_json`.
     pub provider_costs: BTreeMap<String, ProviderUsage>,
     /// Resolved curation/editorial/model settings for this run.
     pub config_json: serde_json::Value,
+    /// Voyage document/query tokens and cost for this run.
+    pub voyage_tokens: i64,
+    pub voyage_cost_usd: f64,
     pub cost_usd: f64,
     pub timings: StageTimings,
     /// Ingest window actually used, RFC3339 (§3.1).
@@ -141,6 +150,8 @@ impl RunReport {
             usage: TokenUsage::default(),
             provider_costs: BTreeMap::new(),
             config_json: serde_json::Value::Null,
+            voyage_tokens: 0,
+            voyage_cost_usd: 0.0,
             cost_usd: 0.0,
             timings: StageTimings::default(),
             window_start: None,
@@ -163,11 +174,12 @@ impl RunReport {
         self.error = Some(err.to_string());
     }
 
-    /// Stamp the end time, total provider costs and settle the status.
+    /// Stamp the end time, total provider costs (LLM providers plus Voyage) and
+    /// settle the status.
     pub fn finish(&mut self, finished_at: Timestamp) {
         self.finished_at = Some(finished_at);
         self.usage = TokenUsage::default();
-        self.cost_usd = 0.0;
+        self.cost_usd = self.voyage_cost_usd;
         for provider in self.provider_costs.values() {
             self.usage.add(provider.usage);
             self.cost_usd += provider.cost_usd;
@@ -198,11 +210,12 @@ impl RunReport {
     /// Compact human-readable summary printed at the end of `generate`.
     pub fn summary_line(&self) -> String {
         format!(
-            "{} [{}] {} entries → {} articles → {} candidates → {} selected · ${:.4} · {}s",
+            "{} [{}] {} entries → {} articles → {} eligible → {} candidates → {} selected · ${:.4} · {}s",
             self.date,
             self.status,
             self.counts.entries_fetched,
             self.counts.articles,
+            self.counts.eligible,
             self.counts.candidates,
             self.counts.selected,
             self.cost_usd,
@@ -257,9 +270,12 @@ mod tests {
                 cost_usd: 0.05,
             },
         );
+        r.voyage_tokens = 250_000;
+        r.voyage_cost_usd = 0.005;
         r.finish(ts("2026-08-15T05:36:00Z"));
         assert_eq!(r.status, RunStatus::Ok);
-        assert!((r.cost_usd - 0.4728).abs() < 1e-9);
+        // LLM providers plus Voyage; Voyage tokens stay out of the LLM aggregate.
+        assert!((r.cost_usd - 0.4778).abs() < 1e-9);
         // The legacy aggregate columns are the sum across providers.
         assert_eq!(r.usage, usage(1_000_100, 1_003_000, 2_000, 1_000_800));
         assert_eq!(r.duration_secs(), Some(360));
