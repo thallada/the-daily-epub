@@ -18,6 +18,13 @@ brief was handed to an implementation agent as `cat 00-preamble.md stepN.md`.
 | 6. Paper telemetry, stats, lock | **done** (Claude agent), reviewed | `d261cd4` |
 | 7. Cleanup + implementation notes | **done** (Claude agent), reviewed | `d403c51` |
 
+**Post-plan addition (same day):** a provider-agnostic LLM registry — `[llm]` roles (`bulk`,
+`editor`) over named `[providers.*]` entries of `kind = openai | anthropic`, keys from
+`DAILY_EPUB_PROVIDERS__<NAME>__API_KEY`, a `gemini` entry (Gemini 3.8 Flash via Google's
+OpenAI-compatible endpoint) declared but unreferenced, and a `daily-epub config check` subcommand.
+The old `[deepseek]`/`[anthropic]` tables, top-level `max_daily_usd` and the old key env vars
+fail loudly. The server upgrade is written up in `docs/runbooks/curation-v2-migration.md`.
+
 All seven plan steps are implemented. `cargo fmt --check`, `cargo clippy --all-targets`
 (including `-W dead_code`) and `cargo test` (329 lib tests + 6 bin tests + the 7 integration suites) are green at HEAD.
 
@@ -124,7 +131,8 @@ Step 7:
 
 ## Next session: what remains
 
-1. `git checkout curation-v2 && cargo test` (expect green).
+1. `git checkout curation-v2 && cargo test` (expect green). Follow
+   `docs/runbooks/curation-v2-migration.md` on the server.
 2. Optional: a Codex `review --background --scope branch --base main` pass over the whole branch.
 3. `git merge --no-ff curation-v2` into `main`, build, deploy, and do the operator to-dos above.
 4. After a week of real runs: read `stats`, tune `[curation.ranking]` from what `explain` shows,

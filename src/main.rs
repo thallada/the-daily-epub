@@ -55,6 +55,15 @@ enum Command {
     /// Database maintenance.
     #[command(subcommand)]
     Db(DbCommand),
+    /// Inspect the resolved configuration.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Load and validate the config as `generate` would, then print one fact per line.
+    Check,
 }
 
 #[derive(Debug, clap::Args)]
@@ -309,6 +318,14 @@ async fn main() -> Result<()> {
             db.migrate().await?;
             println!("migrations up to date: {}", config.database_path.display());
         }
+        Command::Config(ConfigCommand::Check) => {
+            // Reaching here means `Config::load` already validated it; a bad
+            // config exited non-zero above. Nothing is opened, nothing locked.
+            let path = Config::resolve_path(cli.config.as_deref());
+            for line in config.check_report(path.as_deref()) {
+                println!("{line}");
+            }
+        }
     }
     Ok(())
 }
@@ -327,7 +344,8 @@ fn lock_holder(command: &Command) -> Option<&'static str> {
         | Command::Explain(_)
         | Command::Stats(_)
         | Command::Features(FeaturesCommand::Prune)
-        | Command::Db(_) => None,
+        | Command::Db(_)
+        | Command::Config(_) => None,
     }
 }
 
@@ -463,13 +481,7 @@ fn print_lineup(issue: &daily_epub::types::Issue) {
 
 /// `profile rebuild` runs on the editor when configured, else bulk (§14.3).
 async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<()> {
-    use curate::llm::{Llms, PriceTable, UsageMeter};
-    let bulk_meter =
-        UsageMeter::with_prices(PriceTable::deepseek(&config.deepseek), config.max_daily_usd);
-    let editor_meter = UsageMeter::with_prices(
-        PriceTable::anthropic(&config.anthropic),
-        config.anthropic.max_daily_usd,
-    );
+    use curate::llm::{Llms, provider_meters};
     let profile = curate::profile::load_or_build(
         db,
         &config.interests_opml,
@@ -477,19 +489,23 @@ async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<()> {
         config.curation.feedback.verdicts_in_prompt,
     )
     .await?;
-    let llms = Llms::from_config(
-        &config.deepseek,
-        &config.anthropic,
-        profile.text,
-        bulk_meter,
-        editor_meter,
-    );
+    let llms = Llms::from_config(config, profile.text, &provider_meters(config));
     let Some(llm) = llms.editor_or_bulk() else {
+        let keys = config
+            .referenced_providers()
+            .iter()
+            .map(|(name, _)| daily_epub::config::ProviderConfig::api_key_env_var(name))
+            .collect::<Vec<_>>();
         anyhow::bail!(
-            "no LLM provider is configured; set DAILY_EPUB_ANTHROPIC__API_KEY or DAILY_EPUB_DEEPSEEK__API_KEY"
+            "no LLM provider is available; assign [llm] roles and set {}",
+            if keys.is_empty() {
+                "a provider key".to_string()
+            } else {
+                keys.join(" or ")
+            }
         );
     };
-    tracing::info!(provider = llm.provider, model = %llm.model, "rebuilding the profile");
+    tracing::info!(provider = llm.provider(), model = %llm.model, "rebuilding the profile");
     let rebuilt = curate::profile::rebuild(
         db,
         llm,
@@ -841,9 +857,21 @@ mod tests {
             vec!["ratings", "list"],
             vec!["db", "migrate"],
             vec!["features", "prune"],
+            vec!["config", "check"],
         ] {
             assert_eq!(lock_holder(&parse(&args)), None, "{args:?}");
         }
+    }
+
+    #[test]
+    fn parses_config_check() {
+        assert!(matches!(
+            Cli::try_parse_from(["daily-epub", "--config", "/etc/x.toml", "config", "check"])
+                .unwrap()
+                .command,
+            Command::Config(ConfigCommand::Check)
+        ));
+        assert!(Cli::try_parse_from(["daily-epub", "config"]).is_err());
     }
 
     #[test]

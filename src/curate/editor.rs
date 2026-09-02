@@ -637,7 +637,7 @@ pub fn select_without_llm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AnthropicConfig, CurationConfig, DeepseekConfig};
+    use crate::config::{CurationConfig, ProviderConfig};
     use crate::curate::llm::{ChatBackend, LlmClient, MockBackend, PriceTable, UsageMeter};
     use crate::curate::prefilter::tests::article;
     use crate::curate::signals::{Neighbour, TopInterest};
@@ -696,9 +696,9 @@ mod tests {
 
     fn mock(provider: &'static str, backend: Arc<MockBackend>, limit: f64) -> LlmClient {
         let prices = if provider == "anthropic" {
-            PriceTable::anthropic(&AnthropicConfig::default())
+            PriceTable::from(&ProviderConfig::anthropic())
         } else {
-            PriceTable::deepseek(&DeepseekConfig::default())
+            PriceTable::from(&ProviderConfig::deepseek())
         };
         LlmClient::with_backend_options(
             provider,
@@ -1079,9 +1079,7 @@ mod tests {
     #[tokio::test]
     async fn refusal_on_the_editor_falls_back_to_bulk_with_the_same_prompt() {
         let editor = Arc::new(MockBackend::new());
-        editor.push_llm_error(LlmError::Refusal {
-            provider: "anthropic",
-        });
+        editor.push_llm_error(LlmError::refusal("anthropic"));
         let bulk = Arc::new(MockBackend::new());
         bulk.push(picks_json(5), TokenUsage::default());
         let llms = editor_and_bulk(Arc::clone(&editor), Arc::clone(&bulk));

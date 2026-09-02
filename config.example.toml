@@ -3,18 +3,19 @@
 # Load order (later wins): built-in defaults ← this file ← `DAILY_EPUB_*` env vars.
 # Nested keys use a double underscore in env vars, e.g.
 #   DAILY_EPUB_MINIFLUX__API_KEY=...
-#   DAILY_EPUB_DEEPSEEK__API_KEY=...
-#   DAILY_EPUB_ANTHROPIC__API_KEY=...
+#   DAILY_EPUB_PROVIDERS__DEEPSEEK__API_KEY=...
+#   DAILY_EPUB_PROVIDERS__ANTHROPIC__API_KEY=...
+#   DAILY_EPUB_PROVIDERS__GEMINI__API_KEY=...
 #   DAILY_EPUB_VOYAGE__API_KEY=...
 #   DAILY_EPUB_SERVER__HMAC_SECRET=...
 #   DAILY_EPUB_LOOKBACK_HOURS=30
+#   DAILY_EPUB_LLM__EDITOR=gemini      # one-off role override, no file edit
 
 timezone = "America/New_York"
 lookback_hours = 26
 target_article_count = 20
 retention_days = 21                  # EPUBs, by age
 xtc_retention_count = 5              # XTC issues, by count (~80-100 MB each)
-max_daily_usd = 2.0                  # DeepSeek ceiling per UTC day; [anthropic] and [voyage] have their own
 world_briefing = true
 
 # SQLite database file. Parent directories are created on demand.
@@ -32,37 +33,66 @@ base_url = "http://127.0.0.1:8082"
 # api_key via DAILY_EPUB_MINIFLUX__API_KEY env
 page_limit = 250
 
-[deepseek]
+# The two LLM roles, each assigned to a provider declared in [providers.*]
+# below. Switching the editor to Gemini is `editor = "gemini"` plus its key in
+# the env file; nothing else changes. An empty editor ("") runs everything on
+# the bulk provider. Every editor call degrades to bulk when the editor's key
+# is missing, its daily ceiling is hit, or the API refuses/fails.
+[llm]
+bulk = "deepseek"                    # triage, deep assessment, and every fallback
+editor = "anthropic"                 # lineup, summaries, The Brief, the weekly profile rebuild
+triage_batch_size = 25               # articles per first-pass triage request
+deep_batch_size = 8                  # articles per close-reading assessment request
+score_temperature = 0.3              # sent only by providers that take a temperature (kind = "openai")
+editorial_temperature = 0.8          # summaries and The Brief on an openai-kind provider
+
+# The provider registry. Any number of entries; a role above names one by its
+# table name. Keys never live here: DAILY_EPUB_PROVIDERS__<NAME>__API_KEY.
+# `max_daily_usd` is a per-provider runaway guard per UTC day (0 = none), not
+# accounting — set hard spend limits in each provider's dashboard as well.
+# Prices are USD per 1M tokens and only feed the guard's arithmetic.
+[providers.deepseek]
+kind = "openai"                      # openai | anthropic
 base_url = "https://api.deepseek.com/v1"
 model = "deepseek-v4-flash"          # DeepSeek-V4-Flash-0731 (confirmed 2026-08-15)
-# api_key via DAILY_EPUB_DEEPSEEK__API_KEY env
-deep_batch_size = 8                  # articles per close-reading assessment request
-triage_batch_size = 25               # articles per first-pass triage request
+# api_key via DAILY_EPUB_PROVIDERS__DEEPSEEK__API_KEY env
+max_daily_usd = 2.0
 max_concurrent_requests = 4          # triage and deep-assessment batches in flight
-score_temperature = 0.3
-editorial_temperature = 0.8          # used only when DeepSeek is the fallback editor
-# USD per 1M tokens, used for the cost guardrail.
 price_input_per_mtok = 0.14
-price_cached_input_per_mtok = 0.0028
+price_cache_read_per_mtok = 0.0028   # prefix-cache hits
+price_cache_write_per_mtok = 0.0     # DeepSeek caches implicitly, no write charge
 price_output_per_mtok = 0.28
 
-# Claude is the editor: selection, summaries, The Brief and the weekly profile
-# rebuild. Every call degrades to DeepSeek when the key is missing, the daily
-# ceiling is hit, or the API refuses/fails. Server-side refusal fallback
-# (`fallbacks = "default"`) is always on. Set a spend limit in the Anthropic
-# dashboard too: `max_daily_usd` is a runaway guard, not accounting.
-[anthropic]
-enabled = true
+# Claude Opus 5 over the Messages API. Requests carry `output_config.effort`,
+# a cached system block, and `fallbacks = "default"` so a classifier refusal is
+# re-routed server-side; a refusal that still comes back degrades to bulk.
+[providers.anthropic]
+kind = "anthropic"
 base_url = "https://api.anthropic.com"
 model = "claude-opus-5"
-# api_key via DAILY_EPUB_ANTHROPIC__API_KEY env
-effort = "high"                      # low | medium | high | xhigh | max
+# api_key via DAILY_EPUB_PROVIDERS__ANTHROPIC__API_KEY env
+effort = "high"                      # low | medium | high | xhigh | max → output_config.effort
+max_daily_usd = 3.0
+max_concurrent_requests = 4          # summaries in flight when this is the summary provider
 price_input_per_mtok = 5.0
-price_cache_write_per_mtok = 6.25
 price_cache_read_per_mtok = 0.5
+price_cache_write_per_mtok = 6.25
 price_output_per_mtok = 25.0
+
+# Gemini 3.8 Flash through Google's OpenAI-compatible endpoint (beta, verified
+# 2026-09-02). Declared but unreferenced until a role names it.
+[providers.gemini]
+kind = "openai"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+model = "gemini-3.8-flash"
+# api_key via DAILY_EPUB_PROVIDERS__GEMINI__API_KEY env
+effort = "high"                      # minimal | low | medium | high → reasoning_effort
 max_daily_usd = 3.0
 max_concurrent_requests = 4
+price_input_per_mtok = 0.75          # promotional through 2026-12-31; $1.50 from 2027-01-01
+price_cache_read_per_mtok = 0.075    # implicit cache hits; $0.15 from 2027-01-01
+price_cache_write_per_mtok = 0.0
+price_output_per_mtok = 3.75         # includes thinking tokens; $7.50 from 2027-01-01
 
 # Voyage AI embeddings behind the interest and rated-neighbour signals. Set
 # `enabled = false` (or leave the key unset) and the paper still builds: the
@@ -154,7 +184,7 @@ per_cluster_cap = 2
 utility_protected = 10
 
 [editorial]
-summary_model = "editor"             # editor (Claude) | bulk (DeepSeek)
+summary_model = "editor"             # editor | bulk — which [llm] role writes the summaries
 summary_input_tokens = 3000          # article text offered per summary
 
 [publish]

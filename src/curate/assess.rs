@@ -481,8 +481,8 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CurationConfig, DeepseekConfig};
-    use crate::curate::llm::{MockBackend, UsageMeter};
+    use crate::config::{CurationConfig, ProviderConfig};
+    use crate::curate::llm::{MockBackend, PriceTable, UsageMeter};
     use crate::curate::prefilter::tests::{article, with_social};
     use crate::curate::signals::{Neighbour, TopInterest};
     use crate::types::{TokenUsage, Triage};
@@ -520,7 +520,7 @@ mod tests {
         LlmClient::with_backend(
             "deepseek-v4-flash",
             "SYSTEM".into(),
-            UsageMeter::new(&DeepseekConfig::default(), limit_usd),
+            UsageMeter::with_prices(PriceTable::from(&ProviderConfig::deepseek()), limit_usd),
             backend,
         )
     }

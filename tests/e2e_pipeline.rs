@@ -570,9 +570,9 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
         usage,
     );
 
-    let meter = UsageMeter::new(&cfg.deepseek, cfg.max_daily_usd);
+    let meter = UsageMeter::for_provider(&cfg.providers["deepseek"]);
     let llm = LlmClient::with_backend(
-        &cfg.deepseek.model,
+        &cfg.providers["deepseek"].model,
         "You are the editor of The Daily EPUB.".into(),
         meter.clone(),
         backend.clone(),
@@ -642,9 +642,9 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
     let colophon = Colophon {
         provider_costs: BTreeMap::from([("deepseek".to_string(), meter.cost_usd())]),
         models: Models {
-            bulk: cfg.deepseek.model.clone(),
-            editor: format!("{} (bulk fallback)", cfg.deepseek.model),
-            summaries: cfg.deepseek.model.clone(),
+            bulk: cfg.providers["deepseek"].model.clone(),
+            editor: format!("{} (bulk fallback)", cfg.providers["deepseek"].model),
+            summaries: cfg.providers["deepseek"].model.clone(),
         },
         entries_fetched: 8,
         feeds_seen: 8,
@@ -655,7 +655,7 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
     let mut lineup = lineup;
     pipeline::apply_summaries(&mut lineup, &editorial_doc);
     let issue = assemble_build_publish(&db, &cfg, lineup, colophon).await;
-    assert_eq!(issue.colophon.models.bulk, cfg.deepseek.model);
+    assert_eq!(issue.colophon.models.bulk, cfg.providers["deepseek"].model);
     assert!(issue.colophon.cost_usd > 0.0);
 }
 
@@ -682,9 +682,9 @@ async fn failing_deepseek_still_publishes_with_heuristic_fallbacks() {
 
     let backend = std::sync::Arc::new(MockBackend::new());
     let client = LlmClient::with_backend(
-        &cfg.deepseek.model,
+        &cfg.providers["deepseek"].model,
         "reader profile".into(),
-        UsageMeter::new(&cfg.deepseek, cfg.max_daily_usd),
+        UsageMeter::for_provider(&cfg.providers["deepseek"]),
         backend.clone(),
     );
     let curator = Curator::new(
@@ -732,9 +732,9 @@ async fn failing_deepseek_still_publishes_with_heuristic_fallbacks() {
         Colophon {
             provider_costs: BTreeMap::new(),
             models: Models {
-                bulk: cfg.deepseek.model.clone(),
-                editor: format!("{} (bulk fallback)", cfg.deepseek.model),
-                summaries: cfg.deepseek.model.clone(),
+                bulk: cfg.providers["deepseek"].model.clone(),
+                editor: format!("{} (bulk fallback)", cfg.providers["deepseek"].model),
+                summaries: cfg.providers["deepseek"].model.clone(),
             },
             entries_fetched: 8,
             feeds_seen: 8,

@@ -21,9 +21,12 @@ it all cost.
 
 Steady-state cost is roughly **$1/day**: $0.05–0.30 in DeepSeek tokens plus
 ~$0.50–0.80 for the Claude editor and a few cents of Voyage AI embeddings, each
-with its own per-UTC-day ceiling (`max_daily_usd`, `anthropic.max_daily_usd` and
+provider with its own per-UTC-day ceiling (`providers.<name>.max_daily_usd` and
 `voyage.max_daily_usd`). Those ceilings are runaway guards, not accounting — set
-hard spend limits in the providers' dashboards as the real backstop.
+hard spend limits in the providers' dashboards as the real backstop. The two
+LLM roles — *bulk* (triage, assessment, fallbacks) and *editor* — are assigned
+by name to entries of a provider registry, so swapping DeepSeek or Claude for
+Gemini (or anything OpenAI-compatible) is a config line plus an API key.
 
 - Full design: [`docs/plans/2026-08-15-the-daily-epub.md`](docs/plans/2026-08-15-the-daily-epub.md)
 - Implementation decisions: [`docs/plans/2026-08-15-implementation-notes.md`](docs/plans/2026-08-15-implementation-notes.md)
@@ -34,9 +37,9 @@ hard spend limits in the providers' dashboards as the real backstop.
 
 ```
 Miniflux ingest ─▶ dedupe ─▶ extraction ─▶ persist ─▶ social enrichment
-  ─▶ hygiene ─▶ embeddings (Voyage) + cheap signals ─▶ triage (DeepSeek)
-  ─▶ union admission ─▶ deep assessment (DeepSeek) ─▶ utility + diversity
-  ─▶ editor (Claude) ─▶ comments ─▶ editorial (Claude)
+  ─▶ hygiene ─▶ embeddings (Voyage) + cheap signals ─▶ triage (bulk LLM)
+  ─▶ union admission ─▶ deep assessment (bulk LLM) ─▶ utility + diversity
+  ─▶ editor (editor LLM) ─▶ comments ─▶ editorial (editor LLM)
   ─▶ world briefing ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
 ```
 
@@ -66,12 +69,16 @@ per-provider usage) is stored on the `runs` row and in `issues.report_json`.
 are fatal — without them there is no issue, and the `runs` row records why.
 Social lookups, comment fetching, the world briefing, images and the XTC
 conversion are best-effort: they log, add a warning (run status `degraded`) and
-the run continues. Every LLM stage *degrades*: a Claude call that fails, is
-refused, or is over its daily ceiling is retried with the same prompt on
-DeepSeek; if DeepSeek is missing, dead or over budget too, the run takes the
-`--skip-llm` shape (admission uses cheap signals and feed excerpts stand in for
-summaries) instead of losing the day's issue. Anthropic's server-side refusal
-fallback (`fallbacks = "default"`) is enabled on every editor request.
+the run continues. Every LLM stage *degrades*: an editor call that fails, is
+refused, or is over its provider's daily ceiling is retried with the same
+prompt on the bulk provider; if the bulk provider is missing, dead or over
+budget too, the run takes the `--skip-llm` shape (admission uses cheap signals
+and feed excerpts stand in for summaries) instead of losing the day's issue.
+Which provider plays which role is the `[llm]` table (`bulk = "deepseek"`,
+`editor = "anthropic"` by default); a role whose key is absent is simply
+unavailable, and `daily-epub config check` shows the resolved assignment before
+a run. Anthropic's server-side refusal fallback (`fallbacks = "default"`) is
+enabled on every request to an `anthropic`-kind provider.
 
 ---
 
@@ -81,8 +88,8 @@ fallback (`fallbacks = "default"`) is enabled on every editor request.
 |---|---|---|
 | Rust (2024 edition toolchain) | building | `cargo build --release` |
 | **Miniflux** with an API key | the only content source | Settings → API Keys. The client is read-only and never mutates read state. |
-| **DeepSeek API key** | triage and deep assessment, and the fallback for every editor call | <https://platform.deepseek.com>. Optional: `--skip-llm` runs the whole pipeline without it. |
-| **Anthropic API key** | the editor: selection, summaries, The Brief, the weekly profile rebuild | <https://console.anthropic.com>. Optional: without it every editor call runs on DeepSeek. Set a dashboard spend limit; `anthropic.max_daily_usd` is only a runaway guard. |
+| A key for the **bulk** provider (DeepSeek by default) | triage and deep assessment, and the fallback for every editor call | <https://platform.deepseek.com>. `DAILY_EPUB_PROVIDERS__DEEPSEEK__API_KEY`. Optional: `--skip-llm` runs the whole pipeline without it. |
+| A key for the **editor** provider (Anthropic by default) | the editor: selection, summaries, The Brief, the weekly profile rebuild | <https://console.anthropic.com>. `DAILY_EPUB_PROVIDERS__ANTHROPIC__API_KEY`. Optional: without it every editor call runs on the bulk provider. Set a dashboard spend limit; `providers.anthropic.max_daily_usd` is only a runaway guard. Any other `[providers.*]` entry (Gemini is shipped) can take either role — see *Switching providers*. |
 | **Voyage AI API key** | article and interest embeddings behind the learned ranking signals | <https://www.voyageai.com>. Optional: without it (or with `--skip-embeddings`) the run uses cached vectors only and the learned signals are absent, never a penalty. |
 | A 32+ byte random secret | signs the article rating links | `openssl rand -hex 32` |
 | **BookOrbit** library + watched folder | *optional* — a richer library UI on top of the same folder | Delivery does not need it: `daily-epub serve` has its own OPDS catalog over `publish.epub_dir`. If you do run it, create a dedicated "The Daily EPUB" library, enable *Watch folders*, and point `publish.epub_dir` at it. |
@@ -119,6 +126,7 @@ daily-epub features backfill [--days 30] [--rated-only] [--all] [--yes]
 daily-epub features prune       # stale embeddings, old telemetry and assessments
 daily-epub backfill-social [--days 7]   # re-poll social scores for recent articles
 daily-epub db migrate           # run migrations (also automatic on every start)
+daily-epub config check         # validate the config, print the resolved roles, keys and paths
 ```
 
 `--dry-run` does everything except deliver: it still ingests, persists entries and
@@ -160,6 +168,15 @@ than `curation.ranking.embedding_retention_days`, and `candidate_runs` rows and
 `article_assessments` older than `curation.ranking.telemetry_retention_days`.
 `generate` runs the same sweep once after publishing, best effort.
 
+`config check` loads and validates the configuration exactly as `generate`
+would and prints one fact per line: the config path, the database, profile,
+interests and publish paths with `exists`/`MISSING`, each `[llm]` role with its
+provider name, kind, model, effort, ceiling and whether its key is present, the
+Voyage line likewise, and `editorial.summary_model`. Lines that need attention
+start with `!`. It exits non-zero only on a validation error — a missing key or
+file is a warning, since the run degrades rather than fails — and never opens
+the database or takes the lock, so it is safe to run next to a live `generate`.
+
 ---
 
 ## Configuration
@@ -171,12 +188,43 @@ Start from [`config.example.toml`](config.example.toml). Load order, later wins:
 3. `DAILY_EPUB_*` environment variables
 
 Nested keys use a **double underscore**: `[miniflux] api_key` becomes
-`DAILY_EPUB_MINIFLUX__API_KEY`. Top-level keys are just uppercased:
-`DAILY_EPUB_LOOKBACK_HOURS=30`. As a convenience, plain **`DAILY_EPUB_SECRET`**
-is accepted as an alias for `server.hmac_secret` (the explicit key wins if both
-are set).
+`DAILY_EPUB_MINIFLUX__API_KEY`, and a provider's key is
+`DAILY_EPUB_PROVIDERS__<NAME>__API_KEY` with the `[providers.<name>]` table name
+upper-cased — the shipped registry reads `DAILY_EPUB_PROVIDERS__DEEPSEEK__API_KEY`,
+`DAILY_EPUB_PROVIDERS__ANTHROPIC__API_KEY` and
+`DAILY_EPUB_PROVIDERS__GEMINI__API_KEY` (provider names are therefore lowercase
+`a-z0-9_`). Top-level keys are just uppercased: `DAILY_EPUB_LOOKBACK_HOURS=30`.
+As a convenience, plain **`DAILY_EPUB_SECRET`** is accepted as an alias for
+`server.hmac_secret` (the explicit key wins if both are set).
 
-Secrets belong in the environment file, never in the TOML.
+Secrets belong in the environment file, never in the TOML. Stale configuration
+fails at startup rather than silently curating without a provider: a
+`[deepseek]` or `[anthropic]` table, a top-level `max_daily_usd`, a batch-size
+or temperature key outside `[llm]`, or a `DAILY_EPUB_DEEPSEEK__*` /
+`DAILY_EPUB_ANTHROPIC__*` environment variable is an error naming the new key.
+
+### Switching providers
+
+The roles are names, the providers are tables. To run the editor on Gemini:
+
+```toml
+[llm]
+editor = "gemini"          # [providers.gemini] is already declared in config.example.toml
+```
+
+and put `DAILY_EPUB_PROVIDERS__GEMINI__API_KEY=…` in the env file. A one-off
+A/B without touching the file, since every key is also an env var:
+
+```sh
+DAILY_EPUB_LLM__EDITOR=gemini daily-epub generate --dry-run --date 2026-09-02
+```
+
+The same works for `bulk`. Both roles may name one provider (they then share
+one client and one `max_daily_usd`), `editor = ""` runs everything on bulk, and
+a new endpoint is a new `[providers.<name>]` table: `kind = "openai"` for any
+OpenAI-compatible chat-completions API (DeepSeek, Gemini, OpenAI, a local
+server), `kind = "anthropic"` for the Messages API. `daily-epub config check`
+prints what resolved.
 
 ### Reference
 
@@ -187,7 +235,6 @@ Secrets belong in the environment file, never in the TOML.
 | `target_article_count` | `20` | Soft target the editor aims for. There is no minimum: a nine-pick issue is published as nine. |
 | `retention_days` | `21` | EPUBs older than this are deleted from `publish.epub_dir`. SQLite history is kept forever. |
 | `xtc_retention_count` | `5` | How many XTC issues to keep in `publish.xtc_dir`. Counted, not dated: each `.xtch` is ~80–100 MB, so the binding constraint is disk, not age. |
-| `max_daily_usd` | `2.0` | Ceiling on DeepSeek spend per **UTC day** of the run's start, not per run — a re-run inherits what earlier runs that day already spent (`runs.provider_costs_json`). Tripping it skips remaining DeepSeek calls; in-flight requests finish and the paper still publishes. |
 | `world_briefing` | `true` | Include the Wikipedia Current Events section. |
 | `database_path` | `/var/lib/daily-epub/daily-epub.db` | SQLite file; parent dirs are created. |
 | `out_dir` | `/var/lib/daily-epub/out` | Where `generate` writes artifacts before publishing. |
@@ -196,28 +243,23 @@ Secrets belong in the environment file, never in the TOML.
 | `miniflux.base_url` | `http://127.0.0.1:8082` | Miniflux root (no `/v1`). |
 | `miniflux.api_key` | — | **`DAILY_EPUB_MINIFLUX__API_KEY`**. Required. |
 | `miniflux.page_limit` | `250` | Entries per page; Miniflux caps this at 250. |
-| `deepseek.base_url` | `https://api.deepseek.com/v1` | OpenAI-compatible endpoint. |
-| `deepseek.model` | `deepseek-v4-flash` | Verified 2026-08-15 (DeepSeek-V4-Flash-0731). |
-| `deepseek.api_key` | — | **`DAILY_EPUB_DEEPSEEK__API_KEY`**. Absent ⇒ the run curates heuristically. |
-| `deepseek.deep_batch_size` | `8` | Articles per close-reading assessment request. The removed `score_batch_size` key is a startup error. |
-| `deepseek.triage_batch_size` | `25` | Articles per first-pass triage request. |
-| `deepseek.max_concurrent_requests` | `4` | Triage and deep-assessment batches in flight at once; the budget is checked before each is spawned. |
-| `deepseek.score_temperature` | `0.3` | Scoring temperature. |
-| `deepseek.editorial_temperature` | `0.8` | Summaries and The Brief, only when DeepSeek is the fallback editor. |
-| `deepseek.price_input_per_mtok` | `0.14` | USD per 1M cache-miss input tokens (cost guardrail arithmetic). |
-| `deepseek.price_cached_input_per_mtok` | `0.0028` | USD per 1M prefix-cache-hit input tokens. |
-| `deepseek.price_output_per_mtok` | `0.28` | USD per 1M output tokens. |
-| `anthropic.enabled` | `true` | `false` runs every editor call on DeepSeek. |
-| `anthropic.base_url` | `https://api.anthropic.com` | Messages API root. |
-| `anthropic.model` | `claude-opus-5` | The editor. Requests carry `output_config.effort`, a cached system block, and `fallbacks = "default"` with the `server-side-fallback-2026-07-01` beta so a classifier refusal is re-routed server-side. |
-| `anthropic.api_key` | — | **`DAILY_EPUB_ANTHROPIC__API_KEY`**. Absent ⇒ editor calls fall back to DeepSeek. |
-| `anthropic.effort` | `high` | `low`, `medium`, `high`, `xhigh` or `max`. |
-| `anthropic.price_input_per_mtok` | `5.0` | USD per 1M uncached input tokens. |
-| `anthropic.price_cache_write_per_mtok` | `6.25` | USD per 1M tokens written to the prompt cache. |
-| `anthropic.price_cache_read_per_mtok` | `0.5` | USD per 1M cache-read input tokens. |
-| `anthropic.price_output_per_mtok` | `25.0` | USD per 1M output tokens. |
-| `anthropic.max_daily_usd` | `3.0` | Claude ceiling per UTC day; tripping it moves the remaining editor work to DeepSeek. |
-| `anthropic.max_concurrent_requests` | `4` | Reserved for the parallel editor stages. |
+| `llm.bulk` | `deepseek` | The `[providers.*]` name that runs triage, deep assessment and every fallback. `""` ⇒ no bulk provider (those stages are skipped). |
+| `llm.editor` | `anthropic` | The provider that assembles the lineup, writes the summaries and The Brief and rebuilds the profile. `""` or absent ⇒ everything runs on `bulk`. Naming the same provider as `bulk` shares one client and one ceiling. |
+| `llm.triage_batch_size` | `25` | Articles per first-pass triage request. |
+| `llm.deep_batch_size` | `8` | Articles per close-reading assessment request. The removed `score_batch_size` key is a startup error. |
+| `llm.score_temperature` | `0.3` | Scoring temperature, sent only to `openai`-kind providers. |
+| `llm.editorial_temperature` | `0.8` | Summaries and The Brief on an `openai`-kind provider. |
+| `providers.<name>.kind` | — | `openai` (chat completions at `{base_url}/chat/completions`, bearer key) or `anthropic` (Messages API: `output_config.effort`, a cached system block, `fallbacks = "default"` with the `server-side-fallback-2026-07-01` beta). Shipped entries: `deepseek`, `anthropic`, `gemini`. |
+| `providers.<name>.base_url` | — | Endpoint root. DeepSeek `https://api.deepseek.com/v1`; Anthropic `https://api.anthropic.com`; Gemini `https://generativelanguage.googleapis.com/v1beta/openai`. |
+| `providers.<name>.model` | — | `deepseek-v4-flash` (verified 2026-08-15), `claude-opus-5`, `gemini-3.8-flash` (verified 2026-09-02). |
+| `providers.<name>.api_key` | — | **`DAILY_EPUB_PROVIDERS__<NAME>__API_KEY`**, environment only. Absent ⇒ that role is unavailable and degrades (bulk ⇒ heuristic curation, editor ⇒ bulk). |
+| `providers.<name>.effort` | `high` (anthropic, gemini) | `anthropic`: `low`, `medium`, `high`, `xhigh` or `max` → `output_config.effort`. `openai`: passed through as `reasoning_effort` (Gemini takes `minimal`–`high`); omit it for models without one (DeepSeek). |
+| `providers.<name>.max_daily_usd` | `2.0` / `3.0` / `3.0` | That provider's ceiling per **UTC day** of the run's start, not per run — a re-run inherits what earlier runs that day already spent on it (`runs.provider_costs_json`). Tripping it skips that provider's remaining calls; in-flight requests finish and the paper still publishes. `0` disables the guard. |
+| `providers.<name>.max_concurrent_requests` | `4` | Triage and deep-assessment batches in flight on the bulk provider; summaries in flight on the summary provider. |
+| `providers.<name>.price_input_per_mtok` | `0.14` / `5.0` / `0.75` | USD per 1M cache-miss input tokens (cost guardrail arithmetic). |
+| `providers.<name>.price_cache_read_per_mtok` | `0.0028` / `0.5` / `0.075` | USD per 1M cache-hit input tokens. |
+| `providers.<name>.price_cache_write_per_mtok` | `0.0` / `6.25` / `0.0` | USD per 1M tokens written to the prompt cache (implicit caches charge nothing). |
+| `providers.<name>.price_output_per_mtok` | `0.28` / `25.0` / `3.75` | USD per 1M output tokens, thinking tokens included where the provider bills them as output. |
 | `voyage.enabled` | `true` | Embed articles and interests with Voyage AI. `false` ⇒ cached vectors only. |
 | `voyage.base_url` | `https://api.voyageai.com/v1` | `POST {base_url}/embeddings`. |
 | `voyage.model` | `voyage-4-lite` | Embedding model; changing it invalidates the cache. |
@@ -239,7 +281,7 @@ Secrets belong in the environment file, never in the TOML.
 | `curation.recent_rejection_days` | `7` | Churn window for recent low triage/deep assessments. |
 | `curation.recent_rejection_floor` | `3.0` | Scores below this floor are excluded during the churn window (except auto-includes). |
 | `curation.ranking.*` | see below | Every weight, quota, gate and threshold of the personalized ranker. |
-| `editorial.summary_model` | `editor` | `editor` (Claude) or `bulk` (DeepSeek) for the per-article summaries. |
+| `editorial.summary_model` | `editor` | Which `[llm]` role writes the per-article summaries: `editor` (with per-article bulk fallback) or `bulk`. |
 | `editorial.summary_input_tokens` | `3000` | Article text offered to the summary prompt. |
 | `publish.epub_dir` | `/srv/bookorbit/libraries/daily-epub` | Both EPUB editions land here by atomic copy, and this is the directory the OPDS feed lists. The editions are distinguished by a `(X4)` tag in **both** the filename and `dc:title` — libraries and OPDS clients list books by title, so the filename alone would make them look identical. Point a BookOrbit watched folder at it if you want its UI too. **Renamed from `bookorbit_dir`**; the old key is a hard config error. |
 | `publish.xtc_dir` | `/var/lib/daily-epub/xtc` | XTC artifacts. **Not** listed in the OPDS feed — CrossPoint cannot acquire them — but downloadable at `/files/xtc/<name>` for sideloading. |
@@ -298,15 +340,20 @@ sudo install -m0640 -o daily-epub -g daily-epub config.example.toml /etc/daily-e
 sudo -e /etc/daily-epub/config.toml            # set publish dirs, xtc args, public_url
 sudo tee /etc/daily-epub/env >/dev/null <<EOF
 DAILY_EPUB_MINIFLUX__API_KEY=…
-DAILY_EPUB_DEEPSEEK__API_KEY=…
-DAILY_EPUB_ANTHROPIC__API_KEY=…
+DAILY_EPUB_PROVIDERS__DEEPSEEK__API_KEY=…
+DAILY_EPUB_PROVIDERS__ANTHROPIC__API_KEY=…
+# DAILY_EPUB_PROVIDERS__GEMINI__API_KEY=…     # only if a role names "gemini"
 DAILY_EPUB_VOYAGE__API_KEY=…
 DAILY_EPUB_SERVER__HMAC_SECRET=$(openssl rand -hex 32)
 EOF
 sudo chown daily-epub:daily-epub /etc/daily-epub/env && sudo chmod 0600 /etc/daily-epub/env
-# `DAILY_EPUB_ANTHROPIC__API_KEY` and `DAILY_EPUB_VOYAGE__API_KEY` are the two
-# keys curation v2 added; the units read them from this file unchanged. Either
-# may be left unset: the run then falls back to DeepSeek / cached embeddings.
+# One key per [providers.<name>] entry a role uses, named after the table
+# (upper-cased). Any may be left unset: that role is then unavailable and the
+# run degrades (editor → bulk, bulk → heuristic curation, Voyage → cached
+# vectors). The pre-registry DAILY_EPUB_DEEPSEEK__API_KEY /
+# DAILY_EPUB_ANTHROPIC__API_KEY names are a startup error, not a silent no-op.
+sudo -u daily-epub bash -c 'set -a; . /etc/daily-epub/env; set +a;
+  daily-epub --config /etc/daily-epub/config.toml config check'   # roles, keys present?, paths
 
 # publish dirs must exist and be writable by the service user
 sudo install -d -o daily-epub -g daily-epub /var/lib/daily-epub/xtc
@@ -465,6 +512,7 @@ Condensed from spec §5. Run it in this order the first time.
 
 ```sh
 # 1. Config and schema
+daily-epub --config /etc/daily-epub/config.toml config check   # roles → providers, keys present?
 daily-epub --config /etc/daily-epub/config.toml db migrate
 
 # 2. Ingest only, no keys spent: does Miniflux answer, and with how much?
@@ -477,7 +525,7 @@ epubcheck "./out/The Daily EPUB - $(date +%F).epub"   # expect zero errors
 #    open the standard edition in Calibre / KOReader: cover, The Brief,
 #    In This Issue, sections, discussions, Behind the paper, colophon; TOC depth 2
 
-# 4. Now with DeepSeek and Claude, still not publishing
+# 4. Now with the bulk and editor providers, still not publishing
 daily-epub generate --dry-run --out ./out --max-articles 6
 #    → check the lineup is sane (at most 6 picks, each with a "why" line) and the
 #      printed per-provider cost is well under $1
@@ -622,10 +670,11 @@ From spec §7, plus what implementation turned up:
   stack, so `curate/llm.rs` speaks the OpenAI-compatible wire protocol over the
   shared `reqwest` client instead, behind a `ChatBackend` trait. The dependency
   was removed.
-- **Two chat providers are wired**, DeepSeek (bulk) and Anthropic (editor),
-  each a `ChatBackend` impl with its own `UsageMeter` and price table. A third
-  means another impl. Voyage AI embeddings sit behind the analogous
-  `EmbeddingBackend` trait in `curate/embedding.rs`.
+- **Two wire protocols are implemented**, `openai` (chat completions) and
+  `anthropic` (Messages API), each a `ChatBackend` impl. Providers are config
+  entries over those two kinds, each with its own `UsageMeter`, price table and
+  ceiling; a protocol that is neither means another impl. Voyage AI embeddings
+  sit behind the analogous `EmbeddingBackend` trait in `curate/embedding.rs`.
 - **Triage and union admission replace the heuristic gate.** Every eligible
   article gets interest, rated-neighbour, feed-affinity, social and heuristic
   signals, then DeepSeek reads its opening (up to `triage_max`). The deep set is

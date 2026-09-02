@@ -1370,7 +1370,7 @@ mod tests {
                 "2026-09-01",
                 "2026-09-01T09:30:00Z",
                 "2026-09-01T09:45:00Z",
-                r#"{"deepseek":{"input_tokens":1,"cached_tokens":0,"cache_write_tokens":0,"output_tokens":1,"cost_usd":0.14}}"#,
+                r#"{"deepseek":{"input_tokens":1,"cached_tokens":0,"cache_write_tokens":0,"output_tokens":1,"cost_usd":0.14},"gemini":{"input_tokens":1,"cached_tokens":0,"cache_write_tokens":0,"output_tokens":1,"cost_usd":0.07}}"#,
             ),
         ] {
             let run_id = db
@@ -1452,8 +1452,9 @@ mod tests {
             "exploration rated positively: 1",
             "cost per day (anthropic): $0.043",
             "cost per day (deepseek): $0.020",
+            "cost per day (gemini): $0.005",
             "cost per day (voyage): $0.001",
-            "cost per day (total): $0.064",
+            "cost per day (total): $0.069",
             "mean generation time: 15m00s (3 runs)",
         ] {
             assert!(text.contains(line), "missing {line:?} in:\n{text}");

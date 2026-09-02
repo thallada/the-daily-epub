@@ -87,7 +87,23 @@ This file records implementation-time decisions and verified external facts. Fol
   `stop_reason: "refusal"` on HTTP 200, which the code treats as an error that degrades the
   call to DeepSeek. Usage fields: `input_tokens` (uncached remainder),
   `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`. Timeout 300 s;
-  retry 429/5xx/network, never 400. Key only from `DAILY_EPUB_ANTHROPIC__API_KEY`.
+  retry 429/5xx/network, never 400. Key only from `DAILY_EPUB_PROVIDERS__ANTHROPIC__API_KEY`
+  (the provider registry below; the pre-registry `DAILY_EPUB_ANTHROPIC__API_KEY` is a startup
+  error).
+- **Gemini 3.8 Flash over the OpenAI-compatible endpoint** (beta, verified 2026-09-02):
+  `POST https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` with
+  `Authorization: Bearer <key>`, the standard `messages` / `temperature` /
+  `response_format: {"type": "json_object"}` body. Model id `gemini-3.8-flash`. Reasoning depth
+  is the OpenAI `reasoning_effort` field, which Google maps onto Gemini 3.x's `thinking_level`
+  (`minimal | low | medium | high`; `none` is not accepted by 3.x models). Usage: implicit
+  cache hits are reported in `prompt_tokens_details.cached_tokens` (the same field DeepSeek
+  now fills), and `completion_tokens` already includes the thinking tokens that
+  `completion_tokens_details.reasoning_tokens` breaks out — so output is priced from
+  `completion_tokens` alone, never the sum. Prices per 1M tokens (promotional through
+  2026-12-31): **$0.75 input, $0.075 cache read, $3.75 output** (thinking included); from
+  2027-01-01 **$1.50 / $0.15 / $7.50**. No cache-write charge. Key only from
+  `DAILY_EPUB_PROVIDERS__GEMINI__API_KEY`. Shipped as `[providers.gemini]`, unreferenced until
+  a role names it.
 - **Voyage AI embeddings** (verified 2026-09-02): `POST https://api.voyageai.com/v1/embeddings`
   with `Authorization: Bearer <key>`; body `{input: [...], model: "voyage-4-lite", input_type:
   "document" | "query", truncation: true, output_dimension: 512, output_dtype: "float"}`. Up
@@ -109,13 +125,25 @@ This file records implementation-time decisions and verified external facts. Fol
    `the-daily-epub/1.0 (personal rss digest; contact tyler@hallada.net)`), passed by clone.
 5. **LLM**: a hand-rolled `reqwest` client, not `async-openai` (the published crate exposes
    neither `Client` nor `CreateChatCompletionRequest` at the pinned version). Every LLM call
-   goes through `curate/llm.rs`: `LlmClient { system_prompt, model, meter, backend, retry }`
-   over the `ChatBackend` trait, with `DeepseekBackend` (OpenAI-compatible chat completions,
-   `response_format: json_object`) and `AnthropicBackend` (Messages API, facts above). The
-   pipeline holds `Llms { bulk, editor }`; `editor_or_bulk()` degrades to DeepSeek when the
-   Claude client is missing or its meter is tripped. One `UsageMeter` per provider
-   (DeepSeek, Anthropic, Voyage) with its own price table and `max_daily_usd`. The system
-   prompt is sent first and byte-identical within a run so both providers' prefix caches hit.
+   goes through `curate/llm.rs`: `LlmClient { provider, system_prompt, model, effort,
+   max_concurrent_requests, meter, backend, retry }` over the `ChatBackend` trait, with two
+   wire protocols — `OpenAiCompatibleBackend` (`{base_url}/chat/completions`, bearer key,
+   `response_format: json_object`, `reasoning_effort` when the provider has an `effort`) and
+   `AnthropicBackend` (Messages API, facts above). **Providers are config, not code**: the
+   `[providers.<name>]` registry (`kind = openai | anthropic`, `base_url`, `model`, `effort`,
+   `max_daily_usd`, `max_concurrent_requests`, `price_*`) is a `BTreeMap<String,
+   ProviderConfig>`, and `[llm] bulk = "<name>"` / `editor = "<name>"` assign the two roles by
+   name (`editor = ""` means everything runs on bulk; both roles on one provider share one
+   client and one ceiling). `LlmClient::for_provider(name, &cfg, ..)` dispatches on `kind`;
+   `Llms::from_config(&config, prompt, &meters)` builds the roles; `editor_or_bulk()` degrades
+   to bulk when the editor client is missing or its meter is tripped. One `UsageMeter` per
+   *referenced* provider (`llm::provider_meters`), keyed by provider name — the same key used
+   for `runs.provider_costs_json`, the UTC-day spend preload and the log lines — plus Voyage's
+   own. `LlmClient.provider` is the config name, never the kind. The system prompt is sent
+   first and byte-identical within a run so every provider's prefix cache hits. Keys come only
+   from `DAILY_EPUB_PROVIDERS__<NAME>__API_KEY` (figment lower-cases the path, so provider
+   names are `[a-z0-9_]+`); `daily-epub config check` prints the resolved roles without
+   opening the database.
 6. **Testing**: unit tests inline per module; integration tests in `tests/` over fixture JSON in
    `tests/fixtures/`. Never hit the network in tests: `MockBackend` (`ChatBackend`) and the
    embedding mock (`EmbeddingBackend`) stand in for all three providers. `--skip-llm` makes
@@ -168,6 +196,18 @@ implementer needs that are easy to get wrong:
   articles older than `embedding_retention_days` (120) and `candidate_runs` rows plus
   `article_assessments` older than `telemetry_retention_days` (180). `features prune` runs it
   on demand; `generate` runs it once after publishing, best effort.
-- **Keys**: `DAILY_EPUB_ANTHROPIC__API_KEY` and `DAILY_EPUB_VOYAGE__API_KEY` map onto
-  `AnthropicConfig.api_key` / `VoyageConfig.api_key` through figment; the fields exist only
-  for that mapping and are never documented in TOML, logged, or stored.
+- **Keys**: `DAILY_EPUB_PROVIDERS__<NAME>__API_KEY` and `DAILY_EPUB_VOYAGE__API_KEY` map onto
+  `ProviderConfig.api_key` / `VoyageConfig.api_key` through figment; the fields exist only
+  for that mapping and are never documented in TOML, logged, or stored
+  (`Config::providers_redacted()` is what reaches `runs.config_json`).
+- **Provider registry** (2026-09-02, after step 7): the `[deepseek]` and `[anthropic]` tables
+  and the top-level `max_daily_usd` are gone. `[llm]` holds the role names and the role-level
+  knobs (`triage_batch_size`, `deep_batch_size`, `score_temperature`,
+  `editorial_temperature`); `[providers.deepseek]`, `[providers.anthropic]` and
+  `[providers.gemini]` ship in `config.example.toml` and are `Config::default()` key for key.
+  Stale shapes fail at load, naming the new key: a `[deepseek]`/`[anthropic]` header, a
+  top-level `max_daily_usd`, any of the four role keys outside `[llm]`, or a
+  `DAILY_EPUB_DEEPSEEK__*` / `DAILY_EPUB_ANTHROPIC__*` environment variable. Batching
+  concurrency (`triage`, `assess`) is the bulk provider's `max_concurrent_requests`; the
+  summaries fan out at the summary provider's. `Models { bulk, editor, summaries }` in the
+  colophon and Behind the paper stay model ids taken from the built clients.

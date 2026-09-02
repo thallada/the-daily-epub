@@ -500,8 +500,8 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DeepseekConfig;
-    use crate::curate::llm::{MockBackend, UsageMeter};
+    use crate::config::ProviderConfig;
+    use crate::curate::llm::{MockBackend, PriceTable, UsageMeter};
     use crate::curate::prefilter::tests::article;
     use crate::curate::signals::{Neighbour, TopInterest};
     use crate::types::TokenUsage;
@@ -584,11 +584,11 @@ mod tests {
             r#"{"articles":[{"id":42,"interest":8,"kind":"essay","why":"first answer"}]}"#,
             TokenUsage::default(),
         );
-        let config = DeepseekConfig::default();
+        let config = ProviderConfig::deepseek();
         let llm = LlmClient::with_backend(
             &config.model,
             "profile".into(),
-            UsageMeter::new(&config, 10.0),
+            UsageMeter::with_prices(PriceTable::from(&config), 10.0),
             backend.clone(),
         );
         let pool = HashSet::from([42]);

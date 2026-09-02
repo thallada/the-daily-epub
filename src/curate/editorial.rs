@@ -1,4 +1,4 @@
-//! Claude-first summaries and The Brief, with per-call DeepSeek fallback (§14).
+//! Editor-first summaries and The Brief, with per-call bulk fallback (§14).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -12,7 +12,6 @@ use crate::config::{EditorialConfig, SummaryModel};
 use crate::types::{ArticleId, Editorial, Lineup, Pick};
 
 pub const FALLBACK_SUMMARY_WORDS: usize = 45;
-pub const SUMMARY_CONCURRENCY: usize = 4;
 
 pub const SUMMARY_INSTRUCTIONS: &str = "\
 TASK: write the newspaper abstract for one article in today's issue.
@@ -102,9 +101,7 @@ pub async fn summarize_article(
     let response: SummaryResponse = llm.complete_json(&prompt, temperature).await?;
     let summary = response.summary.trim().to_string();
     if summary.is_empty() {
-        return Err(LlmError::EmptyResponse {
-            provider: llm.provider,
-        });
+        return Err(LlmError::empty_response(llm.provider()));
     }
     Ok(summary)
 }
@@ -172,12 +169,17 @@ pub async fn summarize_all(
     temperature: f32,
 ) -> BTreeMap<ArticleId, String> {
     let (primary, fallback) = summary_clients(llms, config.summary_model);
+    // The summary provider's own `max_concurrent_requests` bounds the fan-out.
+    let concurrency = primary
+        .map(|client| client.max_concurrent_requests)
+        .unwrap_or(1)
+        .max(1);
     stream::iter(lineup.picks.iter())
         .map(|pick| async move {
             let summary = summarize_pick(pick, primary, fallback, config, temperature).await;
             (pick.article.id, summary)
         })
-        .buffer_unordered(SUMMARY_CONCURRENCY)
+        .buffer_unordered(concurrency)
         .filter_map(|(id, summary)| async move { summary.map(|summary| (id, summary)) })
         .collect()
         .await
@@ -232,10 +234,7 @@ pub async fn brief(
 ) -> Result<String, LlmError> {
     let prompt = build_brief_prompt(lineup, summaries);
     let Some(primary) = llms.editor_or_bulk() else {
-        return Err(LlmError::Api {
-            provider: "editorial",
-            message: "no provider configured".into(),
-        });
+        return Err(LlmError::api("editorial", "no provider configured"));
     };
     let response = match primary
         .complete_json::<BriefResponse>(&prompt, temperature)
@@ -258,9 +257,7 @@ pub async fn brief(
     };
     let brief = response.brief.trim().to_string();
     if brief.is_empty() {
-        return Err(LlmError::EmptyResponse {
-            provider: primary.provider,
-        });
+        return Err(LlmError::empty_response(primary.provider()));
     }
     Ok(brief)
 }
@@ -381,7 +378,7 @@ pub fn summary_to_html(summary: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AnthropicConfig, DeepseekConfig};
+    use crate::config::ProviderConfig;
     use crate::curate::llm::{ChatBackend, MockBackend, PriceTable, UsageMeter};
     use crate::curate::prefilter::tests::article;
     use crate::types::TokenUsage;
@@ -420,9 +417,9 @@ mod tests {
 
     fn mock(provider: &'static str, backend: Arc<MockBackend>, limit: f64) -> LlmClient {
         let prices = if provider == "anthropic" {
-            PriceTable::anthropic(&AnthropicConfig::default())
+            PriceTable::from(&ProviderConfig::anthropic())
         } else {
-            PriceTable::deepseek(&DeepseekConfig::default())
+            PriceTable::from(&ProviderConfig::deepseek())
         };
         LlmClient::with_backend_options(
             provider,
@@ -534,9 +531,7 @@ mod tests {
             r#"{"summary": "Opus wrote this one."}"#,
             TokenUsage::default(),
         );
-        editor.push_llm_error(LlmError::Refusal {
-            provider: "anthropic",
-        });
+        editor.push_llm_error(LlmError::refusal("anthropic"));
         editor.push(BRIEF_FIXTURE, TokenUsage::default());
         let bulk = Arc::new(MockBackend::new());
         bulk.push(

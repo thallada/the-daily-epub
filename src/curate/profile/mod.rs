@@ -624,7 +624,7 @@ mod tests {
         use std::sync::Arc;
 
         use super::super::llm::{MockBackend, UsageMeter};
-        use crate::config::DeepseekConfig;
+        use crate::config::ProviderConfig;
         use crate::types::{RatingEvent, TokenUsage};
 
         let dir = tempfile::tempdir().unwrap();
@@ -667,7 +667,7 @@ mod tests {
         let llm = LlmClient::with_backend(
             "deepseek-v4-flash",
             initial.text,
-            UsageMeter::new(&DeepseekConfig::default(), 2.0),
+            UsageMeter::for_provider(&ProviderConfig::deepseek()),
             backend.clone(),
         );
         let rebuilt = rebuild(&db, &llm, &opml, &profile_path, 60).await.unwrap();

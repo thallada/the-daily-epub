@@ -718,11 +718,14 @@ mod tests {
         backend: std::sync::Arc<crate::curate::llm::MockBackend>,
         limit: f64,
     ) -> LlmClient {
-        let config = crate::config::DeepseekConfig::default();
+        let config = crate::config::ProviderConfig::deepseek();
         LlmClient::with_backend(
             "mock",
             "World Briefing test".into(),
-            crate::curate::llm::UsageMeter::new(&config, limit),
+            crate::curate::llm::UsageMeter::with_prices(
+                crate::curate::llm::PriceTable::from(&config),
+                limit,
+            ),
             backend,
         )
     }

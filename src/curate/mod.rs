@@ -39,7 +39,7 @@ pub struct Curator {
 impl Curator {
     /// An empty [`llm::Llms`] corresponds to `--skip-llm`: cheap-signal order is
     /// used for selection and feed excerpts stand in for summaries (notes §6).
-    /// With only `bulk`, every editor call runs on DeepSeek (§4.2).
+    /// With only `bulk`, every editor call runs on the bulk provider (§4.2).
     pub fn new(config: Config, db: Db, llms: llm::Llms) -> Self {
         Self { config, db, llms }
     }
@@ -67,15 +67,15 @@ impl Curator {
         assess::run(
             &self.db,
             Some(bulk),
-            &self.config.deepseek.model,
+            &bulk.model,
             candidates,
-            self.config.deepseek.deep_batch_size,
-            self.config.deepseek.max_concurrent_requests,
+            self.config.llm.deep_batch_size,
+            bulk.max_concurrent_requests,
             self.config.curation.ranking.assessment_reuse_days,
             rescore,
             profile_version,
             assessed_at,
-            self.config.deepseek.score_temperature,
+            self.config.llm.score_temperature,
             &self.config.curation.sections,
         )
         .await
@@ -137,7 +137,7 @@ impl Curator {
             &self.llms,
             lineup,
             &self.config.editorial,
-            self.config.deepseek.editorial_temperature,
+            self.config.llm.editorial_temperature,
         )
         .await)
     }

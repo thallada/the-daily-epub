@@ -16,8 +16,8 @@
 //! * **Best effort** — social enrichment, comments, the world briefing, images and
 //!   the XTC conversion. They log, add a warning to the report (status `degraded`)
 //!   and the run continues.
-//! * **Degrading** — every DeepSeek stage. A missing key, a dead API or a tripped
-//!   `max_daily_usd` guardrail turns the run into the `--skip-llm` shape
+//! * **Degrading** — every LLM stage. A missing key, a dead API or a tripped
+//!   provider `max_daily_usd` guardrail turns the run into the `--skip-llm` shape
 //!   (cheap-signal admission, feed excerpts as summaries) rather than
 //!   losing the day's issue.
 //!
@@ -33,7 +33,7 @@ use jiff::civil::Date;
 use jiff::{Timestamp, Zoned};
 
 use crate::config::Config;
-use crate::curate::llm::{Llms, PriceTable, UsageMeter};
+use crate::curate::llm::{Llms, UsageMeter, provider_meters};
 use crate::curate::{
     Curator, admit, editorial, embedding, profile, rank, signals, telemetry, triage,
 };
@@ -59,7 +59,7 @@ pub struct GenerateOptions {
     pub out: Option<PathBuf>,
     /// `--max-articles N`, overriding `target_article_count`.
     pub max_articles: Option<usize>,
-    /// `--skip-llm`: no DeepSeek call at all.
+    /// `--skip-llm`: no chat-provider call at all.
     pub skip_llm: bool,
     /// `--skip-embeddings`: read the cache but make zero Voyage calls.
     pub skip_embeddings: bool,
@@ -435,26 +435,23 @@ async fn run_stages(
     let article_embeddings = prepare_features(ctx, &mut personalized, &embeddings, report).await;
 
     // Build the provider clients before triage. A missing or failed bulk client
-    // skips triage and deep assessment, while the editor can still run on Claude (§17).
+    // skips triage and deep assessment, while the editor can still run (§17).
+    // One meter per referenced provider, keyed by its `[providers.*]` name and
+    // preloaded with what earlier runs on this UTC day already spent on it.
     let stage = Timestamp::now();
-    let bulk_meter =
-        UsageMeter::with_prices(PriceTable::deepseek(&config.deepseek), config.max_daily_usd);
-    let editor_meter = UsageMeter::with_prices(
-        PriceTable::anthropic(&config.anthropic),
-        config.anthropic.max_daily_usd,
-    );
+    let meters = provider_meters(config);
     match db.provider_spend_for_utc_day(ctx.started_at).await {
         Ok(spend) => {
-            bulk_meter.preload_cost(spend.get("deepseek").copied().unwrap_or(0.0));
-            editor_meter.preload_cost(spend.get("anthropic").copied().unwrap_or(0.0));
+            for (name, meter) in &meters {
+                meter.preload_cost(spend.get(name).copied().unwrap_or(0.0));
+            }
         }
         Err(error) => {
             tracing::warn!(%error, "could not preload provider spend; starting from zero")
         }
     }
 
-    let llms = build_llms(ctx, &bulk_meter, &editor_meter, report).await;
-    let bulk_available = llms.bulk.is_some();
+    let llms = build_llms(ctx, &meters, report).await;
     let mut curator_config = config.clone();
     curator_config.target_article_count = ctx.soft_target;
     curator_config.curation.max_article_count = ctx.hard_max;
@@ -477,13 +474,13 @@ async fn run_stages(
             bulk,
             &mut personalized,
             &triage_pool,
-            config.deepseek.triage_batch_size,
-            config.deepseek.max_concurrent_requests,
+            config.llm.triage_batch_size,
+            bulk.max_concurrent_requests,
             config.curation.ranking.assessment_reuse_days,
             ctx.rescore,
             profile_version,
             Timestamp::now(),
-            config.deepseek.score_temperature,
+            config.llm.score_temperature,
         )
         .await
         {
@@ -492,7 +489,7 @@ async fn run_stages(
             ));
         }
     } else {
-        tracing::info!("--skip-llm or DeepSeek unavailable: triage skipped");
+        tracing::info!("--skip-llm or no bulk provider: triage skipped");
     }
     report.counts.triaged = personalized
         .iter()
@@ -661,20 +658,7 @@ async fn run_stages(
         .next_issue_number(date)
         .await
         .context("computing the issue number")?;
-    report.provider_costs.insert(
-        "deepseek".into(),
-        ProviderUsage {
-            usage: bulk_meter.total(),
-            cost_usd: bulk_meter.cost_usd(),
-        },
-    );
-    report.provider_costs.insert(
-        "anthropic".into(),
-        ProviderUsage {
-            usage: editor_meter.total(),
-            cost_usd: editor_meter.cost_usd(),
-        },
-    );
+    let llm_cost = record_provider_costs(report, &meters);
     // Voyage rides along in `provider_costs_json` (§7.6) so `stats` can price
     // it per day; its tokens are embedding input, kept out of the LLM aggregate.
     report.provider_costs.insert(
@@ -687,31 +671,30 @@ async fn run_stages(
             cost_usd: report.voyage_cost_usd,
         },
     );
-    let total_cost = bulk_meter.cost_usd() + editor_meter.cost_usd() + report.voyage_cost_usd;
+    let total_cost = llm_cost + report.voyage_cost_usd;
     let summary_model = match config.editorial.summary_model {
         crate::config::SummaryModel::Editor if curator.llms.editor.is_some() => {
-            config.anthropic.model.clone()
+            curator.llms.editor.as_ref().map(|c| c.model.clone())
         }
-        _ if curator.llms.bulk.is_some() => config.deepseek.model.clone(),
-        _ => "none".into(),
-    };
+        _ => curator.llms.bulk.as_ref().map(|c| c.model.clone()),
+    }
+    .unwrap_or_else(|| "none".into());
     let provider_costs = report
         .provider_costs
         .iter()
         .map(|(provider, usage)| (provider.clone(), usage.cost_usd))
         .collect();
     let models = Models {
-        bulk: if bulk_available {
-            config.deepseek.model.clone()
-        } else {
-            "none".into()
-        },
-        editor: if curator.llms.editor.is_some() {
-            config.anthropic.model.clone()
-        } else if bulk_available {
-            format!("{} (bulk fallback)", config.deepseek.model)
-        } else {
-            "none".into()
+        bulk: curator
+            .llms
+            .bulk
+            .as_ref()
+            .map(|c| c.model.clone())
+            .unwrap_or_else(|| "none".into()),
+        editor: match (&curator.llms.editor, &curator.llms.bulk) {
+            (Some(editor), _) => editor.model.clone(),
+            (None, Some(bulk)) => format!("{} (bulk fallback)", bulk.model),
+            (None, None) => "none".into(),
         },
         summaries: summary_model,
     };
@@ -1069,15 +1052,14 @@ async fn record_issue(db: &Db, issue: &Issue, published: &Published) -> Result<(
     Ok(())
 }
 
-/// Build the bulk (DeepSeek) and editor (Claude) clients, running the weekly
+/// Build the bulk and editor clients named in `[llm]`, running the weekly
 /// profile rebuild when it is due.
 ///
 /// Each client is `None` for `--skip-llm` and for every configuration/API
 /// problem: the pipeline then degrades per §17 instead of failing the run.
 async fn build_llms(
     ctx: &StageContext<'_>,
-    bulk_meter: &UsageMeter,
-    editor_meter: &UsageMeter,
+    meters: &BTreeMap<String, UsageMeter>,
     report: &mut RunReport,
 ) -> Llms {
     let profile = match profile::load_or_build(
@@ -1102,15 +1084,7 @@ async fn build_llms(
         return Llms::default();
     }
 
-    let make_clients = |prompt: String| {
-        Llms::from_config(
-            &ctx.config.deepseek,
-            &ctx.config.anthropic,
-            prompt,
-            bulk_meter.clone(),
-            editor_meter.clone(),
-        )
-    };
+    let make_clients = |prompt: String| Llms::from_config(ctx.config, prompt, meters);
 
     let mut llms = make_clients(profile.text);
     let Some(rebuild_client) = llms.editor_or_bulk() else {
@@ -1150,22 +1124,34 @@ pub fn issue_size_bounds(config: &Config, max_articles: Option<usize>) -> (usize
     (config.target_article_count.min(hard_max), hard_max)
 }
 
-/// Startup line naming the resolved models and whether each provider is on
-/// (§19): the root config ignores unknown sections, so an `[anthropics]` or
-/// `[voyages]` typo would otherwise be silent. Keys are never logged, only
-/// their presence.
+/// Startup lines naming each role's resolved provider and whether it is on
+/// (§19): the root config ignores unknown sections, so a `[voyages]` typo
+/// would otherwise be silent. Keys are never logged, only their presence.
 fn log_resolved_providers(config: &Config, skip_llm: bool, skip_embeddings: bool) {
     let has_key = |key: Option<&str>| key.is_some_and(|k| !k.trim().is_empty());
+    for (role, name) in config.llm.roles() {
+        match config.providers.get(name) {
+            Some(provider) => tracing::info!(
+                role,
+                provider = name,
+                kind = provider.kind.as_str(),
+                model = %provider.model,
+                effort = provider.effort.as_deref().unwrap_or("-"),
+                enabled = !skip_llm && provider.api_key().is_some(),
+                key_present = provider.api_key().is_some(),
+                max_daily_usd = provider.max_daily_usd,
+                "resolved llm role"
+            ),
+            None => tracing::error!(role, provider = name, "role names an unknown provider"),
+        }
+    }
+    if config.llm.bulk_name().is_none() {
+        tracing::info!("no bulk provider: triage and deep assessment are skipped");
+    }
+    if config.llm.editor_name().is_none() {
+        tracing::info!("no editor provider: editor work runs on bulk");
+    }
     tracing::info!(
-        bulk_model = %config.deepseek.model,
-        bulk_enabled = !skip_llm && has_key(config.deepseek.api_key.as_deref()),
-        bulk_max_daily_usd = config.max_daily_usd,
-        editor_model = %config.anthropic.model,
-        editor_enabled = !skip_llm
-            && config.anthropic.enabled
-            && has_key(config.anthropic.api_key.as_deref()),
-        editor_effort = %config.anthropic.effort,
-        editor_max_daily_usd = config.anthropic.max_daily_usd,
         summary_model = ?config.editorial.summary_model,
         embedding_model = %config.voyage.model,
         embedding_enabled = !skip_embeddings
@@ -1175,6 +1161,24 @@ fn log_resolved_providers(config: &Config, skip_llm: bool, skip_embeddings: bool
         embedding_max_daily_usd = config.voyage.max_daily_usd,
         "resolved providers"
     );
+}
+
+/// Every referenced provider's usage into `report.provider_costs`, keyed by
+/// its `[providers.*]` name; returns the summed LLM cost.
+fn record_provider_costs(report: &mut RunReport, meters: &BTreeMap<String, UsageMeter>) -> f64 {
+    let mut total = 0.0;
+    for (name, meter) in meters {
+        let cost_usd = meter.cost_usd();
+        total += cost_usd;
+        report.provider_costs.insert(
+            name.clone(),
+            ProviderUsage {
+                usage: meter.total(),
+                cost_usd,
+            },
+        );
+    }
+    total
 }
 
 /// Prompt versions recorded per run so old telemetry stays interpretable (§7.6).
@@ -1189,13 +1193,17 @@ const PROMPT_VERSIONS: &[(&str, u32)] = &[
 ];
 
 /// The resolved `[curation]` (ranking included), `[editorial]`, `[voyage]`,
-/// model names and prompt versions written to `runs.config_json` (§7.6, §19).
-/// Never includes keys.
+/// `[llm]`, the provider registry, model names and prompt versions written to
+/// `runs.config_json` (§7.6, §19). Never includes keys.
 fn resolved_run_config(config: &Config, soft_target: usize, hard_max: usize) -> serde_json::Value {
     let mut curation = config.curation.clone();
     curation.max_article_count = hard_max;
     let mut voyage = config.voyage.clone();
     voyage.api_key = None;
+    let model_of = |role: Option<(&str, &crate::config::ProviderConfig)>| {
+        role.map(|(_, provider)| provider.model.clone())
+            .unwrap_or_else(|| "disabled".into())
+    };
     serde_json::json!({
         "target_article_count": soft_target,
         "TRIAGE_PROMPT_VERSION": triage::TRIAGE_PROMPT_VERSION,
@@ -1203,10 +1211,14 @@ fn resolved_run_config(config: &Config, soft_target: usize, hard_max: usize) -> 
         "curation": curation,
         "editorial": config.editorial,
         "voyage": voyage,
+        "llm": config.llm,
+        "providers": config.providers_redacted(),
         "models": {
-            "bulk": config.deepseek.model,
-            "editor": if config.anthropic.enabled { config.anthropic.model.as_str() } else { "disabled" },
-            "editor_effort": config.anthropic.effort,
+            "bulk": model_of(config.bulk_provider()),
+            "editor": model_of(config.editor_provider()),
+            "editor_effort": config
+                .editor_provider()
+                .and_then(|(_, provider)| provider.effort.clone()),
             "embedding": if config.voyage.enabled { config.voyage.model.as_str() } else { "disabled" },
         },
         "prompt_versions": PROMPT_VERSIONS
@@ -1277,8 +1289,9 @@ mod tests {
     #[test]
     fn run_config_json_records_the_resolved_settings_and_no_keys() {
         let mut config = Config::default();
-        config.anthropic.api_key = Some("sk-secret".into());
-        config.deepseek.api_key = Some("ds-secret".into());
+        for provider in config.providers.values_mut() {
+            provider.api_key = Some("sk-secret".into());
+        }
         config.voyage.api_key = Some("pa-secret".into());
         let value = resolved_run_config(&config, 6, 6);
         assert_eq!(value["target_article_count"], 6);
@@ -1296,6 +1309,19 @@ mod tests {
         assert_eq!(value["editorial"]["summary_input_tokens"], 3000);
         assert_eq!(value["models"]["bulk"], "deepseek-v4-flash");
         assert_eq!(value["models"]["editor"], "claude-opus-5");
+        assert_eq!(value["models"]["editor_effort"], "high");
+        assert_eq!(value["llm"]["bulk"], "deepseek");
+        assert_eq!(value["llm"]["editor"], "anthropic");
+        assert_eq!(value["llm"]["triage_batch_size"], 25);
+        assert_eq!(value["providers"]["gemini"]["kind"], "openai");
+        assert_eq!(value["providers"]["anthropic"]["max_daily_usd"], 3.0);
+        for provider in value["providers"].as_object().expect("providers") {
+            assert!(
+                provider.1["api_key"].is_null(),
+                "{} leaked its key",
+                provider.0
+            );
+        }
         assert!(value["prompt_versions"]["editor"].is_number());
         assert_eq!(
             value["TRIAGE_PROMPT_VERSION"],
@@ -1314,6 +1340,44 @@ mod tests {
             !text.contains("secret"),
             "keys must never reach the database"
         );
+
+        let mut config = Config::default();
+        config.llm.editor.clear();
+        let value = resolved_run_config(&config, 6, 6);
+        assert_eq!(value["models"]["editor"], "disabled");
+        assert!(value["models"]["editor_effort"].is_null());
+    }
+
+    /// `provider_costs` is keyed by whatever the operator named the providers,
+    /// never by a hard-coded "deepseek" / "anthropic".
+    #[test]
+    fn provider_costs_are_keyed_by_the_configured_provider_names() {
+        let mut config = Config::default();
+        let bulk = config.providers.remove("deepseek").expect("deepseek");
+        config.providers.insert("bulkprov".into(), bulk);
+        config.llm.bulk = "bulkprov".into();
+        config.llm.editor = "gemini".into();
+        config.validate().expect("renamed provider validates");
+
+        let meters = provider_meters(&config);
+        assert_eq!(
+            meters.keys().collect::<Vec<_>>(),
+            vec!["bulkprov", "gemini"]
+        );
+        meters["bulkprov"].record(TokenUsage {
+            input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        });
+        let mut report = RunReport::new(run_date(), now());
+        let total = record_provider_costs(&mut report, &meters);
+        assert_eq!(
+            report.provider_costs.keys().collect::<Vec<_>>(),
+            vec!["bulkprov", "gemini"]
+        );
+        assert!(!report.provider_costs.contains_key("deepseek"));
+        assert!((report.provider_costs["bulkprov"].cost_usd - 0.14).abs() < 1e-9);
+        assert_eq!(report.provider_costs["gemini"].cost_usd, 0.0);
+        assert!((total - 0.14).abs() < 1e-9);
     }
 
     #[test]
@@ -1602,14 +1666,14 @@ mod tests {
         assert_eq!(thin, "{}");
 
         // Admission replaces the old prefilter and carries retriever telemetry.
-        // DeepSeek is "down": the bulk client exists but every call fails, so
+        // The bulk provider is "down": the client exists but every call fails, so
         // the deep set is ranked on present signals and the editor falls back
         // to utility order (§17).
         let bulk_backend = Arc::new(ChatMockBackend::new());
         let bulk = LlmClient::with_backend(
-            &h.config.deepseek.model,
+            &h.config.providers["deepseek"].model,
             "SYSTEM".into(),
-            UsageMeter::new(&h.config.deepseek, h.config.max_daily_usd),
+            UsageMeter::for_provider(&h.config.providers["deepseek"]),
             bulk_backend.clone(),
         );
         let curator = Curator::new(
