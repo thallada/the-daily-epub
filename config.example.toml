@@ -43,6 +43,20 @@ price_input_per_mtok = 0.14
 price_cached_input_per_mtok = 0.0028
 price_output_per_mtok = 0.28
 
+# Voyage AI embeddings behind the interest and rated-neighbour signals. Set
+# `enabled = false` (or leave the key unset) and the paper still builds: the
+# learned signals are simply absent, never a penalty.
+[voyage]
+enabled = true
+base_url = "https://api.voyageai.com/v1"
+model = "voyage-4-lite"
+# api_key via DAILY_EPUB_VOYAGE__API_KEY env
+output_dimension = 512               # 256 | 512 | 1024 | 2048
+batch_size = 32
+max_concurrent_requests = 4
+max_input_chars = 60000              # per article, cut on a char boundary
+max_daily_usd = 0.50                 # runaway guard ($0.02 / M tokens)
+
 [curation]
 always_include_feeds = []            # miniflux feed ids or site urls
 blocked_domains = []
@@ -65,6 +79,55 @@ loved_value = 1.0
 good_value = 0.35
 not_for_me_value = -1.0
 verdicts_in_prompt = 60
+
+# Every weight, quota, gate and threshold of the personalized ranker. The
+# learned signals (`knn`, `feed`) contribute nothing until their gates open:
+# the weight ramps linearly from `*_floor` to `*_full` rated articles.
+[curation.ranking]
+triage_max = 800                     # eligible articles the triage LLM reads
+deep_keep = 120                      # deep-assessment set
+shortlist_keep = 60                  # what the editor sees
+assessment_reuse_days = 3
+rating_lookback_days = 180
+rating_half_life_days = 60
+neighbour_k = 5
+negative_coefficient = 0.75
+knn_floor = 8
+knn_full = 25
+feed_floor = 15
+feed_full = 40
+semantic_min_words = 300
+exploration_slots = 5
+embedding_retention_days = 120       # `features prune`: unrated, unpublished vectors
+telemetry_retention_days = 180       # `features prune`: candidate_runs rows
+
+[curation.ranking.quotas]
+triage = 60
+interest = 20
+knn = 20
+
+# Weights need not sum to 1; they are renormalized over the present signals.
+[curation.ranking.weights.preliminary]
+interest = 0.35
+knn = 0.25
+heuristic = 0.20
+feed = 0.10
+social = 0.10
+
+[curation.ranking.weights.utility]
+quality = 0.40
+fit = 0.20
+knn = 0.15
+interest = 0.10
+feed = 0.05
+triage = 0.05
+social = 0.03
+heuristic = 0.02
+
+[curation.ranking.diversity]
+cluster_threshold = 0.85
+per_cluster_cap = 2
+utility_protected = 10
 
 [publish]
 # Where both EPUB editions land, and what the OPDS feed lists. BookOrbit is

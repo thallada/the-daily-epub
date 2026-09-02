@@ -23,7 +23,7 @@
 //! issue itself are upserted, `issue_articles` is replaced wholesale, and the
 //! published filenames are derived from the date.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -32,14 +32,14 @@ use jiff::{Timestamp, Zoned};
 
 use crate::config::Config;
 use crate::curate::llm::{LlmClient, UsageMeter};
-use crate::curate::{Curator, editorial, profile};
+use crate::curate::{Curator, editorial, embedding, prefilter, profile, signals, telemetry};
 use crate::db::Db;
 use crate::extract::Extractor;
 use crate::miniflux::MinifluxClient;
 use crate::publish::Published;
 use crate::report::{RunReport, RunStatus};
 use crate::types::{
-    Article, Artifact, Colophon, Edition, Issue, IssueMeta, Lineup, reading_minutes,
+    Article, ArticleId, Artifact, Colophon, Edition, Issue, IssueMeta, Lineup, reading_minutes,
 };
 use crate::{comments, dedupe, epub, http, miniflux, publish, social, world};
 
@@ -56,6 +56,8 @@ pub struct GenerateOptions {
     pub max_articles: Option<usize>,
     /// `--skip-llm`: no DeepSeek call at all.
     pub skip_llm: bool,
+    /// `--skip-embeddings`: read the cache but make zero Voyage calls.
+    pub skip_embeddings: bool,
 }
 
 /// What one run produced, for the caller to print (§3.13).
@@ -195,6 +197,8 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
         lookback_hours = config.lookback_hours,
         target,
         skip_llm = opts.skip_llm,
+        skip_embeddings = opts.skip_embeddings,
+        voyage_enabled = config.voyage.enabled,
         out = %out_dir.display(),
         "starting run"
     );
@@ -210,11 +214,13 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
     let ctx = StageContext {
         config,
         db,
+        run_id,
         date,
         target,
         out_dir,
         dry_run: opts.dry_run,
         skip_llm: opts.skip_llm,
+        skip_embeddings: opts.skip_embeddings,
     };
     let stages = match run_stages(&ctx, window_start, window_end, &mut report).await {
         Ok(stages) => {
@@ -275,11 +281,13 @@ struct StageOutput {
 struct StageContext<'a> {
     config: &'a Config,
     db: &'a Db,
+    run_id: i64,
     date: Date,
     target: usize,
     out_dir: PathBuf,
     dry_run: bool,
     skip_llm: bool,
+    skip_embeddings: bool,
 }
 
 async fn run_stages(
@@ -367,7 +375,11 @@ async fn run_stages(
     report.counts.social_hits = enricher.enrich_all(&mut articles).await as i64;
     report.timings.record("social", elapsed_ms(stage));
 
-    // --- Stage 6: heuristic pre-filter (§3.5) ---
+    // --- Stage 6: hygiene, embeddings, and cheap signals (§8.1, §9) ---
+    let embeddings = build_embedding_service(ctx, report);
+    let feature_signals = prepare_features(ctx, &articles, &embeddings, report).await;
+
+    // --- Stage 6b: the old heuristic pre-filter still gates in this step (§21) ---
     let stage = Timestamp::now();
     let meter = UsageMeter::new(&config.deepseek, config.max_daily_usd);
     // `max_daily_usd` is a ceiling for the *day*, not for one invocation, so a
@@ -392,22 +404,79 @@ async fn run_stages(
         .await
         .context("running the heuristic pre-filter")?;
     report.counts.candidates = candidates.len() as i64;
+    let admitted = candidates
+        .iter()
+        .map(|candidate| candidate.article.id)
+        .collect::<Vec<_>>();
+    let admitted_set = admitted.iter().copied().collect::<HashSet<_>>();
+    let not_admitted = feature_signals
+        .keys()
+        .copied()
+        .filter(|id| !admitted_set.contains(id))
+        .collect::<Vec<_>>();
+    record_stage(
+        ctx,
+        &feature_signals,
+        &not_admitted,
+        "eligible",
+        Some("not_admitted"),
+    )
+    .await
+    .context("recording prefilter telemetry")?;
+    record_stage(ctx, &feature_signals, &admitted, "admitted", None)
+        .await
+        .context("recording prefilter telemetry")?;
     report.timings.record("prefilter", elapsed_ms(stage));
 
     // --- Stage 7: LLM scoring, then selection (§3.6 A + B) ---
     let stage = Timestamp::now();
-    if llm_available && let Err(e) = curator.score(&mut candidates, date).await {
-        // A dead API or a tripped budget must not cost us the issue: selection
-        // degrades to prefilter order exactly as `--skip-llm` does.
+    if let Err(e) = curator.score(&mut candidates, date).await {
         report.warn(format!("LLM scoring failed; ranking heuristically: {e:#}"));
     }
     report.counts.llm_scored = candidates.iter().filter(|c| c.llm.is_some()).count() as i64;
+    let assessed = candidates
+        .iter()
+        .filter(|candidate| candidate.llm.is_some())
+        .map(|candidate| candidate.article.id)
+        .collect::<Vec<_>>();
+    record_stage(ctx, &feature_signals, &assessed, "assessed", None)
+        .await
+        .context("recording assessment telemetry")?;
+    // Every prefilter survivor goes to the old selector, scored or not.
+    record_stage(ctx, &feature_signals, &admitted, "shortlisted", None)
+        .await
+        .context("recording shortlist telemetry")?;
 
     let mut lineup = curator
         .select(candidates, date)
         .await
         .context("selecting the lineup")?;
     report.counts.selected = lineup.picks.len() as i64;
+    let selected = lineup
+        .picks
+        .iter()
+        .map(|pick| pick.article.id)
+        .collect::<Vec<_>>();
+    let selected_set = selected.iter().copied().collect::<HashSet<_>>();
+    let not_selected = admitted
+        .iter()
+        .copied()
+        .filter(|id| !selected_set.contains(id))
+        .collect::<Vec<_>>();
+    // `Pick::why` arrives with the Claude editor (step 2); `editor_why` stays
+    // NULL until a pick carries one.
+    record_stage(ctx, &feature_signals, &selected, "selected", None)
+        .await
+        .context("recording selection telemetry")?;
+    record_stage(
+        ctx,
+        &feature_signals,
+        &not_selected,
+        "shortlisted",
+        Some("not_selected"),
+    )
+    .await
+    .context("recording selection telemetry")?;
     if lineup.picks.is_empty() {
         report.warn("the lineup is empty — check the lookback window and pre-filter");
     }
@@ -531,6 +600,241 @@ async fn run_stages(
         xtc,
         published,
     })
+}
+
+/// The cheap signals and hygiene outcome for one eligible article (§9).
+#[derive(Debug, Clone)]
+struct FeatureSignals {
+    signals: signals::Signals,
+    auto_include: bool,
+}
+
+/// The embedding cache with a Voyage client behind it, or cache-only under
+/// `--skip-embeddings`, `voyage.enabled = false` or a missing key (§16, §17).
+fn build_embedding_service(
+    ctx: &StageContext<'_>,
+    report: &mut RunReport,
+) -> embedding::EmbeddingService {
+    let (db, voyage) = (ctx.db.clone(), ctx.config.voyage.clone());
+    if ctx.skip_embeddings {
+        tracing::info!("--skip-embeddings: using cached vectors only, no Voyage calls");
+        return embedding::EmbeddingService::cached_only(db, voyage);
+    }
+    if !voyage.enabled {
+        tracing::info!("voyage disabled: using cached embeddings only");
+        return embedding::EmbeddingService::cached_only(db, voyage);
+    }
+    match embedding::EmbeddingService::real(db.clone(), voyage.clone()) {
+        Ok(service) => service,
+        Err(embedding::EmbeddingError::MissingApiKey) => {
+            tracing::warn!(
+                "voyage enabled but {} is unset; using cached embeddings only",
+                embedding::VOYAGE_API_KEY_ENV
+            );
+            embedding::EmbeddingService::cached_only(db, voyage)
+        }
+        Err(error) => {
+            report.warn(format!(
+                "Voyage unavailable; using cached embeddings only: {error}"
+            ));
+            embedding::EmbeddingService::cached_only(db, voyage)
+        }
+    }
+}
+
+/// Hygiene, embeddings and cheap signals for every article (§8.1, §9).
+///
+/// Hygiene-excluded articles get thin `candidate_runs` rows; every other
+/// article gets an `eligible` row with its `signals_json`. Nothing here can
+/// fail the run: embeddings and the learned signals degrade to absent (§17).
+async fn prepare_features(
+    ctx: &StageContext<'_>,
+    articles: &[Article],
+    service: &embedding::EmbeddingService,
+    report: &mut RunReport,
+) -> HashMap<ArticleId, FeatureSignals> {
+    let (config, db) = (ctx.config, ctx.db);
+    let hygiene = match prefilter::PrefilterContext::load(db, ctx.date).await {
+        Ok(context) => context,
+        Err(error) => {
+            report.warn(format!(
+                "could not load hygiene history; signals skipped: {error}"
+            ));
+            return HashMap::new();
+        }
+    };
+    let published = hygiene
+        .already_published
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let rejected = hygiene
+        .recently_rejected
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut eligible = Vec::new();
+    for article in articles {
+        let auto_include = prefilter::is_auto_include(article, &config.curation);
+        let reason = if published.contains(&article.id) {
+            Some("published_before")
+        } else if !auto_include && prefilter::is_blocked(article, &config.curation) {
+            Some("blocked")
+        } else if !auto_include && rejected.contains(&article.id) {
+            Some("recently_rejected")
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => {
+                if let Err(error) =
+                    telemetry::thin_excluded(db, ctx.run_id, article.id, reason).await
+                {
+                    report.warn(format!(
+                        "could not record excluded candidate {}: {error}",
+                        article.id
+                    ));
+                }
+            }
+            None => eligible.push(article.clone()),
+        }
+    }
+    report.counts.eligible = eligible.len() as i64;
+
+    // --- embed (§7.1, §7.2) ---
+    let stage = Timestamp::now();
+    let article_embeddings = match service.articles(&eligible).await {
+        Ok(embeddings) => embeddings,
+        Err(error) => {
+            report.warn(format!("article embedding stage degraded: {error}"));
+            HashMap::new()
+        }
+    };
+    report.counts.embedded = article_embeddings.len() as i64;
+    let interests =
+        match profile::load_standing_interests(&config.interests_opml, &config.profile_path) {
+            Ok(interests) => interests,
+            Err(error) => {
+                tracing::warn!(%error, "could not load standing interests for embeddings");
+                Vec::new()
+            }
+        };
+    let interest_embeddings = match service.interests(&interests).await {
+        Ok(embeddings) => embeddings,
+        Err(error) => {
+            report.warn(format!("interest embedding stage degraded: {error}"));
+            HashMap::new()
+        }
+    };
+    if let Some(meter) = service.meter() {
+        report.voyage_tokens = meter.total_tokens();
+        report.voyage_cost_usd = meter.cost_usd();
+    }
+    tracing::info!(
+        eligible = eligible.len(),
+        embedded = article_embeddings.len(),
+        interests = interest_embeddings.len(),
+        voyage_tokens = report.voyage_tokens,
+        "embeddings ready"
+    );
+    report.timings.record("embed", elapsed_ms(stage));
+
+    // --- signals (§9, §12.2, §12.4) ---
+    let stage = Timestamp::now();
+    let ranking = &config.curation.ranking;
+    let (mut computed, preference) = match signals::compute_all(
+        db,
+        &eligible,
+        &article_embeddings,
+        &interest_embeddings,
+        &config.voyage,
+        ranking,
+        Timestamp::now(),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            report.warn(format!("signal computation degraded: {error:#}"));
+            let state = signals::PreferenceState::default();
+            (
+                signals::compute(
+                    &eligible,
+                    &article_embeddings,
+                    &interest_embeddings,
+                    &state,
+                    ranking,
+                ),
+                state.summary(),
+            )
+        }
+    };
+    report.counts.rated_with_embeddings = preference.rated_with_embeddings as i64;
+    let mut output = HashMap::new();
+    for article in &eligible {
+        let auto_include = prefilter::is_auto_include(article, &config.curation);
+        let signals = computed
+            .remove(&article.id)
+            .unwrap_or_else(|| signals::Signals::baseline(article));
+        output.insert(
+            article.id,
+            FeatureSignals {
+                signals,
+                auto_include,
+            },
+        );
+    }
+    let eligible_ids = eligible
+        .iter()
+        .map(|article| article.id)
+        .collect::<Vec<_>>();
+    if let Err(error) = record_stage(ctx, &output, &eligible_ids, "eligible", None).await {
+        report.warn(format!("could not record eligible candidates: {error}"));
+    }
+    report.timings.record("signals", elapsed_ms(stage));
+    output
+}
+
+/// Upsert the `candidate_runs` row of every listed article at a new stage
+/// (§7.4). Articles without signals (hygiene-excluded) are left alone.
+async fn record_stage(
+    ctx: &StageContext<'_>,
+    features: &HashMap<ArticleId, FeatureSignals>,
+    ids: &[ArticleId],
+    stage: &str,
+    excluded_reason: Option<&str>,
+) -> Result<()> {
+    let admitted = matches!(stage, "admitted" | "assessed" | "shortlisted" | "selected");
+    for id in ids {
+        let Some(feature) = features.get(id) else {
+            continue;
+        };
+        let json = telemetry::serialize_signals(&feature.signals, feature.auto_include);
+        let admitted_by = admitted.then_some(if feature.auto_include {
+            "[\"auto\"]"
+        } else {
+            "[\"prefilter\"]"
+        });
+        telemetry::write(
+            ctx.db,
+            &telemetry::CandidateRun {
+                run_id: ctx.run_id,
+                article_id: *id,
+                stage,
+                excluded_reason,
+                admitted_by,
+                signals_json: &json,
+                utility: None,
+                rank_utility: None,
+                cluster_id: None,
+                cluster_rank: None,
+                editor_why: None,
+            },
+        )
+        .await
+        .with_context(|| format!("recording candidate {id} at stage {stage}"))?;
+    }
+    Ok(())
 }
 
 /// Insert/refresh the `articles` rows and stamp the returned ids back on (§3.13).
@@ -723,5 +1027,343 @@ mod tests {
         apply_summaries(&mut lineup, &editorial);
         assert_eq!(lineup.picks[0].summary.as_deref(), Some("An abstract."));
         assert!(lineup.picks[1..].iter().all(|p| p.summary.is_none()));
+    }
+
+    use std::sync::Arc;
+
+    use crate::curate::embedding::{EmbeddingClient, EmbeddingService, MockBackend};
+    use crate::types::{Entry, ExtractMethod, SourceKind, SourceRef};
+    use sqlx::Row as _;
+
+    fn now() -> Timestamp {
+        "2026-09-02T09:00:00Z".parse().unwrap()
+    }
+
+    fn run_date() -> Date {
+        "2026-09-02".parse().unwrap()
+    }
+
+    fn fixture_article(entry_id: i64, host: &str, words: usize) -> Article {
+        let url = format!("https://{host}/post-{entry_id}");
+        let body = (0..words)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Article {
+            id: 0,
+            canonical_url: url.clone(),
+            title: format!("Post {entry_id}"),
+            best_entry_id: entry_id,
+            content_html: format!("<p>{body}</p>"),
+            word_count: words as i64,
+            excerpt_only: false,
+            image_count: 0,
+            sources: vec![SourceRef {
+                entry_id,
+                feed_id: 100 + entry_id,
+                feed_title: format!("Feed {entry_id}"),
+                category: None,
+                kind: SourceKind::Feed,
+            }],
+            first_seen: now(),
+            url,
+            author: None,
+            feed_id: 100 + entry_id,
+            feed_title: format!("Feed {entry_id}"),
+            category: None,
+            published_at: None,
+            comments_url: None,
+            image_urls: vec![],
+            social: vec![],
+            extract_method: ExtractMethod::Miniflux,
+        }
+    }
+
+    fn entry_for(article: &Article) -> Entry {
+        Entry {
+            id: article.best_entry_id,
+            feed_id: article.feed_id,
+            feed_title: Some(article.feed_title.clone()),
+            category: None,
+            title: article.title.clone(),
+            url: article.url.clone(),
+            canonical_url: Some(article.canonical_url.clone()),
+            author: None,
+            published_at: None,
+            comments_url: None,
+            raw_content: article.content_html.clone(),
+            fetched_at: now(),
+        }
+    }
+
+    struct Harness {
+        _dir: tempfile::TempDir,
+        db: Db,
+        config: Config,
+        articles: Vec<Article>,
+        run_id: i64,
+    }
+
+    /// Four articles: two ordinary, one on a blocked host, one published yesterday.
+    async fn harness() -> Harness {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("run.db"))
+            .await
+            .unwrap();
+        let mut config = Config::default();
+        config.curation.blocked_domains = vec!["blocked.example".into()];
+        config.voyage.output_dimension = 4;
+        config.target_article_count = 1;
+        config.interests_opml = dir.path().join("interests.opml");
+        std::fs::write(
+            &config.interests_opml,
+            "<opml><body><outline text=\"Writerdeck\"/></body></opml>",
+        )
+        .unwrap();
+        config.profile_path = dir.path().join("profile.md");
+        std::fs::write(&config.profile_path, "# Reader profile\n").unwrap();
+
+        let mut articles = vec![
+            fixture_article(1, "a.example", 1200),
+            fixture_article(2, "b.example", 900),
+            fixture_article(3, "blocked.example", 1500),
+            fixture_article(4, "d.example", 1400),
+        ];
+        let entries = articles.iter().map(entry_for).collect::<Vec<_>>();
+        db.upsert_entries(&entries).await.unwrap();
+        persist_articles(&db, &mut articles).await.unwrap();
+        sqlx::query(
+            "INSERT INTO issues (date, issue_number, generated_at)
+             VALUES ('2026-09-01', 1, '2026-09-01T12:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO issue_articles (issue_date, article_id, section)
+             VALUES ('2026-09-01', ?, 'Top Stories')",
+        )
+        .bind(articles[3].id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let run_id = db.start_run(run_date(), now()).await.unwrap();
+        Harness {
+            _dir: dir,
+            db,
+            config,
+            articles,
+            run_id,
+        }
+    }
+
+    fn context<'a>(h: &'a Harness, skip_embeddings: bool) -> StageContext<'a> {
+        StageContext {
+            config: &h.config,
+            db: &h.db,
+            run_id: h.run_id,
+            date: run_date(),
+            target: h.config.target_article_count,
+            out_dir: PathBuf::from("."),
+            dry_run: true,
+            skip_llm: true,
+            skip_embeddings,
+        }
+    }
+
+    fn mock_service(h: &Harness, backend: Arc<MockBackend>) -> EmbeddingService {
+        let client = EmbeddingClient::with_backend(h.config.voyage.clone(), backend);
+        EmbeddingService::with_client(h.db.clone(), h.config.voyage.clone(), client)
+    }
+
+    async fn stage_rows(
+        db: &Db,
+        run_id: i64,
+    ) -> BTreeMap<i64, (String, Option<String>, Option<String>)> {
+        sqlx::query(
+            "SELECT article_id, stage, excluded_reason, admitted_by FROM candidate_runs
+             WHERE run_id = ? ORDER BY article_id",
+        )
+        .bind(run_id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.get::<i64, _>("article_id"),
+                (
+                    row.get::<String, _>("stage"),
+                    row.get::<Option<String>, _>("excluded_reason"),
+                    row.get::<Option<String>, _>("admitted_by"),
+                ),
+            )
+        })
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn mocked_run_writes_a_candidate_runs_row_for_every_considered_article() {
+        let h = harness().await;
+        let ctx = context(&h, false);
+        let backend = Arc::new(MockBackend::auto(4));
+        let service = mock_service(&h, backend.clone());
+        let mut report = RunReport::new(run_date(), now());
+
+        let features = prepare_features(&ctx, &h.articles, &service, &mut report).await;
+        let [a, b, blocked, published] = [
+            h.articles[0].id,
+            h.articles[1].id,
+            h.articles[2].id,
+            h.articles[3].id,
+        ];
+        assert_eq!(
+            features.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([a, b])
+        );
+        assert_eq!(report.counts.eligible, 2);
+        assert_eq!(report.counts.embedded, 2);
+        assert_eq!(report.counts.rated_with_embeddings, 0);
+        assert!(report.timings.0.contains_key("embed") && report.timings.0.contains_key("signals"));
+        assert!(report.voyage_tokens > 0);
+        // One batch for the two articles, one for the interest.
+        assert_eq!(backend.calls(), 2);
+        let signals = &features[&a].signals;
+        assert!(signals.heuristic.is_some());
+        assert!(
+            signals.interest.is_some(),
+            "interest present under the raw fallback"
+        );
+        assert!(
+            signals.knn.is_none() && signals.feed.is_none(),
+            "gates closed"
+        );
+        assert!(signals.preliminary.is_some());
+
+        let rows = stage_rows(&h.db, h.run_id).await;
+        assert_eq!(rows.len(), 4, "one row per considered article");
+        assert_eq!(rows[&blocked].0, "excluded");
+        assert_eq!(rows[&blocked].1.as_deref(), Some("blocked"));
+        assert_eq!(rows[&published].0, "excluded");
+        assert_eq!(rows[&published].1.as_deref(), Some("published_before"));
+        assert_eq!(rows[&a].0, "eligible");
+        assert_eq!(rows[&a].1, None);
+        let thin: String =
+            sqlx::query_scalar("SELECT signals_json FROM candidate_runs WHERE article_id = ?")
+                .bind(blocked)
+                .fetch_one(h.db.pool())
+                .await
+                .unwrap();
+        assert_eq!(thin, "{}");
+
+        // The old prefilter and selector, with the stage transitions of step 3.
+        let curator = Curator::new(h.config.clone(), h.db.clone(), None);
+        let candidates = curator
+            .prefilter(h.articles.clone(), run_date())
+            .await
+            .unwrap();
+        let admitted = candidates.iter().map(|c| c.article.id).collect::<Vec<_>>();
+        assert_eq!(
+            admitted.iter().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([a, b])
+        );
+        record_stage(&ctx, &features, &admitted, "admitted", None)
+            .await
+            .unwrap();
+        record_stage(&ctx, &features, &admitted, "shortlisted", None)
+            .await
+            .unwrap();
+        let lineup = curator.select(candidates, run_date()).await.unwrap();
+        let selected = lineup
+            .picks
+            .iter()
+            .map(|p| p.article.id)
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 1);
+        let not_selected = admitted
+            .iter()
+            .copied()
+            .filter(|id| !selected.contains(id))
+            .collect::<Vec<_>>();
+        record_stage(&ctx, &features, &selected, "selected", None)
+            .await
+            .unwrap();
+        record_stage(
+            &ctx,
+            &features,
+            &not_selected,
+            "shortlisted",
+            Some("not_selected"),
+        )
+        .await
+        .unwrap();
+
+        let rows = stage_rows(&h.db, h.run_id).await;
+        assert_eq!(rows.len(), 4);
+        let (winner, loser) = (selected[0], not_selected[0]);
+        assert_eq!(
+            rows[&winner],
+            ("selected".into(), None, Some("[\"prefilter\"]".into()))
+        );
+        assert_eq!(
+            rows[&loser],
+            (
+                "shortlisted".into(),
+                Some("not_selected".into()),
+                Some("[\"prefilter\"]".into())
+            )
+        );
+        let text = telemetry::explain(
+            &h.db,
+            run_date(),
+            Some(h.run_id),
+            &telemetry::ExplainTarget::Article(loser),
+        )
+        .await
+        .unwrap();
+        assert!(
+            text.contains("stage: shortlisted · reason: not_selected"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_embeddings_makes_zero_voyage_calls_and_uses_the_cache() {
+        let h = harness().await;
+        let ctx = context(&h, true);
+        let mut report = RunReport::new(run_date(), now());
+        let service = build_embedding_service(&ctx, &mut report);
+        assert!(!service.has_client(), "--skip-embeddings is cache-only");
+        assert!(service.meter().is_none());
+        let features = prepare_features(&ctx, &h.articles, &service, &mut report).await;
+        assert_eq!(features.len(), 2);
+        assert_eq!(report.counts.embedded, 0, "nothing cached yet");
+        assert!(features.values().all(|f| f.signals.interest.is_none()));
+        assert!(features.values().all(|f| f.signals.heuristic.is_some()));
+        assert_eq!(report.voyage_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn a_voyage_failure_degrades_to_absent_signals_and_the_run_continues() {
+        let h = harness().await;
+        let ctx = context(&h, false);
+        let backend = Arc::new(MockBackend::new()); // nothing scripted: every call fails
+        let service = mock_service(&h, backend.clone());
+        let mut report = RunReport::new(run_date(), now());
+        let features = prepare_features(&ctx, &h.articles, &service, &mut report).await;
+        assert!(backend.calls() >= 1);
+        assert_eq!(features.len(), 2);
+        assert_eq!(report.counts.eligible, 2);
+        assert_eq!(report.counts.embedded, 0);
+        assert!(report.error.is_none());
+        for feature in features.values() {
+            assert!(feature.signals.interest.is_none() && feature.signals.knn.is_none());
+            assert!(feature.signals.heuristic.is_some());
+            assert!(
+                feature.signals.preliminary.is_some(),
+                "scored on what is present"
+            );
+        }
+        assert_eq!(stage_rows(&h.db, h.run_id).await.len(), 4);
     }
 }

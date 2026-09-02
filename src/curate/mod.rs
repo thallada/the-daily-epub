@@ -10,11 +10,14 @@
 //! feed excerpts stand in for summaries (notes §6).
 
 pub mod editorial;
+pub mod embedding;
 pub mod llm;
 pub mod prefilter;
 pub mod profile;
 pub mod score;
 pub mod select;
+pub mod signals;
+pub mod telemetry;
 
 use jiff::civil::Date;
 

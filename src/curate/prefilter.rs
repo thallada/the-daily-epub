@@ -90,7 +90,7 @@ impl PrefilterContext {
         let since = today
             .checked_sub(jiff::Span::new().days(STALE_LOOKBACK_DAYS))
             .unwrap_or(today);
-        let already_published = db.previously_published_ids().await?;
+        let already_published = db.previously_published_ids_before(today).await?;
         let recently_rejected = db.recently_low_scored_ids(STALE_LOW_SCORE, since).await?;
         tracing::debug!(
             published = already_published.len(),
@@ -195,6 +195,29 @@ pub fn social_points(social_score: f64) -> f64 {
         return 0.0;
     }
     MAX_SOCIAL_POINTS * (social_score / SOCIAL_SATURATION).min(1.0).sqrt()
+}
+
+/// Text-only heuristic used by personalized ranking (§9.3).
+pub fn text_heuristic(article: &Article) -> f64 {
+    longform_points(article.word_count)
+        - excerpt_only_penalty(article)
+        - roundup_penalty(&article.title)
+}
+
+pub fn excerpt_only_penalty(article: &Article) -> f64 {
+    if article.excerpt_only {
+        EXCERPT_ONLY_PENALTY
+    } else {
+        0.0
+    }
+}
+
+pub fn roundup_penalty(title: &str) -> f64 {
+    if looks_like_roundup(title) {
+        ROUNDUP_TITLE_PENALTY
+    } else {
+        0.0
+    }
 }
 
 /// Score one article 0–100 from word count, social proof, source signals,

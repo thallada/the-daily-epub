@@ -74,6 +74,7 @@ pub struct Config {
 
     pub miniflux: MinifluxConfig,
     pub deepseek: DeepseekConfig,
+    pub voyage: VoyageConfig,
     pub curation: CurationConfig,
     pub publish: PublishConfig,
     pub xtc: XtcConfig,
@@ -97,6 +98,7 @@ impl Default for Config {
             profile_path: PathBuf::from("data/profile.md"),
             miniflux: MinifluxConfig::default(),
             deepseek: DeepseekConfig::default(),
+            voyage: VoyageConfig::default(),
             curation: CurationConfig::default(),
             publish: PublishConfig::default(),
             xtc: XtcConfig::default(),
@@ -162,6 +164,38 @@ impl Default for DeepseekConfig {
     }
 }
 
+/// `[voyage]` — embedding endpoint and cache shape (§4.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct VoyageConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    /// Supply via `DAILY_EPUB_VOYAGE__API_KEY`; never put it in the TOML.
+    pub api_key: Option<String>,
+    pub output_dimension: usize,
+    pub batch_size: usize,
+    pub max_concurrent_requests: usize,
+    pub max_input_chars: usize,
+    pub max_daily_usd: f64,
+}
+
+impl Default for VoyageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_url: "https://api.voyageai.com/v1".into(),
+            model: "voyage-4-lite".into(),
+            api_key: None,
+            output_dimension: 512,
+            batch_size: 32,
+            max_concurrent_requests: 4,
+            max_input_chars: 60_000,
+            max_daily_usd: 0.50,
+        }
+    }
+}
+
 /// `[curation]` — pre-filter and section palette (§3.5, §3.6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -176,6 +210,7 @@ pub struct CurationConfig {
     /// The only section names the LLM may use (§3.6 stage B).
     pub sections: Vec<String>,
     pub feedback: FeedbackConfig,
+    pub ranking: RankingConfig,
 }
 
 impl Default for CurationConfig {
@@ -198,6 +233,154 @@ impl Default for CurationConfig {
             .map(|s| s.to_string())
             .collect(),
             feedback: FeedbackConfig::default(),
+            ranking: RankingConfig::default(),
+        }
+    }
+}
+
+/// `[curation.ranking]` — every weight, quota, gate and threshold of the
+/// personalized ranker (plan §19). Steps 4–5 consume most of these; step 3
+/// uses the learned-signal gates, the preliminary weights and the retention
+/// windows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RankingConfig {
+    pub triage_max: usize,
+    pub deep_keep: usize,
+    pub shortlist_keep: usize,
+    pub assessment_reuse_days: i64,
+    pub rating_lookback_days: i64,
+    pub rating_half_life_days: f64,
+    pub neighbour_k: usize,
+    pub negative_coefficient: f64,
+    pub knn_floor: usize,
+    pub knn_full: usize,
+    pub feed_floor: usize,
+    pub feed_full: usize,
+    pub semantic_min_words: i64,
+    pub exploration_slots: usize,
+    pub embedding_retention_days: i64,
+    pub telemetry_retention_days: i64,
+    pub quotas: RankingQuotas,
+    pub weights: RankingWeights,
+    pub diversity: DiversityConfig,
+}
+
+impl Default for RankingConfig {
+    fn default() -> Self {
+        Self {
+            triage_max: 800,
+            deep_keep: 120,
+            shortlist_keep: 60,
+            assessment_reuse_days: 3,
+            rating_lookback_days: 180,
+            rating_half_life_days: 60.0,
+            neighbour_k: 5,
+            negative_coefficient: 0.75,
+            knn_floor: 8,
+            knn_full: 25,
+            feed_floor: 15,
+            feed_full: 40,
+            semantic_min_words: 300,
+            exploration_slots: 5,
+            embedding_retention_days: 120,
+            telemetry_retention_days: 180,
+            quotas: RankingQuotas::default(),
+            weights: RankingWeights::default(),
+            diversity: DiversityConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RankingQuotas {
+    pub triage: usize,
+    pub interest: usize,
+    pub knn: usize,
+}
+
+impl Default for RankingQuotas {
+    fn default() -> Self {
+        Self {
+            triage: 60,
+            interest: 20,
+            knn: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RankingWeights {
+    pub preliminary: PreliminaryWeights,
+    pub utility: UtilityWeights,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PreliminaryWeights {
+    pub interest: f64,
+    pub knn: f64,
+    pub heuristic: f64,
+    pub feed: f64,
+    pub social: f64,
+}
+
+impl Default for PreliminaryWeights {
+    fn default() -> Self {
+        Self {
+            interest: 0.35,
+            knn: 0.25,
+            heuristic: 0.20,
+            feed: 0.10,
+            social: 0.10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct UtilityWeights {
+    pub quality: f64,
+    pub fit: f64,
+    pub knn: f64,
+    pub interest: f64,
+    pub feed: f64,
+    pub triage: f64,
+    pub social: f64,
+    pub heuristic: f64,
+}
+
+impl Default for UtilityWeights {
+    fn default() -> Self {
+        Self {
+            quality: 0.40,
+            fit: 0.20,
+            knn: 0.15,
+            interest: 0.10,
+            feed: 0.05,
+            triage: 0.05,
+            social: 0.03,
+            heuristic: 0.02,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DiversityConfig {
+    pub cluster_threshold: f64,
+    pub per_cluster_cap: usize,
+    pub utility_protected: usize,
+}
+
+impl Default for DiversityConfig {
+    fn default() -> Self {
+        Self {
+            cluster_threshold: 0.85,
+            per_cluster_cap: 2,
+            utility_protected: 10,
         }
     }
 }
@@ -376,6 +559,73 @@ impl Config {
                 "prefilter_keep must be >= target_article_count".into(),
             ));
         }
+        let ranking = &self.curation.ranking;
+        if ranking.deep_keep < ranking.shortlist_keep
+            || ranking.shortlist_keep < self.target_article_count
+        {
+            return Err(ConfigError::Invalid(
+                "curation.ranking must satisfy deep_keep >= shortlist_keep >= target_article_count"
+                    .into(),
+            ));
+        }
+        if ranking.knn_full <= ranking.knn_floor || ranking.feed_full <= ranking.feed_floor {
+            return Err(ConfigError::Invalid(
+                "curation.ranking *_full must be > *_floor >= 0".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&ranking.diversity.cluster_threshold) {
+            return Err(ConfigError::Invalid(
+                "curation.ranking.diversity.cluster_threshold must be between 0 and 1".into(),
+            ));
+        }
+        if ranking.diversity.per_cluster_cap == 0 {
+            return Err(ConfigError::Invalid(
+                "curation.ranking.diversity.per_cluster_cap must be >= 1".into(),
+            ));
+        }
+        let preliminary = &ranking.weights.preliminary;
+        let utility = &ranking.weights.utility;
+        let weights = [
+            preliminary.interest,
+            preliminary.knn,
+            preliminary.heuristic,
+            preliminary.feed,
+            preliminary.social,
+            utility.quality,
+            utility.fit,
+            utility.knn,
+            utility.interest,
+            utility.feed,
+            utility.triage,
+            utility.social,
+            utility.heuristic,
+        ];
+        if weights
+            .iter()
+            .any(|weight| !weight.is_finite() || *weight < 0.0)
+        {
+            return Err(ConfigError::Invalid(
+                "curation.ranking weights must be finite and non-negative".into(),
+            ));
+        }
+        if self.deepseek.score_batch_size == 0
+            || self.voyage.batch_size == 0
+            || self.voyage.max_concurrent_requests == 0
+        {
+            return Err(ConfigError::Invalid(
+                "provider batch sizes must be >= 1".into(),
+            ));
+        }
+        if ![256, 512, 1024, 2048].contains(&self.voyage.output_dimension) {
+            return Err(ConfigError::Invalid(
+                "voyage.output_dimension must be one of 256, 512, 1024, 2048".into(),
+            ));
+        }
+        if ranking.rating_half_life_days <= 0.0 || !ranking.rating_half_life_days.is_finite() {
+            return Err(ConfigError::Invalid(
+                "curation.ranking.rating_half_life_days must be > 0".into(),
+            ));
+        }
         if self.curation.sections.is_empty() {
             return Err(ConfigError::Invalid(
                 "curation.sections must not be empty".into(),
@@ -442,8 +692,12 @@ mod tests {
             jail.set_env("DAILY_EPUB_MINIFLUX__API_KEY", "secret-token");
             jail.set_env("DAILY_EPUB_TARGET_ARTICLE_COUNT", "12");
             jail.set_env("DAILY_EPUB_SERVER__HMAC_SECRET", "hunter2");
+            jail.set_env("DAILY_EPUB_VOYAGE__API_KEY", "voyage-key");
+            jail.set_env("DAILY_EPUB_VOYAGE__ENABLED", "false");
 
             let c = Config::load(None).map_err(|e| figment::Error::from(e.to_string()))?;
+            assert_eq!(c.voyage.api_key.as_deref(), Some("voyage-key"));
+            assert!(!c.voyage.enabled);
             // from file
             assert_eq!(c.lookback_hours, 30);
             assert!(!c.world_briefing);
@@ -498,6 +752,70 @@ mod tests {
         assert_eq!(c.xtc.format, XtcFormat::Xtch);
         assert_eq!(c.server.bind, "127.0.0.1:3499");
         assert_eq!(c.deepseek.base_url, "https://api.deepseek.com/v1");
+    }
+
+    #[test]
+    fn voyage_and_ranking_defaults_and_validation() {
+        let cfg = Config::default();
+        assert!(cfg.voyage.enabled);
+        assert_eq!(cfg.voyage.base_url, "https://api.voyageai.com/v1");
+        assert_eq!(cfg.voyage.model, "voyage-4-lite");
+        assert_eq!(cfg.voyage.output_dimension, 512);
+        assert_eq!(cfg.voyage.batch_size, 32);
+        assert_eq!(cfg.voyage.max_concurrent_requests, 4);
+        assert_eq!(cfg.voyage.max_input_chars, 60_000);
+        assert_eq!(cfg.voyage.max_daily_usd, 0.50);
+        let ranking = &cfg.curation.ranking;
+        assert_eq!(
+            (
+                ranking.triage_max,
+                ranking.deep_keep,
+                ranking.shortlist_keep
+            ),
+            (800, 120, 60)
+        );
+        assert_eq!((ranking.knn_floor, ranking.knn_full), (8, 25));
+        assert_eq!((ranking.feed_floor, ranking.feed_full), (15, 40));
+        assert_eq!(ranking.rating_half_life_days, 60.0);
+        assert_eq!(ranking.negative_coefficient, 0.75);
+        assert_eq!(ranking.weights.preliminary.interest, 0.35);
+        assert_eq!(ranking.weights.utility.quality, 0.40);
+        assert_eq!(ranking.diversity.per_cluster_cap, 2);
+        assert_eq!(ranking.embedding_retention_days, 120);
+        assert_eq!(ranking.telemetry_retention_days, 180);
+        cfg.validate().unwrap();
+
+        let mut bad = Config::default();
+        bad.voyage.output_dimension = 300;
+        assert!(bad.validate().is_err(), "dimension must be a Voyage size");
+        let mut bad = Config::default();
+        bad.voyage.batch_size = 0;
+        assert!(bad.validate().is_err());
+        let mut bad = Config::default();
+        bad.curation.ranking.weights.preliminary.knn = -0.1;
+        assert!(bad.validate().is_err(), "weights are non-negative");
+        let mut bad = Config::default();
+        bad.curation.ranking.knn_full = bad.curation.ranking.knn_floor;
+        assert!(bad.validate().is_err(), "*_full must exceed *_floor");
+        let mut bad = Config::default();
+        bad.curation.ranking.shortlist_keep = bad.curation.ranking.deep_keep + 1;
+        assert!(bad.validate().is_err(), "deep_keep >= shortlist_keep");
+        let mut bad = Config::default();
+        bad.curation.ranking.shortlist_keep = bad.target_article_count - 1;
+        assert!(bad.validate().is_err(), "shortlist_keep >= target");
+        let mut bad = Config::default();
+        bad.curation.ranking.diversity.cluster_threshold = 1.5;
+        assert!(bad.validate().is_err());
+        let mut bad = Config::default();
+        bad.curation.ranking.diversity.per_cluster_cap = 0;
+        assert!(bad.validate().is_err());
+
+        // Unknown keys inside a known section fail loudly.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[voyage]\nenabled = true\nnot_a_key = 1\n").unwrap();
+        let err = Config::load(Some(&path)).expect_err("unknown voyage key must be rejected");
+        assert!(err.to_string().contains("not_a_key"), "{err}");
     }
 
     #[test]

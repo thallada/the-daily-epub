@@ -67,6 +67,12 @@ pub struct StageCounts {
     pub excerpt_only: i64,
     /// Social lookups that returned a hit (§3.4).
     pub social_hits: i64,
+    /// Articles passing hygiene and eligible for personalized signals.
+    pub eligible: i64,
+    /// Eligible articles with a valid embedding.
+    pub embedded: i64,
+    /// Current rated articles with a valid embedding.
+    pub rated_with_embeddings: i64,
     /// Articles surviving the heuristic pre-filter (§3.5).
     pub candidates: i64,
     /// Articles scored by the LLM (§3.6 stage A).
@@ -102,6 +108,9 @@ pub struct RunReport {
     pub status: RunStatus,
     pub counts: StageCounts,
     pub usage: TokenUsage,
+    /// Voyage document/query tokens and cost for this run.
+    pub voyage_tokens: i64,
+    pub voyage_cost_usd: f64,
     pub cost_usd: f64,
     pub timings: StageTimings,
     /// Ingest window actually used, RFC3339 (§3.1).
@@ -124,6 +133,8 @@ impl RunReport {
             status: RunStatus::Running,
             counts: StageCounts::default(),
             usage: TokenUsage::default(),
+            voyage_tokens: 0,
+            voyage_cost_usd: 0.0,
             cost_usd: 0.0,
             timings: StageTimings::default(),
             window_start: None,
@@ -155,7 +166,8 @@ impl RunReport {
         price_output: f64,
     ) {
         self.finished_at = Some(finished_at);
-        self.cost_usd = self.usage.cost_usd(price_input, price_cached, price_output);
+        self.cost_usd =
+            self.usage.cost_usd(price_input, price_cached, price_output) + self.voyage_cost_usd;
         if self.status == RunStatus::Running {
             self.status = if self.warnings.is_empty() {
                 RunStatus::Ok
@@ -182,11 +194,12 @@ impl RunReport {
     /// Compact human-readable summary printed at the end of `generate`.
     pub fn summary_line(&self) -> String {
         format!(
-            "{} [{}] {} entries → {} articles → {} candidates → {} selected · ${:.4} · {}s",
+            "{} [{}] {} entries → {} articles → {} eligible → {} candidates → {} selected · ${:.4} · {}s",
             self.date,
             self.status,
             self.counts.entries_fetched,
             self.counts.articles,
+            self.counts.eligible,
             self.counts.candidates,
             self.counts.selected,
             self.cost_usd,

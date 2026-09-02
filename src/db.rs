@@ -321,6 +321,45 @@ impl Db {
         Ok(rows.iter().map(|r| r.get::<i64, _>("article_id")).collect())
     }
 
+    /// Article ids published before this issue date; same-date regeneration is allowed (§8.1).
+    pub async fn previously_published_ids_before(&self, date: Date) -> Result<Vec<ArticleId>> {
+        let rows =
+            sqlx::query("SELECT DISTINCT article_id FROM issue_articles WHERE issue_date < ?")
+                .bind(date.to_string())
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .iter()
+            .map(|row| row.get::<i64, _>("article_id"))
+            .collect())
+    }
+
+    /// Published article ids first seen at or after `since` (`features backfill`).
+    pub async fn published_article_ids_since(&self, since: Timestamp) -> Result<Vec<ArticleId>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT ia.article_id FROM issue_articles ia
+             JOIN articles a ON a.id = ia.article_id
+             WHERE a.first_seen >= ?
+             ORDER BY ia.article_id",
+        )
+        .bind(fmt_ts(since))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| row.get::<i64, _>("article_id"))
+            .collect())
+    }
+
+    /// Every article id first seen at or after `since` (`features backfill --all`).
+    pub async fn article_ids_since(&self, since: Timestamp) -> Result<Vec<ArticleId>> {
+        let rows = sqlx::query("SELECT id FROM articles WHERE first_seen >= ? ORDER BY id")
+            .bind(fmt_ts(since))
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|row| row.get::<i64, _>("id")).collect())
+    }
+
     /// Articles the LLM scored below `threshold` within the last `days` (§3.5).
     pub async fn recently_low_scored_ids(
         &self,
