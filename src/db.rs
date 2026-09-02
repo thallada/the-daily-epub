@@ -25,9 +25,9 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// `kv` key holding the ingest watermark (§3.1).
 pub const KV_WATERMARK: &str = "ingest_watermark";
-/// `kv` key holding the current taste profile document (§3.6).
+/// `kv` key holding the current system-prompt profile document (§8.4).
 pub const KV_TASTE_PROFILE: &str = "taste_profile";
-/// `kv` key holding the taste profile version/build time (§3.6).
+/// `kv` key holding the profile version/build time (§8.2).
 pub const KV_PROFILE_VERSION: &str = "profile_version";
 
 #[derive(Debug, thiserror::Error)]
@@ -107,7 +107,7 @@ impl Db {
     }
 
     // -----------------------------------------------------------------
-    // kv (§3.1 watermark, §3.6 taste profile)
+    // kv (§3.1 watermark, §8 profile)
     // -----------------------------------------------------------------
 
     pub async fn kv_get(&self, key: &str) -> Result<Option<String>> {
@@ -635,7 +635,7 @@ impl Db {
     }
 
     // -----------------------------------------------------------------
-    // runs (§3.6 cost guardrail, §3.13)
+    // runs (§3.13, plan §7.6)
     // -----------------------------------------------------------------
 
     /// Insert a `running` row at the top of `generate`; returns `runs.id`.

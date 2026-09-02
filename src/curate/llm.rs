@@ -122,7 +122,8 @@ pub struct UsageMeter {
 }
 
 impl UsageMeter {
-    /// Compatibility constructor for the existing DeepSeek call sites.
+    /// A meter priced from the `[deepseek]` table; the other providers build
+    /// theirs with [`UsageMeter::with_prices`].
     pub fn new(cfg: &DeepseekConfig, limit_usd: f64) -> Self {
         Self::with_prices(PriceTable::deepseek(cfg), limit_usd)
     }

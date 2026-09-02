@@ -246,7 +246,7 @@ pub fn composite_social_score(refs: &[SocialRef]) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// Curation (§3.5, §3.6)
+// Curation (plan §10–§13)
 // ---------------------------------------------------------------------------
 
 /// DeepSeek's close read of one article (§12.1).
@@ -322,7 +322,7 @@ impl Candidate {
     }
 }
 
-/// One selected article with its section placement (§3.6 stage B).
+/// One selected article with its section placement (§13).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pick {
     pub article: Article,
@@ -340,13 +340,14 @@ pub struct Pick {
     pub discussion: Option<Discussion>,
 }
 
-/// The day's final lineup: 15–25 picks grouped into sections (§3.6 stage B).
+/// The day's final lineup grouped into sections (§13): no minimum size,
+/// `curation.max_article_count` (or `--max-articles`) as the ceiling.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lineup {
     pub date: Date,
     /// Sorted by (section order, position).
     pub picks: Vec<Pick>,
-    /// Section names in issue order; empty sections are omitted (§3.6).
+    /// Section names in issue order; empty sections are omitted.
     pub section_order: Vec<String>,
 }
 
@@ -367,16 +368,17 @@ impl Lineup {
     }
 }
 
-/// Stage-C editorial output (§3.6).
+/// Editorial output: the Brief and the per-article summaries (§14).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Editorial {
-    /// "From the Editor", 250–400 words, already sanitized XHTML.
+    /// The Brief (§14.2), 120–200 words, already sanitized XHTML.
     pub front_page_html: String,
-    /// Article id → 2–3 sentence newspaper abstract.
+    /// Article id → 2–3 sentence newspaper abstract (§14.1).
     pub summaries: BTreeMap<ArticleId, String>,
 }
 
-/// The taste profile that forms the DeepSeek system prompt (§3.6, `kv`).
+/// The reader profile that forms the system prompt shared by every LLM call
+/// (§8.4); the current text lives in `kv`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TasteProfile {
     /// Full ~600-word prompt document.
@@ -743,10 +745,10 @@ pub struct RatedArticle {
 }
 
 // ---------------------------------------------------------------------------
-// LLM accounting (§3.6 cost guardrail)
+// LLM accounting (§5 per-provider budgets)
 // ---------------------------------------------------------------------------
 
-/// Token counters accumulated across every DeepSeek call in a run (§3.6).
+/// Token counters accumulated across one provider's calls in a run (§5).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Cache-miss input tokens (billed at the full input rate).
@@ -766,7 +768,7 @@ impl TokenUsage {
         self.output_tokens += other.output_tokens;
     }
 
-    /// USD cost given the per-1M-token prices from `[deepseek]` config (§3.6).
+    /// USD cost given a provider's per-1M-token prices (§4.1–§4.2).
     pub fn cost_usd(
         &self,
         price_input: f64,

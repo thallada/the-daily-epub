@@ -16,7 +16,10 @@ use crate::db::{Db, KV_PROFILE_VERSION, KV_TASTE_PROFILE};
 use crate::types::{Facets, RatedArticle, TasteProfile};
 
 pub const REBUILD_INTERVAL_DAYS: i64 = 7;
-pub const RATINGS_LOOKBACK_DAYS: i64 = 36_500;
+/// The verdict block and the weekly rebuild are bounded by count
+/// (`verdicts_in_prompt`, [`MAX_RATINGS_IN_REBUILD`]), not by age (§8.3, §8.4),
+/// so their `current_ratings` lookback is effectively unbounded.
+const RATINGS_LOOKBACK_DAYS: i64 = 36_500;
 pub const KV_LEARNED_ADJUSTMENTS: &str = "taste_profile_learned";
 const MAX_RATINGS_IN_REBUILD: usize = 200;
 

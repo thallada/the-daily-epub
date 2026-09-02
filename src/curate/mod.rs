@@ -148,7 +148,7 @@ impl Curator {
 // ---------------------------------------------------------------------------
 
 /// Crude token estimate: DeepSeek averages ~4 characters per token for English
-/// prose. Only used to size prompt budgets (§3.6 stage C).
+/// prose. Only used to size prompt budgets.
 pub fn approx_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
@@ -215,7 +215,7 @@ pub fn truncate_words(text: &str, max_words: usize) -> String {
     out
 }
 
-/// Truncate to roughly `max_tokens` tokens on a word boundary (§3.6 stage C).
+/// Truncate to roughly `max_tokens` tokens on a word boundary.
 pub fn truncate_tokens(text: &str, max_tokens: usize) -> String {
     let max_chars = max_tokens.saturating_mul(4);
     if text.len() <= max_chars {

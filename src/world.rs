@@ -160,11 +160,11 @@ fn dropped(element: &scraper::node::Element) -> bool {
 fn node_text(node: NodeRef<'_>, skip_lists: bool, out: &mut String) {
     match node.value() {
         Node::Text(text) => {
-            out.push_str(&text);
+            out.push_str(text);
             out.push(' ');
         }
         Node::Element(element) => {
-            if dropped(&element) || (skip_lists && matches!(element.name(), "ul" | "ol")) {
+            if dropped(element) || (skip_lists && matches!(element.name(), "ul" | "ol")) {
                 return;
             }
             for child in node.children() {
@@ -208,7 +208,7 @@ fn links_without_child_lists(element: ElementRef<'_>, base: &Url) -> Vec<String>
         let Node::Element(element) = node.value() else {
             return;
         };
-        if dropped(&element) || matches!(element.name(), "ul" | "ol") {
+        if dropped(element) || matches!(element.name(), "ul" | "ol") {
             return;
         }
         if element.name() == "a"

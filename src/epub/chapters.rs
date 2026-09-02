@@ -237,7 +237,7 @@ fn published_display(pick: &Pick) -> Option<String> {
         .map(|ts| ts.to_zoned(jiff::tz::TimeZone::UTC).date().to_string())
 }
 
-/// "From the Editor" front page plus the issue stats line (§3.10).
+/// The Brief (§14.2) under the masthead, plus the issue stats line (§3.10).
 pub fn render_front_page(issue: &Issue) -> Result<Chapter, EpubError> {
     let body = issue.editorial.front_page_html.trim();
     let body_html = if body.is_empty() {
@@ -249,7 +249,7 @@ pub fn render_front_page(issue: &Issue) -> Result<Chapter, EpubError> {
         to_xhtml(&ammonia::clean(body))
     };
     let tpl = FrontPage {
-        title: "From the Editor".into(),
+        title: "The Brief".into(),
         display_date: issue.meta.display_date.clone(),
         issue_number: issue.meta.issue_number,
         stats_line: issue.meta.stats_line(),
@@ -258,7 +258,7 @@ pub fn render_front_page(issue: &Issue) -> Result<Chapter, EpubError> {
     Ok(Chapter {
         id: "front".into(),
         href: "front.xhtml".into(),
-        title: "From the Editor".into(),
+        title: "The Brief".into(),
         xhtml: tpl.render()?,
         toc_level: 1,
     })
@@ -726,7 +726,7 @@ mod tests {
         let issue = issue();
         let chapter = render_front_page(&issue).unwrap();
         assert_eq!(chapter.href, "front.xhtml");
-        assert!(chapter.xhtml.contains("From the Editor"));
+        assert!(chapter.xhtml.contains("The Brief"));
         assert!(chapter.xhtml.contains("2 articles"));
         assert!(chapter.xhtml.contains("both worth your coffee"));
         assert!(chapter.xhtml.contains("No. 42"));

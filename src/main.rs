@@ -150,28 +150,36 @@ impl RatingSetLabel {
 
 #[derive(Debug, clap::Args)]
 struct RatingsListArgs {
+    /// How many days of verdicts to list.
     #[arg(long, default_value_t = 90)]
     days: i64,
+    /// Only verdicts with this label.
     #[arg(long, value_enum)]
     label: Option<RatingListLabel>,
 }
 
 #[derive(Debug, clap::Args)]
 struct RatingsSetArgs {
+    /// Article id, as printed by `ratings list` or `explain`.
     #[arg(long, required_unless_present = "url", conflicts_with = "url")]
     article: Option<ArticleId>,
+    /// Article URL; canonicalized before lookup.
     #[arg(long, required_unless_present = "article", conflicts_with = "article")]
     url: Option<String>,
+    /// The verdict to record.
     #[arg(long, value_enum)]
     label: RatingSetLabel,
+    /// Free-text note shown to the weekly profile rebuild.
     #[arg(long)]
     note: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
 struct RatingsClearArgs {
+    /// Article id, as printed by `ratings list` or `explain`.
     #[arg(long, required_unless_present = "url", conflicts_with = "url")]
     article: Option<ArticleId>,
+    /// Article URL; canonicalized before lookup.
     #[arg(long, required_unless_present = "article", conflicts_with = "article")]
     url: Option<String>,
 }
@@ -213,7 +221,7 @@ struct StatsArgs {
 enum FeaturesCommand {
     /// Embed rated and published articles, then interests, into the cache.
     Backfill(BackfillArgs),
-    /// Drop stale embeddings and old candidate telemetry per the retention config.
+    /// Drop stale embeddings, old candidate telemetry and old assessments per the retention config.
     Prune,
 }
 
@@ -668,7 +676,7 @@ async fn cmd_features(config: &Config, db: &Db, command: FeaturesCommand) -> Res
         }
         FeaturesCommand::Prune => {
             let ranking = &config.curation.ranking;
-            let (embeddings, rows) = telemetry::prune(
+            let pruned = telemetry::prune(
                 db,
                 ranking.embedding_retention_days,
                 ranking.telemetry_retention_days,
@@ -676,8 +684,12 @@ async fn cmd_features(config: &Config, db: &Db, command: FeaturesCommand) -> Res
             )
             .await?;
             println!(
-                "pruned {embeddings} embeddings older than {} days and {rows} candidate rows older than {} days",
-                ranking.embedding_retention_days, ranking.telemetry_retention_days
+                "pruned {} embeddings older than {} days, {} candidate rows and {} assessments older than {} days",
+                pruned.embeddings,
+                ranking.embedding_retention_days,
+                pruned.telemetry,
+                pruned.assessments,
+                ranking.telemetry_retention_days
             );
         }
     }

@@ -18,18 +18,7 @@ use crate::db::{Db, fmt_ts};
 use crate::report::RunReport;
 use crate::types::{ArticleId, Candidate, NearMiss};
 
-/// The stage vocabulary of §7.4, in pipeline order.
-pub const STAGES: [&str; 7] = [
-    "excluded",
-    "eligible",
-    "triaged",
-    "admitted",
-    "assessed",
-    "shortlisted",
-    "selected",
-];
-
-/// Signal names rendered by `explain`, including the LLM ones steps 4–5 add.
+/// Signal names rendered by `explain`, in the order of §7.5.
 const RENDERED_SIGNALS: [&str; 8] = [
     "interest",
     "knn",
@@ -850,15 +839,29 @@ pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String>
 // `features prune` (§7.1, §7.4)
 // ---------------------------------------------------------------------------
 
+/// Rows removed by one [`prune`] pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// `article_embeddings` of unrated, unpublished articles past
+    /// `embedding_retention_days`.
+    pub embeddings: u64,
+    /// `candidate_runs` rows of runs past `telemetry_retention_days`.
+    pub telemetry: u64,
+    /// `article_assessments` assessed more than `telemetry_retention_days` ago.
+    pub assessments: u64,
+}
+
 /// Delete `article_embeddings` for articles neither rated nor published that
-/// are older than `embedding_retention_days`, and `candidate_runs` rows whose
-/// run started more than `telemetry_retention_days` ago. Returns the counts.
+/// are older than `embedding_retention_days`, `candidate_runs` rows whose run
+/// started more than `telemetry_retention_days` ago, and `article_assessments`
+/// older than the same window (§7.1, §7.4). Runs from `features prune` and
+/// once per `generate` after publishing.
 pub async fn prune(
     db: &Db,
     embedding_retention_days: i64,
     telemetry_retention_days: i64,
     now: Timestamp,
-) -> Result<(u64, u64), sqlx::Error> {
+) -> Result<Pruned, sqlx::Error> {
     let cutoff = |days: i64| {
         now.checked_sub(jiff::Span::new().hours(days.max(0).saturating_mul(24)))
             .unwrap_or(Timestamp::UNIX_EPOCH)
@@ -886,7 +889,17 @@ pub async fn prune(
     .execute(db.pool())
     .await?
     .rows_affected();
-    Ok((embeddings, telemetry))
+
+    let assessments = sqlx::query("DELETE FROM article_assessments WHERE assessed_at < ?")
+        .bind(fmt_ts(cutoff(telemetry_retention_days)))
+        .execute(db.pool())
+        .await?
+        .rows_affected();
+    Ok(Pruned {
+        embeddings,
+        telemetry,
+        assessments,
+    })
 }
 
 #[cfg(test)]
@@ -1523,13 +1536,26 @@ mod tests {
         let new_run = db.start_run(date(), now).await.unwrap();
         thin_excluded(&db, old_run, 1, "blocked").await.unwrap();
         thin_excluded(&db, new_run, 1, "blocked").await.unwrap();
+        for (id, assessed_at) in [(1, old.clone()), (2, fmt_ts(now))] {
+            sqlx::query(
+                "INSERT INTO article_assessments
+                     (article_id, stage, model, prompt_version, score, assessed_at)
+                 VALUES (?, 'triage', 'deepseek-v4-flash', 1, 7.0, ?)",
+            )
+            .bind(id)
+            .bind(&assessed_at)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
 
-        let (embeddings, telemetry) = prune(&db, 120, 180, now).await.unwrap();
+        let pruned = prune(&db, 120, 180, now).await.unwrap();
         assert_eq!(
-            embeddings, 1,
+            pruned.embeddings, 1,
             "only the old, unrated, unpublished article 3"
         );
-        assert_eq!(telemetry, 1, "only the old run's rows");
+        assert_eq!(pruned.telemetry, 1, "only the old run's rows");
+        assert_eq!(pruned.assessments, 1, "only the 200-day-old assessment");
         let remaining: Vec<i64> =
             sqlx::query_scalar("SELECT article_id FROM article_embeddings ORDER BY article_id")
                 .fetch_all(db.pool())
@@ -1541,5 +1567,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(runs, vec![new_run]);
+        let assessed: Vec<i64> = sqlx::query_scalar("SELECT article_id FROM article_assessments")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(assessed, vec![2]);
+
+        // A second pass finds nothing left to remove.
+        assert_eq!(prune(&db, 120, 180, now).await.unwrap(), Pruned::default());
     }
 }

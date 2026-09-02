@@ -596,7 +596,7 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
         "every candidate came back assessed"
     );
 
-    let lineup = curator.select(candidates, date()).await.expect("stage B");
+    let lineup = curator.select(candidates, date()).await.expect("editor");
     assert_eq!(lineup.picks.len(), 5);
     assert_eq!(
         lineup.lead().map(|p| p.article.id),

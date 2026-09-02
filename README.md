@@ -109,15 +109,15 @@ sudo install -m0755 target/release/daily-epub /usr/local/bin/
 daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm] [--skip-embeddings] [--rescore]
 daily-epub serve                # rating endpoints + OPDS catalog + downloads
 daily-epub profile rebuild      # regenerate learned profile adjustments
-daily-epub ratings list --days 90
+daily-epub ratings list [--days 90] [--label loved|good|down|cleared]
 daily-epub ratings set --article 42 --label loved --note "excellent"
 daily-epub ratings clear --url https://example.com/article
 daily-epub explain --date YYYY-MM-DD (--article ID | --url URL) [--run-id N]
 daily-epub explain --date YYYY-MM-DD --near-misses [N]
 daily-epub stats [--days 14]    # the evaluation framework, one fact per line
 daily-epub features backfill [--days 30] [--rated-only] [--all] [--yes]
-daily-epub features prune       # stale embeddings + old candidate telemetry
-daily-epub backfill-social      # re-poll social scores for recent articles
+daily-epub features prune       # stale embeddings, old telemetry and assessments
+daily-epub backfill-social [--days 7]   # re-poll social scores for recent articles
 daily-epub db migrate           # run migrations (also automatic on every start)
 ```
 
@@ -156,8 +156,9 @@ set), then the standing interests, then — only with `--all` — every other
 article first seen in the window. It prints an estimate and asks before spending
 more than 5M tokens unless `--yes`; a warm cache makes zero calls. `features
 prune` drops embeddings of articles neither rated nor published that are older
-than `curation.ranking.embedding_retention_days`, and `candidate_runs` rows of
-runs older than `curation.ranking.telemetry_retention_days`.
+than `curation.ranking.embedding_retention_days`, and `candidate_runs` rows and
+`article_assessments` older than `curation.ranking.telemetry_retention_days`.
+`generate` runs the same sweep once after publishing, best effort.
 
 ---
 

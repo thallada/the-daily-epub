@@ -47,7 +47,8 @@ pub struct Config {
     pub timezone: String,
     /// Ingest window size in hours (§3.1).
     pub lookback_hours: u32,
-    /// How many articles the lineup should contain (§3.6 stage B).
+    /// Soft target for the lineup size (§13); `curation.max_article_count`
+    /// is the ceiling and there is no minimum.
     pub target_article_count: usize,
     /// Days of published EPUBs kept in `publish.epub_dir` (§3.11).
     pub retention_days: u32,
@@ -56,7 +57,8 @@ pub struct Config {
     /// Counted, not dated, because an XTCH issue is ~80–100 MB of pre-rendered
     /// page bitmaps: the constraint is disk, not age.
     pub xtc_retention_count: u32,
-    /// Hard cost ceiling per run (§3.6 guardrail).
+    /// DeepSeek spend ceiling per UTC day (§5); `[anthropic]` and `[voyage]`
+    /// carry their own.
     pub max_daily_usd: f64,
     /// Include the Wikipedia Current Events section (§3.8).
     pub world_briefing: bool,
@@ -129,7 +131,7 @@ impl Default for MinifluxConfig {
     }
 }
 
-/// `[deepseek]` — LLM endpoint, model and pricing (§3.6, notes "verified facts").
+/// `[deepseek]` — bulk LLM endpoint, model and pricing (§4.1, notes "verified facts").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DeepseekConfig {
@@ -263,7 +265,7 @@ impl Default for VoyageConfig {
     }
 }
 
-/// `[curation]` — pre-filter and section palette (§3.5, §3.6).
+/// `[curation]` — hygiene, feedback weights, the ranker and the section palette (§19).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CurationConfig {
@@ -278,7 +280,7 @@ pub struct CurationConfig {
     /// Extra paywalled hosts, merged with [`crate::extract::DEFAULT_PAYWALL_DOMAINS`]
     /// by the extraction stage's `excerpt_only` heuristic (§3.3).
     pub paywall_domains: Vec<String>,
-    /// The only section names the LLM may use (§3.6 stage B).
+    /// The only section names the editor may use (§13).
     pub sections: Vec<String>,
     pub feedback: FeedbackConfig,
     pub ranking: RankingConfig,
@@ -313,9 +315,7 @@ impl Default for CurationConfig {
 }
 
 /// `[curation.ranking]` — every weight, quota, gate and threshold of the
-/// personalized ranker (plan §19). Steps 4–5 consume most of these; step 3
-/// uses the learned-signal gates, the preliminary weights and the retention
-/// windows.
+/// personalized ranker (plan §19).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct RankingConfig {
@@ -923,6 +923,66 @@ mod tests {
         assert_eq!(c.curation.max_article_count, 28);
         assert_eq!(c.editorial.summary_model, SummaryModel::Editor);
         assert_eq!(c.editorial.summary_input_tokens, 3000);
+    }
+
+    /// `config.example.toml` documents the plan's numbers (§19), which are also
+    /// `Config::default()`: every documented key in these sections must exist
+    /// on the struct with the default value, and every struct field (except
+    /// the env-only `api_key`) must be documented in the file.
+    #[test]
+    fn shipped_example_config_matches_the_defaults_key_for_key() {
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        let documented: serde_json::Value = Figment::from(Toml::file(&example))
+            .extract()
+            .expect("config.example.toml must parse as a table");
+        let defaults = serde_json::to_value(Config::default()).expect("defaults serialize");
+
+        fn compare(path: &str, documented: &serde_json::Value, default: &serde_json::Value) {
+            let (Some(documented), Some(default)) = (documented.as_object(), default.as_object())
+            else {
+                // TOML `60` and the f64 default `60.0` are the same setting, and
+                // an f32 field (`editorial_temperature`) widens inexactly.
+                match (documented.as_f64(), default.as_f64()) {
+                    (Some(doc), Some(def)) => assert!(
+                        (doc - def).abs() <= 1e-6 * def.abs().max(1.0),
+                        "{path}: documented {doc} vs default {def}"
+                    ),
+                    _ => assert_eq!(documented, default, "{path}"),
+                }
+                return;
+            };
+            for (key, value) in default {
+                if key == "api_key" {
+                    assert!(
+                        !documented.contains_key(key),
+                        "{path}.{key} must stay out of the TOML (env only)"
+                    );
+                    continue;
+                }
+                let doc = documented
+                    .get(key)
+                    .unwrap_or_else(|| panic!("{path}.{key} is missing from config.example.toml"));
+                compare(&format!("{path}.{key}"), doc, value);
+            }
+            for key in documented.keys() {
+                assert!(
+                    default.contains_key(key),
+                    "{path}.{key} is documented but not a config field"
+                );
+            }
+        }
+
+        for (key, default) in defaults.as_object().expect("config is a table") {
+            let section = match key.as_str() {
+                "curation" | "anthropic" | "voyage" | "editorial" | "deepseek" => key,
+                "target_article_count" | "max_daily_usd" | "profile_path" | "interests_opml" => key,
+                _ => continue,
+            };
+            let documented = documented
+                .get(section)
+                .unwrap_or_else(|| panic!("{section} is missing from config.example.toml"));
+            compare(section, documented, default);
+        }
     }
 
     #[test]

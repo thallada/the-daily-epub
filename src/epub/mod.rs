@@ -16,17 +16,6 @@ use crate::config::Config;
 use crate::images;
 use crate::types::{Artifact, Edition, ImageAsset, Issue};
 
-/// Chapter order inside an issue (§3.10).
-pub const CHAPTER_ORDER: &[&str] = &[
-    "cover",
-    "from-the-editor",
-    "in-this-issue",
-    "sections",
-    "world-briefing",
-    "behind-the-paper",
-    "colophon",
-];
-
 #[derive(Debug, thiserror::Error)]
 pub enum EpubError {
     #[error("epub build failed: {0}")]

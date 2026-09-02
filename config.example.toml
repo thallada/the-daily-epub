@@ -123,7 +123,7 @@ feed_full = 40
 semantic_min_words = 300
 exploration_slots = 5
 embedding_retention_days = 120       # `features prune`: unrated, unpublished vectors
-telemetry_retention_days = 180       # `features prune`: candidate_runs rows
+telemetry_retention_days = 180       # `features prune`: candidate_runs and article_assessments
 
 [curation.ranking.quotas]
 triage = 60

@@ -254,6 +254,9 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
     };
 
     db.finish_run(run_id, &report).await?;
+    if stages.published.is_some() {
+        prune_retention(config, db).await;
+    }
     // The issue row is written before the report is costed, so stamp the finished
     // report onto it now (the paths are preserved by `COALESCE`, §3.13).
     if !opts.dry_run
@@ -280,6 +283,28 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
         xtc: stages.xtc,
         published: stages.published,
     })
+}
+
+/// The retention sweep of `features prune` (§7.1, §7.4), run once per
+/// published issue. Best effort: a failure is logged and never touches the run.
+async fn prune_retention(config: &Config, db: &Db) {
+    let ranking = &config.curation.ranking;
+    match telemetry::prune(
+        db,
+        ranking.embedding_retention_days,
+        ranking.telemetry_retention_days,
+        Timestamp::now(),
+    )
+    .await
+    {
+        Ok(pruned) => tracing::info!(
+            embeddings = pruned.embeddings,
+            candidate_rows = pruned.telemetry,
+            assessments = pruned.assessments,
+            "retention prune complete"
+        ),
+        Err(error) => tracing::warn!(%error, "retention prune failed; continuing"),
+    }
 }
 
 /// What [`run_stages`] hands back; [`generate`] pairs it with the costed report.
@@ -1044,10 +1069,11 @@ async fn record_issue(db: &Db, issue: &Issue, published: &Published) -> Result<(
     Ok(())
 }
 
-/// Build the DeepSeek client, running the weekly profile rebuild when it is due.
+/// Build the bulk (DeepSeek) and editor (Claude) clients, running the weekly
+/// profile rebuild when it is due.
 ///
-/// Returns `None` for `--skip-llm` and for every configuration/API problem: the
-/// caller then curates heuristically instead of failing the run (§3.6).
+/// Each client is `None` for `--skip-llm` and for every configuration/API
+/// problem: the pipeline then degrades per §17 instead of failing the run.
 async fn build_llms(
     ctx: &StageContext<'_>,
     bulk_meter: &UsageMeter,

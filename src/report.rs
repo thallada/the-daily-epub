@@ -22,7 +22,7 @@ pub enum RunStatus {
     /// Everything completed.
     Ok,
     /// The issue was produced but a best-effort stage failed (social, XTC,
-    /// world briefing, images) or the cost guardrail tripped (§3.6).
+    /// world briefing, images) or a provider budget tripped (§5).
     Degraded,
     /// No issue was produced.
     Failed,
@@ -98,7 +98,7 @@ pub struct StageCounts {
     pub clusters: i64,
     /// Admitted deep-set count retained for the colophon and runs table.
     pub candidates: i64,
-    /// Articles in the final lineup (§3.6 stage B).
+    /// Articles in the final lineup (§13).
     pub selected: i64,
     /// Discussion chapters rendered (§3.7).
     pub discussions: i64,

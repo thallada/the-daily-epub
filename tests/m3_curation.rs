@@ -109,10 +109,10 @@ fn deep_messy_fixture_is_salvaged_not_rejected() {
     assert!(parse_deep_response("", &sections).is_empty());
 }
 
-/// Stage B responses must carry `{id, section, position, lead_story}` with
-/// exactly one lead, and use only palette section names (§3.6).
+/// Editor responses must carry `{id, section, position, lead_story}` with
+/// exactly one lead, and use only palette section names (plan §13).
 #[test]
-fn stage_b_fixture_parses_into_a_lineup() {
+fn editor_fixture_parses_into_a_lineup() {
     // The palette from `CurationConfig::default()` (§3.14).
     let sections = daily_epub::config::CurationConfig::default().sections;
 
