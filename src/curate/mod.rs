@@ -1,7 +1,7 @@
 //! Personalized curation: signals → triage → admission → assessment → editor.
 //!
 //! ```text
-//! ~400 eligible ─triage─▶ union admission (120) ─stage A─▶ editor ─▶ editorial
+//! ~400 eligible ─triage─▶ admission (120) ─assess/rank─▶ shortlist (60) ─editor─▶ editorial
 //! ```
 //!
 //! [`Curator`] is the thin orchestration layer the `generate` pipeline calls; the
@@ -11,24 +11,25 @@
 //! client; selection and editorial on the editor with per-call bulk fallback.
 
 pub mod admit;
+pub mod assess;
+pub mod editor;
 pub mod editorial;
 pub mod embedding;
 pub mod llm;
 pub mod prefilter;
 pub mod profile;
-pub mod score;
-pub mod select;
+pub mod rank;
 pub mod signals;
 pub mod telemetry;
 pub mod triage;
 
-use jiff::civil::Date;
+use jiff::{Timestamp, civil::Date};
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::types::{Editorial, Lineup, ScoredArticle};
+use crate::types::{Candidate, Editorial, Lineup};
 
-/// Runs the three curation stages against one day's articles (§3.5, §3.6).
+/// Runs the LLM curation stages against one day's articles (§12, §13, §14).
 pub struct Curator {
     pub config: Config,
     pub db: Db,
@@ -43,43 +44,51 @@ impl Curator {
         Self { config, db, llms }
     }
 
-    /// Stage A: batched LLM scoring of the surviving candidates (§3.6).
+    /// Deep assessment of the admitted set on the bulk client (§12.1), reusing
+    /// cached `article_assessments` rows within `assessment_reuse_days`.
     ///
-    /// A no-op under `--skip-llm`. Scores are persisted per `(article, date)`.
-    pub async fn score(&self, candidates: &mut [ScoredArticle], _date: Date) -> anyhow::Result<()> {
-        let Some(llm) = self.llms.bulk.as_ref() else {
-            tracing::info!("--skip-llm: stage A scoring skipped");
-            return Ok(());
+    /// A no-op under `--skip-llm`: like triage, nothing is read or written and
+    /// utility falls back to the present signals (§12.3, §17). When the bulk
+    /// provider is down or its budget trips, cached rows are still reused and
+    /// the failed batches simply stay unassessed.
+    pub async fn assess(
+        &self,
+        candidates: &mut [Candidate],
+        rescore: bool,
+        profile_version: Option<i64>,
+        assessed_at: Timestamp,
+    ) -> anyhow::Result<usize> {
+        let Some(bulk) = self.llms.bulk.as_ref() else {
+            tracing::info!("--skip-llm: deep assessment skipped");
+            return Ok(0);
         };
-        let span = tracing::info_span!("llm_score", candidates = candidates.len());
+        let span = tracing::info_span!("llm_assess", candidates = candidates.len());
         let _guard = span.enter();
-
-        let scored = score::score_all(
-            llm,
+        assess::run(
+            &self.db,
+            Some(bulk),
+            &self.config.deepseek.model,
             candidates,
-            self.config.deepseek.score_batch_size,
+            self.config.deepseek.deep_batch_size,
             self.config.deepseek.max_concurrent_requests,
-            &self.config.curation.sections,
+            self.config.curation.ranking.assessment_reuse_days,
+            rescore,
+            profile_version,
+            assessed_at,
             self.config.deepseek.score_temperature,
+            &self.config.curation.sections,
         )
-        .await?;
-        tracing::info!(scored, total = candidates.len(), "stage A complete");
-
-        Ok(())
+        .await
     }
 
-    /// Stage B: single-call lineup selection into sections (§3.6).
-    pub async fn select(
-        &self,
-        candidates: Vec<ScoredArticle>,
-        date: Date,
-    ) -> anyhow::Result<Lineup> {
+    /// The editor: one call that assembles the issue from the shortlist (§13).
+    pub async fn select(&self, candidates: Vec<Candidate>, date: Date) -> anyhow::Result<Lineup> {
         let sections = &self.config.curation.sections;
         let soft_target = self.config.target_article_count;
         let hard_max = self.config.curation.max_article_count;
         let span = tracing::info_span!("llm_editor", candidates = candidates.len());
         let _guard = span.enter();
-        match select::select(
+        match editor::select(
             &self.llms,
             candidates.clone(),
             sections,
@@ -92,7 +101,7 @@ impl Curator {
             Ok(lineup) => Ok(lineup),
             Err(error) => {
                 tracing::error!(%error, "editor and bulk fallback failed; selecting heuristically");
-                Ok(select::select_without_llm(
+                Ok(editor::select_without_llm(
                     candidates,
                     sections,
                     soft_target,

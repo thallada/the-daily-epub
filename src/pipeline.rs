@@ -33,7 +33,9 @@ use jiff::{Timestamp, Zoned};
 
 use crate::config::Config;
 use crate::curate::llm::{Llms, PriceTable, UsageMeter};
-use crate::curate::{Curator, admit, editorial, embedding, profile, signals, telemetry, triage};
+use crate::curate::{
+    Curator, admit, editorial, embedding, profile, rank, signals, telemetry, triage,
+};
 use crate::db::Db;
 use crate::extract::Extractor;
 use crate::miniflux::MinifluxClient;
@@ -399,10 +401,10 @@ async fn run_stages(
     report.counts.eligible = personalized.len() as i64;
     report.timings.record("hygiene", elapsed_ms(stage));
     let embeddings = build_embedding_service(ctx, report);
-    prepare_features(ctx, &mut personalized, &embeddings, report).await;
+    let article_embeddings = prepare_features(ctx, &mut personalized, &embeddings, report).await;
 
     // Build the provider clients before triage. A missing or failed bulk client
-    // skips triage and stage A, while the editor can still run on Claude (§17).
+    // skips triage and deep assessment, while the editor can still run on Claude (§17).
     let stage = Timestamp::now();
     let bulk_meter =
         UsageMeter::with_prices(PriceTable::deepseek(&config.deepseek), config.max_daily_usd);
@@ -432,13 +434,13 @@ async fn run_stages(
     // --- Stage 7: triage (§10) ---
     let stage = Timestamp::now();
     let triage_pool = triage::apply_pool_cap(&mut personalized, config.curation.ranking.triage_max);
+    let profile_version = db
+        .kv_get(crate::db::KV_PROFILE_VERSION)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse().ok());
     if let Some(bulk) = curator.llms.bulk.as_ref() {
-        let profile_version = db
-            .kv_get(crate::db::KV_PROFILE_VERSION)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|value| value.parse().ok());
         if let Err(error) = triage::run(
             db,
             bulk,
@@ -500,41 +502,57 @@ async fn run_stages(
     );
     report.timings.record("admit", elapsed_ms(stage));
 
-    let admitted = personalized
-        .iter()
-        .filter(|candidate| candidate.stage == "admitted")
-        .map(|candidate| candidate.article.id)
-        .collect::<Vec<_>>();
-    let mut candidates = personalized
-        .iter()
-        .filter(|candidate| candidate.stage == "admitted")
-        .cloned()
-        .map(Candidate::into_legacy_scored)
-        .collect::<Vec<_>>();
-
-    // --- Stage 9: legacy Stage A scoring, then editor (§21 step 4) ---
+    // --- Stage 9: deep assessment (§12.1) ---
     let stage = Timestamp::now();
-    if bulk_available && let Err(e) = curator.score(&mut candidates, date).await {
-        // A dead API or a tripped budget must not cost us the issue: selection
-        // degrades to preliminary-blend order exactly as `--skip-llm` does.
-        report.warn(format!("LLM scoring failed; ranking heuristically: {e:#}"));
+    if let Err(error) = curator
+        .assess(
+            &mut personalized,
+            ctx.rescore,
+            profile_version,
+            Timestamp::now(),
+        )
+        .await
+    {
+        report.warn(format!(
+            "deep assessment degraded; ranking continues on present signals: {error:#}"
+        ));
     }
-    report.counts.llm_scored = candidates.iter().filter(|c| c.llm.is_some()).count() as i64;
-    report.counts.llm_unscored = report.counts.candidates - report.counts.llm_scored;
-    report.counts.assessed = report.counts.llm_scored;
-    report.counts.shortlisted = admitted.len() as i64;
-    let assessed = candidates
+    report.counts.assessed = personalized
         .iter()
-        .filter(|candidate| candidate.llm.is_some())
-        .map(|candidate| candidate.article.id)
-        .collect::<Vec<_>>();
-    set_candidate_stage(&mut personalized, &assessed, "assessed", None);
-    // Every admitted article goes to the old selector, scored or not.
-    set_candidate_stage(&mut personalized, &admitted, "shortlisted", None);
+        .filter(|candidate| candidate.assessment.deep.is_some())
+        .count() as i64;
     record_candidates(ctx, &personalized)
         .await
         .context("recording assessment telemetry")?;
+    report.timings.record("assess", elapsed_ms(stage));
 
+    // --- Stage 10: utility and diversified shortlist (§12.2–§12.5) ---
+    let stage = Timestamp::now();
+    let ranked = rank::shortlist(
+        &mut personalized,
+        &article_embeddings,
+        &config.curation.ranking,
+    );
+    report.counts.shortlisted = ranked.shortlisted as i64;
+    report.counts.clusters = ranked.clusters as i64;
+    record_candidates(ctx, &personalized)
+        .await
+        .context("recording ranking telemetry")?;
+    report.timings.record("rank", elapsed_ms(stage));
+
+    let mut candidates = personalized
+        .iter()
+        .filter(|candidate| candidate.stage == "shortlisted")
+        .cloned()
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| candidate.rank_utility.unwrap_or(i64::MAX));
+    let shortlisted = candidates
+        .iter()
+        .map(|candidate| candidate.article.id)
+        .collect::<Vec<_>>();
+
+    // --- Stage 11: editor (§13) ---
+    let stage = Timestamp::now();
     let mut lineup = curator
         .select(candidates, date)
         .await
@@ -546,7 +564,7 @@ async fn run_stages(
         .map(|pick| pick.article.id)
         .collect::<Vec<_>>();
     let selected_set = selected.iter().copied().collect::<HashSet<_>>();
-    let not_selected = admitted
+    let not_selected = shortlisted
         .iter()
         .copied()
         .filter(|id| !selected_set.contains(id))
@@ -581,7 +599,7 @@ async fn run_stages(
     if lineup.picks.is_empty() {
         report.warn("the lineup is empty — check the lookback window and admission settings");
     }
-    report.timings.record("curate", elapsed_ms(stage));
+    report.timings.record("editor", elapsed_ms(stage));
 
     // --- Stage 8: comment chapters for the selected articles (§3.7) ---
     let stage = Timestamp::now();
@@ -778,7 +796,7 @@ async fn prepare_features(
     candidates: &mut [Candidate],
     service: &embedding::EmbeddingService,
     report: &mut RunReport,
-) {
+) -> HashMap<ArticleId, Vec<f32>> {
     let (config, db) = (ctx.config, ctx.db);
     let eligible = candidates
         .iter()
@@ -863,6 +881,7 @@ async fn prepare_features(
         report.warn(format!("could not record eligible candidates: {error}"));
     }
     report.timings.record("signals", elapsed_ms(stage));
+    article_embeddings
 }
 
 async fn record_candidates(ctx: &StageContext<'_>, candidates: &[Candidate]) -> Result<()> {
@@ -891,9 +910,9 @@ async fn record_candidates_with_why(
                 admitted_by: admitted_by.as_deref(),
                 signals_json: &json,
                 utility: candidate.utility,
-                rank_utility: None,
+                rank_utility: candidate.rank_utility,
                 cluster_id: candidate.cluster,
-                cluster_rank: None,
+                cluster_rank: candidate.cluster_rank,
                 editor_why: editor_why.get(&candidate.article.id).copied().flatten(),
             },
         )
@@ -1077,7 +1096,7 @@ fn log_resolved_providers(config: &Config, skip_llm: bool, skip_embeddings: bool
 /// Bump a number when the corresponding instruction block changes.
 const PROMPT_VERSIONS: &[(&str, u32)] = &[
     ("triage", triage::TRIAGE_PROMPT_VERSION as u32),
-    ("score", 1),
+    ("deep", crate::curate::assess::DEEP_PROMPT_VERSION as u32),
     ("editor", 2),
     ("summary", 1),
     ("brief", 2),
@@ -1095,6 +1114,7 @@ fn resolved_run_config(config: &Config, soft_target: usize, hard_max: usize) -> 
     serde_json::json!({
         "target_article_count": soft_target,
         "TRIAGE_PROMPT_VERSION": triage::TRIAGE_PROMPT_VERSION,
+        "DEEP_PROMPT_VERSION": crate::curate::assess::DEEP_PROMPT_VERSION,
         "curation": curation,
         "editorial": config.editorial,
         "voyage": voyage,
@@ -1197,6 +1217,10 @@ mod tests {
             triage::TRIAGE_PROMPT_VERSION
         );
         assert_eq!(
+            value["DEEP_PROMPT_VERSION"],
+            crate::curate::assess::DEEP_PROMPT_VERSION
+        );
+        assert_eq!(
             value["prompt_versions"]["triage"],
             triage::TRIAGE_PROMPT_VERSION
         );
@@ -1246,6 +1270,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::curate::embedding::{EmbeddingClient, EmbeddingService, MockBackend};
+    use crate::curate::llm::{LlmClient, MockBackend as ChatMockBackend};
     use crate::types::{Entry, ExtractMethod, SourceKind, SourceRef};
     use sqlx::Row as _;
 
@@ -1492,7 +1517,24 @@ mod tests {
         assert_eq!(thin, "{}");
 
         // Admission replaces the old prefilter and carries retriever telemetry.
-        let curator = Curator::new(h.config.clone(), h.db.clone(), Llms::default());
+        // DeepSeek is "down": the bulk client exists but every call fails, so
+        // the deep set is ranked on present signals and the editor falls back
+        // to utility order (§17).
+        let bulk_backend = Arc::new(ChatMockBackend::new());
+        let bulk = LlmClient::with_backend(
+            &h.config.deepseek.model,
+            "SYSTEM".into(),
+            UsageMeter::new(&h.config.deepseek, h.config.max_daily_usd),
+            bulk_backend.clone(),
+        );
+        let curator = Curator::new(
+            h.config.clone(),
+            h.db.clone(),
+            Llms {
+                bulk: Some(bulk),
+                editor: None,
+            },
+        );
         admit::admit(&mut features, run_date(), &h.config.curation.ranking);
         record_candidates(&ctx, &features).await.unwrap();
         let admitted = features
@@ -1504,19 +1546,67 @@ mod tests {
             admitted.iter().copied().collect::<BTreeSet<_>>(),
             BTreeSet::from([a, b])
         );
-        let candidates = features
+
+        let assessed = curator
+            .assess(&mut features, false, None, now())
+            .await
+            .unwrap();
+        assert_eq!(assessed, 0, "every deep batch failed");
+        assert_eq!(bulk_backend.calls(), 1, "one batch was attempted");
+        assert!(features.iter().all(|c| c.assessment.deep.is_none()));
+        let embeddings = features
             .iter()
-            .filter(|candidate| candidate.stage == "admitted")
+            .map(|candidate| (candidate.article.id, vec![1.0, 0.0, 0.0, 0.0]))
+            .collect::<HashMap<_, _>>();
+        let ranked = rank::shortlist(&mut features, &embeddings, &h.config.curation.ranking);
+        assert_eq!(ranked.shortlisted, 2);
+        assert_eq!(ranked.clusters, 1, "identical embeddings share a leader");
+        record_candidates(&ctx, &features).await.unwrap();
+        let rows = sqlx::query(
+            "SELECT article_id, stage, utility, rank_utility, cluster_id, cluster_rank
+                 FROM candidate_runs WHERE run_id = ? AND stage = 'shortlisted'
+                 ORDER BY rank_utility",
+        )
+        .bind(h.run_id)
+        .fetch_all(h.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2, "both admitted articles were shortlisted");
+        for (index, row) in rows.iter().enumerate() {
+            let rank = index as i64 + 1;
+            assert_eq!(row.get::<String, _>("stage"), "shortlisted");
+            assert!(
+                row.get::<Option<f64>, _>("utility").is_some(),
+                "utility over present signals"
+            );
+            assert_eq!(row.get::<Option<i64>, _>("rank_utility"), Some(rank));
+            assert_eq!(row.get::<Option<i64>, _>("cluster_id"), Some(1));
+            assert_eq!(row.get::<Option<i64>, _>("cluster_rank"), Some(rank));
+        }
+        let best = rows[0].get::<i64, _>("article_id");
+
+        let mut candidates = features
+            .iter()
+            .filter(|candidate| candidate.stage == "shortlisted")
             .cloned()
-            .map(Candidate::into_legacy_scored)
-            .collect();
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|candidate| candidate.rank_utility.unwrap_or(i64::MAX));
         let lineup = curator.select(candidates, run_date()).await.unwrap();
+        assert_eq!(
+            bulk_backend.calls(),
+            2,
+            "the editor tried the bulk fallback"
+        );
         let selected = lineup
             .picks
             .iter()
             .map(|p| p.article.id)
             .collect::<Vec<_>>();
         assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0], best,
+            "without any LLM the lineup follows utility"
+        );
         let not_selected = admitted
             .iter()
             .copied()
@@ -1562,6 +1652,17 @@ mod tests {
             text.contains("stage: shortlisted · reason: not_selected"),
             "{text}"
         );
+        assert!(
+            text.contains("utility: ") && text.contains(" · rank 2"),
+            "{text}"
+        );
+        assert!(text.contains("cluster: 1 · rank 2"), "{text}");
+        assert!(text.contains("quality      absent"), "{text}");
+        let misses = telemetry::explain_near_misses(&h.db, run_date(), Some(h.run_id), 5)
+            .await
+            .unwrap();
+        assert!(misses.contains("not selected, by utility"), "{misses}");
+        assert!(misses.contains("shortlisted, not_selected"), "{misses}");
     }
 
     #[tokio::test]

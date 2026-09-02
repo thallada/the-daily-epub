@@ -1,0 +1,76 @@
+{
+  "articles": [
+    {
+      "id": 101,
+      "quality": 8.5,
+      "fit": 7.0,
+      "category": "Tech & Engineering",
+      "rationale": "First-hand 40TB Postgres migration with failure timeline, numbers and a rollback plan",
+      "paywalled_guess": false,
+      "facets": {
+        "format": "first_hand_account",
+        "depth": "deep",
+        "evidence": "first_hand",
+        "commerciality": "none",
+        "topic_group": "software_engineering",
+        "technicality": "advanced",
+        "locality": "not_applicable",
+        "specific_topics": ["Postgres migration", "storage failover", "rollback planning"]
+      }
+    },
+    {
+      "id": 102,
+      "quality": 3.0,
+      "fit": 2.5,
+      "category": "AI & Machine Learning",
+      "rationale": "Model release announcement, benchmark table from the vendor, no independent evaluation",
+      "paywalled_guess": false,
+      "facets": {
+        "format": "announcement_roundup",
+        "depth": "brief",
+        "evidence": "speculative",
+        "commerciality": "promotional",
+        "topic_group": "ai_ml",
+        "technicality": "light",
+        "locality": "international",
+        "specific_topics": ["model launch"]
+      }
+    },
+    {
+      "id": 103,
+      "quality": 6.5,
+      "fit": 8.0,
+      "category": "Boston & Local",
+      "rationale": "MBTA slow-zone data pulled from the tracker and charted by line with original analysis",
+      "paywalled_guess": false,
+      "facets": {
+        "format": "analysis_essay",
+        "depth": "standard",
+        "evidence": "data_or_experiment",
+        "commerciality": "none",
+        "topic_group": "boston_new_england",
+        "technicality": "intermediate",
+        "locality": "boston_new_england",
+        "specific_topics": ["MBTA slow zones", "transit data"]
+      }
+    },
+    {
+      "id": 104,
+      "quality": 5.0,
+      "fit": 6.0,
+      "category": "Culture & Essays",
+      "rationale": "Promising essay on typesetting history; the body reads cut off after the second section",
+      "paywalled_guess": true,
+      "facets": {
+        "format": "analysis_essay",
+        "depth": "standard",
+        "evidence": "synthesis",
+        "commerciality": "none",
+        "topic_group": "books_writing",
+        "technicality": "nontechnical",
+        "locality": "not_applicable",
+        "specific_topics": ["typesetting", "print history"]
+      }
+    }
+  ]
+}

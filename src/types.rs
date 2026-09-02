@@ -249,21 +249,21 @@ pub fn composite_social_score(refs: &[SocialRef]) -> f64 {
 // Curation (§3.5, §3.6)
 // ---------------------------------------------------------------------------
 
-/// DeepSeek stage-A output for one article (§3.6).
+/// DeepSeek's close read of one article (§12.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LlmScore {
-    /// 0–10.
-    pub score: f64,
-    pub category: String,
-    /// ≤ 20 words.
+pub struct Deep {
+    /// Editorial quality on the article's own terms, clamped to 0–10.
+    pub quality: f64,
+    /// Fit for this reader, clamped to 0–10.
+    pub fit: f64,
+    pub category: Option<String>,
     pub rationale: String,
-    #[serde(default)]
-    pub is_paywalled_guess: bool,
+    pub paywalled_guess: bool,
+    pub facets: Facets,
+    pub model: String,
+    pub prompt_version: i64,
+    pub assessed_at: Timestamp,
 }
-
-/// Deep assessment output. Step 5 replaces the legacy stage-A producer while
-/// keeping its shape compatible for this transition step.
-pub type Deep = LlmScore;
 
 /// Personalized first-pass judgment cached in `article_assessments` (§10).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -282,7 +282,6 @@ pub struct Triage {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Assessment {
     pub triage: Option<Triage>,
-    /// Filled in by step 5.
     pub deep: Option<Deep>,
 }
 
@@ -294,10 +293,10 @@ pub struct Candidate {
     pub exploration: bool,
     pub signals: crate::curate::signals::Signals,
     pub assessment: Assessment,
-    /// Filled in by step 5.
     pub utility: Option<f64>,
-    /// Filled in by step 5.
+    pub rank_utility: Option<i64>,
     pub cluster: Option<i64>,
+    pub cluster_rank: Option<i64>,
     pub admitted_by: Vec<String>,
     pub stage: String,
     pub excluded_reason: Option<String>,
@@ -313,54 +312,13 @@ impl Candidate {
             signals,
             assessment: Assessment::default(),
             utility: None,
+            rank_utility: None,
             cluster: None,
+            cluster_rank: None,
             admitted_by: Vec::new(),
             stage: "eligible".into(),
             excluded_reason: None,
         }
-    }
-
-    /// Adapter retained until step 5 retires stage A and `ScoredArticle`.
-    pub fn into_legacy_scored(self) -> ScoredArticle {
-        ScoredArticle {
-            prefilter_score: self.signals.preliminary.unwrap_or(0.0),
-            social_score: self.signals.social.unwrap_or(0.0),
-            llm: self.assessment.deep,
-            triage: self.assessment.triage,
-            auto_include: self.auto_include,
-            exploration: self.exploration,
-            admitted_by: self.admitted_by,
-            article: self.article,
-        }
-    }
-}
-
-/// An article carrying every ranking signal computed so far (§3.5, §3.6).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ScoredArticle {
-    pub article: Article,
-    /// Heuristic pre-filter score, 0–100 (§3.5).
-    pub prefilter_score: f64,
-    /// Cached [`composite_social_score`] for the article.
-    pub social_score: f64,
-    /// `None` until stage A has run (or when `--skip-llm`).
-    pub llm: Option<LlmScore>,
-    /// Transitional metadata rendered by the editor until step 5 removes this type.
-    #[serde(default)]
-    pub triage: Option<Triage>,
-    /// From `curation.always_include_feeds`: may be scored but never dropped (§3.5).
-    pub auto_include: bool,
-    #[serde(default)]
-    pub exploration: bool,
-    #[serde(default)]
-    pub admitted_by: Vec<String>,
-}
-
-impl ScoredArticle {
-    /// Ranking key for stage B: LLM score weighted with social proof (§3.6).
-    pub fn combined_score(&self) -> f64 {
-        let llm = self.llm.as_ref().map(|l| l.score).unwrap_or(0.0);
-        llm * 10.0 + self.social_score * 4.0 + self.prefilter_score * 0.1
     }
 }
 
@@ -377,7 +335,7 @@ pub struct Pick {
     pub why: Option<String>,
     /// Newspaper-abstract summary from stage C; `None` until editorial runs.
     pub summary: Option<String>,
-    pub llm: Option<LlmScore>,
+    pub llm: Option<Deep>,
     /// Rendered comment chapter, when the article had social refs (§3.7).
     pub discussion: Option<Discussion>,
 }
@@ -706,7 +664,8 @@ pub struct RatingEvent {
     pub event_at: Timestamp,
 }
 
-/// Descriptive deep-assessment facets (§12.1), populated beginning in step 5.
+/// Descriptive deep-assessment facets (§12.1); shown to the editor, the profile
+/// rebuild and `explain`, never a numeric ranking signal.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Facets {
     pub format: Option<String>,

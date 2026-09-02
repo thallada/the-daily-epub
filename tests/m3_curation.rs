@@ -3,8 +3,8 @@
 //! The stage logic is unit-tested inside `src/curate/*`. What this file guards is
 //! the contract *between* the curation stages and everything around them:
 //!
-//! * the recorded DeepSeek fixtures still parse through the real
-//!   `score.rs` / `select.rs` / `editorial.rs` parsers into the structures the
+//! * recorded DeepSeek fixtures still parse through the real
+//!   `assess.rs` / `editor.rs` / `editorial.rs` parsers into the structures the
 //!   pipeline consumes, and the lenient parsers still cope with the messy one;
 //! * the shipped Scour OPML still yields the ~220 interests the taste profile is
 //!   assembled from (§3.6a);
@@ -17,11 +17,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use daily_epub::curate::assess::parse_deep_response;
+use daily_epub::curate::editor::parse_selection_response;
 use daily_epub::curate::editorial::BriefResponse;
 use daily_epub::curate::profile;
-use daily_epub::curate::score::parse_score_response;
-use daily_epub::curate::select::parse_selection_response;
-use daily_epub::types::LlmScore;
 
 fn repo(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -32,65 +31,82 @@ fn fixture(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
 
-/// Stage A responses must parse into `{id, score, category, rationale,
-/// is_paywalled_guess}` per article (§3.6).
+/// Deep responses must parse into `{id, quality, fit, category, rationale,
+/// paywalled_guess, facets}` per article (§12.1).
 #[test]
-fn stage_a_fixture_parses_into_scores() {
-    let items = parse_score_response(&fixture("deepseek_score_batch.json"));
+fn deep_fixture_parses_into_assessments() {
+    let sections = daily_epub::config::CurationConfig::default().sections;
+    let items = parse_deep_response(&fixture("deepseek_deep_batch.json"), &sections);
     assert!(items.len() >= 4, "fixture should cover a realistic batch");
 
     for item in &items {
         assert!(item.id > 0, "every item carries a positive article id");
+        assert!((0.0..=10.0).contains(&item.quality));
+        assert!((0.0..=10.0).contains(&item.fit));
+        assert!(item.category.is_some(), "every category is on the palette");
         assert!(
-            (0.0..=10.0).contains(&item.score),
-            "score {} out of range",
-            item.score
-        );
-        assert!(!item.category.is_empty());
-        assert!(
-            item.rationale.split_whitespace().count() <= 20,
-            "rationale must stay under 20 words: {:?}",
+            item.rationale.split_whitespace().count() <= 25,
+            "rationale must stay under 25 words: {:?}",
             item.rationale
         );
+        assert!(item.facets.format.is_some() && item.facets.topic_group.is_some());
     }
     assert!(
-        items.iter().any(|i| i.is_paywalled_guess),
+        items.iter().any(|item| item.paywalled_guess),
         "the fixture should exercise the paywall flag"
     );
+    // Quality and fit are judged separately: the fixture has an article whose
+    // fit exceeds its quality and one the other way round.
+    assert!(items.iter().any(|item| item.fit > item.quality));
+    assert!(items.iter().any(|item| item.quality > item.fit));
 
     // The batch spans the rubric rather than clustering at one score.
-    let scores: Vec<f64> = items.iter().map(|i| i.score).collect();
-    let spread = scores.iter().cloned().fold(f64::MIN, f64::max)
-        - scores.iter().cloned().fold(f64::MAX, f64::min);
+    let qualities: Vec<f64> = items.iter().map(|i| i.quality).collect();
+    let spread = qualities.iter().cloned().fold(f64::MIN, f64::max)
+        - qualities.iter().cloned().fold(f64::MAX, f64::min);
     assert!(spread >= 3.0, "fixture scores are too uniform to be useful");
-
-    // Every item converts into the shared curation type.
-    let converted: Vec<LlmScore> = items.into_iter().map(LlmScore::from).collect();
-    assert!(converted.iter().all(|s| (0.0..=10.0).contains(&s.score)));
 }
 
 /// The messy fixture must stay messy: it is what proves the parser is lenient
-/// (string ids, string scores, out-of-range scores, junk entries).
+/// (string ids and scores, out-of-range scores, unknown facet tokens, junk).
 #[test]
-fn stage_a_messy_fixture_is_salvaged_not_rejected() {
-    let raw = fixture("deepseek_score_batch_messy.json");
-    // The hard cases are still present in the recording…
+fn deep_messy_fixture_is_salvaged_not_rejected() {
+    let sections = daily_epub::config::CurationConfig::default().sections;
+    let raw = fixture("deepseek_deep_batch_messy.json");
     assert!(raw.contains("\"id\": \""), "needs a string id");
-    assert!(raw.contains("\"score\": \""), "needs a string score");
+    assert!(raw.contains("\"quality\": \""), "needs a string score");
+    assert!(
+        raw.contains("discussion_thread"),
+        "needs an unknown facet token"
+    );
 
-    // …and the real parser copes with all of them.
-    let items = parse_score_response(&raw);
+    let items = parse_deep_response(&raw, &sections);
     assert!(!items.is_empty(), "the parser salvaged nothing");
     assert!(
-        items.iter().all(|i| (0.0..=10.0).contains(&i.score)),
-        "out-of-range scores must be clamped: {:?}",
-        items.iter().map(|i| i.score).collect::<Vec<_>>()
+        items
+            .iter()
+            .all(|i| (0.0..=10.0).contains(&i.quality) && (0.0..=10.0).contains(&i.fit)),
+        "out-of-range scores must be clamped"
     );
     assert!(items.iter().all(|i| i.id > 0), "id-less items are skipped");
+    let messy = items
+        .iter()
+        .find(|i| i.id == 202)
+        .expect("string-valued item");
+    assert!(
+        messy.facets.format.is_none(),
+        "unknown facet tokens become None"
+    );
+    assert_eq!(messy.facets.depth.as_deref(), Some("standard"));
+    let off_palette = items.iter().find(|i| i.id == 204).expect("clamped item");
+    assert!(
+        off_palette.category.is_none(),
+        "invented sections become None"
+    );
 
-    // A response that is not JSON at all degrades to "no scores", never a panic.
-    assert!(parse_score_response("I'm sorry, I can't do that.").is_empty());
-    assert!(parse_score_response("").is_empty());
+    // A response that is not JSON at all degrades to "no assessments", never a panic.
+    assert!(parse_deep_response("I'm sorry, I can't do that.", &sections).is_empty());
+    assert!(parse_deep_response("", &sections).is_empty());
 }
 
 /// Stage B responses must carry `{id, section, position, lead_story}` with

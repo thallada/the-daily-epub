@@ -1,0 +1,67 @@
+{
+  "articles": [
+    {
+      "id": 201,
+      "quality": 7.0,
+      "fit": 6.5,
+      "category": "Science & Space",
+      "rationale": "careful write-up of an amateur radio occultation measurement",
+      "paywalled_guess": false,
+      "facets": {
+        "format": "first_hand_account",
+        "depth": "standard",
+        "evidence": "data_or_experiment",
+        "commerciality": "none",
+        "topic_group": "science_space",
+        "technicality": "intermediate",
+        "locality": "us",
+        "specific_topics": ["radio occultation"]
+      }
+    },
+    {
+      "id": "202",
+      "quality": "6",
+      "fit": "5.5",
+      "category": "Niche Corner",
+      "rationale": "mailing-list argument about tape drives, oddly gripping",
+      "paywalled_guess": "false",
+      "facets": {
+        "format": "discussion_thread",
+        "depth": "standard",
+        "evidence": "anecdote",
+        "commerciality": "none",
+        "topic_group": "retro_computing",
+        "technicality": "intermediate",
+        "locality": "not_applicable",
+        "specific_topics": ["LTO tape", "backups", "archival", "vendors", "pricing"]
+      }
+    },
+    {
+      "id": 203,
+      "quality": 4,
+      "fit": 4
+    },
+    {
+      "id": 204,
+      "quality": 12.5,
+      "fit": -1,
+      "category": "Sports",
+      "rationale": "model ignored the rubric ceiling and invented a section here",
+      "paywalled_guess": false,
+      "facets": "not an object"
+    },
+    {
+      "id": 205,
+      "quality": 8.0,
+      "category": "Top Stories",
+      "rationale": "fit is missing, so this item is unusable"
+    },
+    {
+      "quality": 9.0,
+      "fit": 9.0,
+      "category": "Top Stories",
+      "rationale": "no id at all, unusable"
+    },
+    "a bare string where an object belongs"
+  ]
+}

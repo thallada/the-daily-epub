@@ -205,6 +205,18 @@ pub fn serialize_candidate(candidate: &Candidate) -> String {
             .insert("triage".into(), (triage.interest / 10.0).clamp(0.0, 1.0));
         value.present.insert("triage".into(), true);
     }
+    if let Some(deep) = candidate.assessment.deep.as_ref() {
+        value.raw.insert("quality".into(), deep.quality);
+        value.raw.insert("fit".into(), deep.fit);
+        value
+            .norm
+            .insert("quality".into(), (deep.quality / 10.0).clamp(0.0, 1.0));
+        value
+            .norm
+            .insert("fit".into(), (deep.fit / 10.0).clamp(0.0, 1.0));
+        value.present.insert("quality".into(), true);
+        value.present.insert("fit".into(), true);
+    }
     serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
 }
 
@@ -251,7 +263,7 @@ impl ExplainRow {
         serde_json::from_str(&self.signals_json).ok()
     }
 
-    /// Utility when step 5 has written it, else the preliminary blend.
+    /// Utility once the deep set has been ranked, else the preliminary blend.
     pub fn score(&self) -> Option<f64> {
         self.utility
             .or_else(|| self.signals().and_then(|signals| signals.blend()))
@@ -305,7 +317,8 @@ pub async fn explain_row(
     Ok(row.as_ref().map(ExplainRow::from_row))
 }
 
-/// The top `limit` rows by utility-or-blend that were not selected (§15.2).
+/// The top `limit` rows that were not selected, by utility, falling back to
+/// the preliminary blend for rows the ranker never reached (§15.2).
 pub async fn near_misses(
     db: &Db,
     run_id: i64,
@@ -413,24 +426,34 @@ pub async fn render_explain(db: &Db, row: &ExplainRow) -> Result<String, sqlx::E
     if !assessments.is_empty() {
         let _ = writeln!(out, "assessments:");
         for assessment in assessments {
-            let _ = writeln!(
-                out,
-                "  {} · {} · score {} · fit {} · kind {} · category {} · paywalled={} · {}",
-                assessment.get::<String, _>("stage"),
-                assessment.get::<String, _>("model"),
-                fmt_opt(assessment.get::<Option<f64>, _>("score")),
-                fmt_opt(assessment.get::<Option<f64>, _>("fit")),
-                assessment
-                    .get::<Option<String>, _>("kind")
-                    .unwrap_or_else(|| "—".into()),
-                assessment
-                    .get::<Option<String>, _>("category")
-                    .unwrap_or_else(|| "—".into()),
-                assessment.get::<i64, _>("paywalled_guess") != 0,
-                assessment
-                    .get::<Option<String>, _>("rationale")
-                    .unwrap_or_default(),
-            );
+            let stage = assessment.get::<String, _>("stage");
+            let model = assessment.get::<String, _>("model");
+            let score = fmt_opt(assessment.get::<Option<f64>, _>("score"));
+            let rationale = assessment
+                .get::<Option<String>, _>("rationale")
+                .unwrap_or_default();
+            if stage == "deep" {
+                let _ = writeln!(
+                    out,
+                    "  deep · {model} · quality {score} · fit {} · format {} · category {} · paywalled={} · {rationale}",
+                    fmt_opt(assessment.get::<Option<f64>, _>("fit")),
+                    assessment
+                        .get::<Option<String>, _>("kind")
+                        .unwrap_or_else(|| "—".into()),
+                    assessment
+                        .get::<Option<String>, _>("category")
+                        .unwrap_or_else(|| "—".into()),
+                    assessment.get::<i64, _>("paywalled_guess") != 0,
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "  triage · {model} · interest {score} · kind {} · {rationale}",
+                    assessment
+                        .get::<Option<String>, _>("kind")
+                        .unwrap_or_else(|| "—".into()),
+                );
+            }
             if let Some(facets) = assessment.get::<Option<String>, _>("facets_json") {
                 let _ = writeln!(out, "    facets: {facets}");
             }
@@ -876,16 +899,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn near_misses_rank_by_blend_and_skip_selected_and_excluded() {
-        let (_dir, db) = db_with_articles(&[1, 2, 3, 4, 5]).await;
+    async fn near_misses_rank_by_utility_then_blend_and_skip_selected_and_excluded() {
+        let (_dir, db) = db_with_articles(&[1, 2, 3, 4, 5, 6]).await;
         let run_id = db.start_run(date(), Timestamp::now()).await.unwrap();
+        // Utility decides wherever the ranker wrote one; the preliminary blend
+        // only stands in for rows the deep set never reached. Article 4's blend
+        // would put it first, but its utility is the lowest; article 3 never
+        // got a utility and ranks on its blend.
         let rows = [
-            (1, "selected", None, 0.9),
-            (2, "shortlisted", Some("not_selected"), 0.7),
-            (3, "eligible", Some("not_admitted"), 0.95),
-            (4, "shortlisted", Some("not_selected"), 0.1),
+            (1, "selected", None, 0.9, Some(90.0)),
+            (2, "shortlisted", Some("not_selected"), 0.1, Some(70.0)),
+            (3, "eligible", Some("not_admitted"), 0.95, None),
+            (4, "shortlisted", Some("not_selected"), 0.99, Some(10.0)),
+            (6, "assessed", Some("cluster_suppressed"), 0.5, Some(40.0)),
         ];
-        for (id, stage, reason, norm) in rows {
+        for (id, stage, reason, norm, utility) in rows {
             let json = serialize_signals(&signals(10.0, norm), false);
             write(
                 &db,
@@ -896,7 +924,7 @@ mod tests {
                     excluded_reason: reason,
                     admitted_by: None,
                     signals_json: &json,
-                    utility: None,
+                    utility,
                     rank_utility: None,
                     cluster_id: None,
                     cluster_rank: None,
@@ -912,18 +940,36 @@ mod tests {
         let misses = near_misses(&db, run_id, 10).await.unwrap();
         assert_eq!(
             misses.iter().map(|row| row.article_id).collect::<Vec<_>>(),
-            vec![3, 2, 4]
+            vec![3, 2, 6, 4]
         );
         let text = explain_near_misses(&db, date(), None, 2).await.unwrap();
-        assert!(
-            text.contains("top 2 not selected, by preliminary blend"),
-            "{text}"
-        );
+        assert!(text.contains("top 2 not selected, by utility"), "{text}");
         assert!(
             text.contains("Article 3 · eligible, not_admitted"),
             "{text}"
         );
+        assert!(
+            text.contains("Article 2 · shortlisted, not_selected"),
+            "{text}"
+        );
         assert!(!text.contains("Article 4"), "{text}");
+
+        // Without any utility the listing says so and orders by the blend.
+        sqlx::query("UPDATE candidate_runs SET utility = NULL WHERE run_id = ?")
+            .bind(run_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let misses = near_misses(&db, run_id, 10).await.unwrap();
+        assert_eq!(
+            misses.iter().map(|row| row.article_id).collect::<Vec<_>>(),
+            vec![4, 3, 6, 2]
+        );
+        let text = explain_near_misses(&db, date(), None, 1).await.unwrap();
+        assert!(
+            text.contains("top 1 not selected, by preliminary blend"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

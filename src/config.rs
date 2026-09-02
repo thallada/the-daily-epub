@@ -137,8 +137,8 @@ pub struct DeepseekConfig {
     pub model: String,
     /// Supply via `DAILY_EPUB_DEEPSEEK__API_KEY`.
     pub api_key: Option<String>,
-    /// Articles per stage-A scoring request (§3.6).
-    pub score_batch_size: usize,
+    /// Articles per deep-assessment request (§12.1).
+    pub deep_batch_size: usize,
     /// Articles per first-pass triage request (§10).
     pub triage_batch_size: usize,
     pub max_concurrent_requests: usize,
@@ -158,7 +158,7 @@ impl Default for DeepseekConfig {
             base_url: "https://api.deepseek.com/v1".into(),
             model: "deepseek-v4-flash".into(),
             api_key: None,
-            score_batch_size: 12,
+            deep_batch_size: 8,
             triage_batch_size: 25,
             max_concurrent_requests: 4,
             score_temperature: 0.3,
@@ -602,6 +602,12 @@ impl Config {
     /// Load config for the CLI: explicit `--config` path, else `./config.toml`
     /// when it exists, then `DAILY_EPUB_*` env overrides (§3.14).
     pub fn load(explicit: Option<&Path>) -> Result<Self, ConfigError> {
+        if std::env::var_os("DAILY_EPUB_DEEPSEEK__SCORE_BATCH_SIZE").is_some() {
+            return Err(ConfigError::Invalid(
+                "DAILY_EPUB_DEEPSEEK__SCORE_BATCH_SIZE was removed; use DAILY_EPUB_DEEPSEEK__DEEP_BATCH_SIZE"
+                    .into(),
+            ));
+        }
         let (path, require) = match explicit {
             Some(p) => (Some(p.to_path_buf()), true),
             None => (Some(PathBuf::from(DEFAULT_CONFIG_FILE)), false),
@@ -619,6 +625,17 @@ impl Config {
             }) {
                 return Err(ConfigError::Invalid(
                     "prefilter_keep was removed; use curation.ranking.deep_keep".into(),
+                ));
+            }
+            if raw.lines().any(|line| {
+                let line = line.trim_start();
+                !line.starts_with('#')
+                    && line
+                        .strip_prefix("score_batch_size")
+                        .is_some_and(|tail| tail.trim_start().starts_with('='))
+            }) {
+                return Err(ConfigError::Invalid(
+                    "deepseek.score_batch_size was removed; use deepseek.deep_batch_size".into(),
                 ));
             }
         }
@@ -649,9 +666,9 @@ impl Config {
                 "curation.max_article_count must be >= target_article_count".into(),
             ));
         }
-        if self.deepseek.score_batch_size == 0 {
+        if self.deepseek.deep_batch_size == 0 {
             return Err(ConfigError::Invalid(
-                "deepseek.score_batch_size must be >= 1".into(),
+                "deepseek.deep_batch_size must be >= 1".into(),
             ));
         }
         if self.deepseek.triage_batch_size == 0 {
@@ -779,6 +796,7 @@ mod tests {
         assert!(c.world_briefing);
         assert_eq!(c.deepseek.model, "deepseek-v4-flash");
         assert_eq!(c.deepseek.triage_batch_size, 25);
+        assert_eq!(c.deepseek.deep_batch_size, 8);
         assert_eq!(c.curation.recent_rejection_days, 7);
         assert_eq!(c.curation.recent_rejection_floor, 3.0);
         assert_eq!(c.profile_path, PathBuf::from("data/profile.md"));
@@ -879,6 +897,15 @@ mod tests {
     }
 
     #[test]
+    fn removed_score_batch_size_names_deep_batch_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[deepseek]\nscore_batch_size = 12\n").unwrap();
+        let error = Config::load(Some(&path)).expect_err("stale key must fail");
+        assert!(error.to_string().contains("deep_batch_size"), "{error}");
+    }
+
+    #[test]
     fn shipped_example_config_parses() {
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         let c = Config::load(Some(&example)).expect("config.example.toml must parse");
@@ -918,7 +945,7 @@ mod tests {
         c.anthropic.max_concurrent_requests = 0;
         assert!(c.validate().is_err());
         let mut c = Config::default();
-        c.deepseek.score_batch_size = 0;
+        c.deepseek.deep_batch_size = 0;
         assert!(c.validate().is_err());
         let mut c = Config::default();
         c.deepseek.triage_batch_size = 0;

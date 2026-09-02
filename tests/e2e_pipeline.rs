@@ -18,7 +18,7 @@
 //! no article in the fixtures carries an image, so the EPUB builder's image
 //! downloader has nothing to fetch.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use jiff::Timestamp;
@@ -26,7 +26,7 @@ use jiff::civil::Date;
 
 use daily_epub::config::{Config, PublishConfig, ServerConfig, XtcConfig};
 use daily_epub::curate::llm::{LlmClient, Llms, MockBackend, UsageMeter};
-use daily_epub::curate::{Curator, admit, editorial};
+use daily_epub::curate::{Curator, admit, editorial, rank};
 use daily_epub::db::Db;
 use daily_epub::extract::Extractor;
 use daily_epub::types::{
@@ -412,7 +412,6 @@ async fn skip_llm_pipeline_produces_a_published_issue() {
     let candidates = personalized
         .into_iter()
         .filter(|candidate| candidate.stage == "admitted")
-        .map(Candidate::into_legacy_scored)
         .collect::<Vec<_>>();
     assert_eq!(candidates.len(), 5, "nothing is dropped at this volume");
     // The excerpt-only story is penalized (§3.5).
@@ -421,10 +420,10 @@ async fn skip_llm_pipeline_produces_a_published_issue() {
         .find(|c| c.article.excerpt_only)
         .expect("the allocator teaser survived");
     assert!(
-        allocator.prefilter_score
+        allocator.signals.heuristic.unwrap_or_default()
             < candidates
                 .iter()
-                .map(|candidate| candidate.prefilter_score)
+                .filter_map(|candidate| candidate.signals.heuristic)
                 .fold(f64::NEG_INFINITY, f64::max)
     );
 
@@ -516,13 +515,12 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
     let candidates = personalized
         .into_iter()
         .filter(|candidate| candidate.stage == "admitted")
-        .map(Candidate::into_legacy_scored)
         .collect::<Vec<_>>();
     let ids: Vec<i64> = candidates.iter().map(|c| c.article.id).collect();
     assert_eq!(ids.len(), 5);
 
-    // --- Script DeepSeek: one stage-A batch, one stage-B call, five stage-C
-    // summaries and one front page (§3.6). ---
+    // --- Script DeepSeek: one deep-assessment batch, one editor call, five
+    // summaries and one brief. ---
     let backend = std::sync::Arc::new(MockBackend::new());
     let usage = daily_epub::types::TokenUsage {
         input_tokens: 1000,
@@ -535,8 +533,8 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
         .enumerate()
         .map(|(i, id)| {
             format!(
-                r#"{{"id": {id}, "score": {}, "category": "Tech & Engineering",
-                     "rationale": "solid systems writeup", "is_paywalled_guess": false}}"#,
+                r#"{{"id": {id}, "quality": {}, "fit": 7, "category": "Tech & Engineering",
+                     "rationale": "solid systems writeup", "paywalled_guess": false, "facets": {{"format":"analysis_essay"}}}}"#,
                 9 - i
             )
         })
@@ -590,12 +588,12 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
 
     let mut candidates = candidates;
     curator
-        .score(&mut candidates, date())
+        .assess(&mut candidates, true, None, jiff::Timestamp::now())
         .await
-        .expect("stage A");
+        .expect("deep assessment");
     assert!(
-        candidates.iter().all(|c| c.llm.is_some()),
-        "every candidate came back scored"
+        candidates.iter().all(|c| c.assessment.deep.is_some()),
+        "every candidate came back assessed"
     );
 
     let lineup = curator.select(candidates, date()).await.expect("stage B");
@@ -680,7 +678,6 @@ async fn failing_deepseek_still_publishes_with_heuristic_fallbacks() {
     let mut candidates = personalized
         .into_iter()
         .filter(|candidate| candidate.stage == "admitted")
-        .map(Candidate::into_legacy_scored)
         .collect::<Vec<_>>();
 
     let backend = std::sync::Arc::new(MockBackend::new());
@@ -699,10 +696,24 @@ async fn failing_deepseek_still_publishes_with_heuristic_fallbacks() {
         },
     );
     curator
-        .score(&mut candidates, date())
+        .assess(&mut candidates, true, None, jiff::Timestamp::now())
         .await
         .expect("failed batches degrade, not abort");
-    assert!(candidates.iter().all(|candidate| candidate.llm.is_none()));
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.assessment.deep.is_none())
+    );
+    // Utility over the present signals, clustered as singletons without
+    // embeddings: every admitted article is shortlisted with a cluster id.
+    let ranked = rank::shortlist(&mut candidates, &HashMap::new(), &cfg.curation.ranking);
+    assert_eq!(ranked.shortlisted, candidates.len());
+    assert_eq!(ranked.clusters, candidates.len());
+    for candidate in &candidates {
+        assert_eq!(candidate.stage, "shortlisted");
+        assert!(candidate.utility.is_some() && candidate.cluster.is_some());
+        assert!(candidate.rank_utility.is_some());
+    }
     let mut lineup = curator
         .select(candidates, date())
         .await

@@ -1,19 +1,4 @@
-//! The editor — lineup selection (plan §13).
-//!
-//! One call on the editor client (Claude), falling back to the same prompt on the
-//! bulk client (DeepSeek), then to [`select_without_llm`]. The shortlist is the
-//! top candidates by [`ScoredArticle::combined_score`] with their Stage A
-//! rationales; the model returns picks, each with a section from the configured
-//! palette, an ordering, exactly one `lead_story`, and a one-line `why` that is
-//! printed under the headline.
-//!
-//! The model's answer is treated as a proposal, never as gospel: sections are
-//! validated against the palette, the lead is forced to be unique, auto-include
-//! feeds are re-inserted if they were dropped, duplicate ids are dropped, and the
-//! size is trimmed to `hard_max`. There is **no minimum**: a nine-pick answer is
-//! published as nine (the "top up" branch is gone). `--max-articles N` is a
-//! ceiling: `hard_max = min(curation.max_article_count, N)` and
-//! `soft_target = min(target_article_count, hard_max)`.
+//! Claude-first issue editor over the diversified shortlist (plan §13).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -23,16 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use super::llm::{LlmError, Llms, strip_code_fence};
 use super::{prompt_text, truncate_words};
-use crate::types::{ArticleId, Lineup, Pick, ScoredArticle, WORLD_BRIEFING_SECTION};
+use crate::types::{ArticleId, Candidate, Facets, Lineup, Pick, WORLD_BRIEFING_SECTION};
 
-/// Words of lead-in text shown per candidate in the editor prompt (§13).
 const BLURB_WORDS: usize = 60;
 
-/// One element of the editor's JSON response (§13).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SelectionItem {
     pub id: ArticleId,
-    /// Must be one of `curation.sections`.
     pub section: String,
     pub position: i64,
     #[serde(default)]
@@ -41,15 +23,6 @@ pub struct SelectionItem {
     pub why: Option<String>,
 }
 
-/// Envelope the model is asked to return.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SelectionResponse {
-    #[serde(default)]
-    pub picks: Vec<SelectionItem>,
-}
-
-/// The invariant instruction block for the editor (§13), with `{soft_target}` and
-/// `{hard_max}` substituted at render time.
 pub const EDITOR_INSTRUCTIONS: &str = r#"TASK: assemble today's issue of The Daily EPUB from the shortlist below.
 
 You are choosing what one specific reader — the profile, learned adjustments and
@@ -85,9 +58,8 @@ EDITORIAL JUDGEMENT
 Return JSON exactly:
 {"picks": [{"id": 123, "section": "Top Stories", "position": 1, "lead_story": true, "why": "…"}]}"#;
 
-/// Render the editor's user prompt (§13).
 pub fn build_prompt(
-    shortlist: &[ScoredArticle],
+    shortlist: &[Candidate],
     sections: &[String],
     soft_target: usize,
     hard_max: usize,
@@ -95,7 +67,7 @@ pub fn build_prompt(
     let instructions = EDITOR_INSTRUCTIONS
         .replace("{soft_target}", &soft_target.to_string())
         .replace("{hard_max}", &hard_max.to_string());
-    let mut prompt = String::with_capacity(2048 + shortlist.len() * 400);
+    let mut prompt = String::with_capacity(2048 + shortlist.len() * 700);
     prompt.push_str(&instructions);
     let _ = write!(
         prompt,
@@ -112,131 +84,177 @@ pub fn build_prompt(
     prompt
 }
 
-fn render_candidate(candidate: &ScoredArticle) -> String {
-    let a = &candidate.article;
-    let mut block = String::with_capacity(400);
-    let _ = writeln!(block, "--- id: {}", a.id);
-    let _ = writeln!(block, "title: {}", a.title.trim());
+fn render_candidate(candidate: &Candidate) -> String {
+    let article = &candidate.article;
+    let mut block = String::new();
+    let _ = writeln!(block, "--- id: {}", article.id);
+    let _ = writeln!(block, "title: {}", article.title.trim());
     let _ = writeln!(
         block,
-        "feed: {} · {} words (~{} min){}",
-        if a.feed_title.is_empty() {
+        "feed: {} · {} words (~{} min)",
+        if article.feed_title.trim().is_empty() {
             "unknown"
         } else {
-            a.feed_title.trim()
+            article.feed_title.trim()
         },
-        a.word_count,
-        a.reading_minutes(),
-        if a.excerpt_only {
-            " · EXCERPT ONLY"
-        } else {
-            ""
-        }
+        article.word_count,
+        article.reading_minutes()
     );
-    match candidate.llm.as_ref() {
-        Some(llm) => {
-            let _ = writeln!(
-                block,
-                "score: {:.1} · {} — {}",
-                llm.score,
-                if llm.category.is_empty() {
-                    "uncategorized"
-                } else {
-                    llm.category.as_str()
-                },
-                llm.rationale.trim()
-            );
-        }
-        None => {
-            let _ = writeln!(block, "score: unscored");
-        }
-    }
-    if let Some(triage) = candidate.triage.as_ref() {
+    let quality = candidate
+        .assessment
+        .deep
+        .as_ref()
+        .map(|deep| format!("{:.1}", deep.quality))
+        .unwrap_or_else(|| "—".into());
+    let fit = candidate
+        .assessment
+        .deep
+        .as_ref()
+        .map(|deep| format!("{:.1}", deep.fit))
+        .unwrap_or_else(|| "—".into());
+    let triage = candidate
+        .assessment
+        .triage
+        .as_ref()
+        .map(|triage| format!("{:.1}", triage.interest))
+        .unwrap_or_else(|| "—".into());
+    let rationale = candidate
+        .assessment
+        .deep
+        .as_ref()
+        .map(|deep| deep.rationale.trim())
+        .filter(|rationale| !rationale.is_empty())
+        .unwrap_or("no deep assessment");
+    let _ = writeln!(
+        block,
+        "quality {quality} · fit {fit} · triage {triage} — {rationale}"
+    );
+    if let Some(facets) = candidate
+        .assessment
+        .deep
+        .as_ref()
+        .map(|deep| &deep.facets)
+        .filter(|facets| **facets != Facets::default())
+    {
         let _ = writeln!(
             block,
-            "triage: {:.1} · {} — {}",
-            triage.interest,
-            triage.kind,
-            triage.why.trim()
+            "facets: {} · {} · {} · {} · {}",
+            facets.format.as_deref().unwrap_or("unknown"),
+            facets.depth.as_deref().unwrap_or("unknown"),
+            facets.evidence.as_deref().unwrap_or("unknown"),
+            facets.technicality.as_deref().unwrap_or("unknown"),
+            facets.topic_group.as_deref().unwrap_or("unknown"),
         );
     }
-    let mut flags = Vec::new();
-    if candidate.auto_include {
-        flags.push("always-include");
+    let interests = candidate
+        .signals
+        .top_interests
+        .iter()
+        .filter(|interest| interest.z >= 1.5)
+        .map(|interest| {
+            format!(
+                "{} ({})",
+                interest.name,
+                if interest.z >= 2.5 { "strong" } else { "weak" }
+            )
+        })
+        .collect::<Vec<_>>();
+    if !interests.is_empty() {
+        let _ = writeln!(block, "matches: {}", interests.join(", "));
     }
+    let neighbours = candidate
+        .signals
+        .neighbours
+        .iter()
+        .filter(|neighbour| neighbour.cos >= 0.55)
+        .map(|neighbour| {
+            let label = match neighbour.label.as_str() {
+                "loved" => "LOVED",
+                "good" => "GOOD",
+                "not_for_me" | "down" => "NOT FOR ME",
+                other => other,
+            };
+            format!("{label} \"{}\" ({:.2})", neighbour.title, neighbour.cos)
+        })
+        .collect::<Vec<_>>();
+    if !neighbours.is_empty() {
+        let _ = writeln!(block, "closest rated: {}", neighbours.join("; "));
+    }
+    let mut flags = Vec::new();
     if candidate.exploration {
         flags.push("exploration");
     }
-    if a.excerpt_only {
+    if candidate.auto_include {
+        flags.push("always-include");
+    }
+    if article.excerpt_only {
         flags.push("excerpt only");
     }
     if !flags.is_empty() {
         let _ = writeln!(block, "flags: {}", flags.join(" | "));
     }
-    let blurb = truncate_words(&prompt_text(&a.content_html), BLURB_WORDS);
-    if !blurb.is_empty() {
-        let _ = writeln!(block, "opening: {blurb}");
+    let opening = truncate_words(&prompt_text(&article.content_html), BLURB_WORDS);
+    if !opening.is_empty() {
+        let _ = writeln!(block, "opening: {opening}");
     }
     block
 }
 
-// ---------------------------------------------------------------------------
-// Section validation (§3.6: the model may only use the configured palette)
-// ---------------------------------------------------------------------------
-
-/// The section unrecognized labels fall back to.
 pub fn default_section(sections: &[String]) -> String {
     sections
         .iter()
-        .find(|s| s.as_str() == "Top Stories")
+        .find(|section| section.as_str() == "Top Stories")
         .or_else(|| sections.first())
         .cloned()
-        .unwrap_or_else(|| "Top Stories".to_string())
+        .unwrap_or_else(|| "Top Stories".into())
 }
 
-/// Map whatever the model said onto the configured palette (§3.6).
-///
-/// Exact match → case-insensitive match → best word-overlap match → default.
 pub fn resolve_section(raw: &str, sections: &[String]) -> String {
     let candidate = raw.trim();
     if candidate.is_empty() || candidate.eq_ignore_ascii_case(WORLD_BRIEFING_SECTION) {
         return default_section(sections);
     }
-    if let Some(exact) = sections.iter().find(|s| s.as_str() == candidate) {
+    if let Some(exact) = sections
+        .iter()
+        .find(|section| section.as_str() == candidate)
+    {
         return exact.clone();
     }
-    if let Some(ci) = sections.iter().find(|s| s.eq_ignore_ascii_case(candidate)) {
-        return ci.clone();
+    if let Some(case_insensitive) = sections
+        .iter()
+        .find(|section| section.eq_ignore_ascii_case(candidate))
+    {
+        return case_insensitive.clone();
     }
     let wanted = words_of(candidate);
-    let best = sections
+    sections
         .iter()
-        .map(|s| (s, words_of(s).intersection(&wanted).count()))
+        .map(|section| (section, words_of(section).intersection(&wanted).count()))
         .filter(|(_, overlap)| *overlap > 0)
-        .max_by_key(|(_, overlap)| *overlap);
-    match best {
-        Some((section, _)) => {
-            tracing::debug!(raw = candidate, mapped = %section, "mapped an off-palette section");
-            section.clone()
-        }
-        None => {
-            tracing::warn!(raw = candidate, "unknown section; using the default");
-            default_section(sections)
-        }
-    }
+        .max_by_key(|(_, overlap)| *overlap)
+        .map(|(section, _)| section.clone())
+        .unwrap_or_else(|| default_section(sections))
 }
 
-fn words_of(s: &str) -> HashSet<String> {
-    s.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() > 2 && !w.eq_ignore_ascii_case("and"))
+fn words_of(value: &str) -> HashSet<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| word.len() > 2 && !word.eq_ignore_ascii_case("and"))
         .map(str::to_lowercase)
         .collect()
 }
 
-/// Section guess from feed metadata, used by [`select_without_llm`] (§3.6).
-pub fn heuristic_section(candidate: &ScoredArticle, sections: &[String]) -> String {
+pub fn heuristic_section(candidate: &Candidate, sections: &[String]) -> String {
     if candidate.auto_include {
         return resolve_section("From the Blogroll", sections);
+    }
+    if let Some(category) = candidate
+        .assessment
+        .deep
+        .as_ref()
+        .and_then(|deep| deep.category.as_deref())
+    {
+        return resolve_section(category, sections);
     }
     let haystack = format!(
         "{} {} {}",
@@ -245,7 +263,6 @@ pub fn heuristic_section(candidate: &ScoredArticle, sections: &[String]) -> Stri
         candidate.article.title
     )
     .to_lowercase();
-
     const RULES: &[(&str, &[&str])] = &[
         (
             "Boston & Local",
@@ -268,20 +285,12 @@ pub fn heuristic_section(candidate: &ScoredArticle, sections: &[String]) -> Stri
                 "openai",
                 "anthropic",
                 "gpt",
-                "diffusion",
             ],
         ),
         (
             "Science & Space",
             &[
-                "science",
-                "space",
-                "nasa",
-                "astronom",
-                "physics",
-                "biology",
-                "climate",
-                "aerospace",
+                "science", "space", "nasa", "astronom", "physics", "biology", "climate",
             ],
         ),
         (
@@ -319,8 +328,8 @@ pub fn heuristic_section(candidate: &ScoredArticle, sections: &[String]) -> Stri
         ),
     ];
     for (section, needles) in RULES {
-        if needles.iter().any(|n| haystack.contains(n))
-            && let Some(found) = sections.iter().find(|s| s.as_str() == *section)
+        if needles.iter().any(|needle| haystack.contains(needle))
+            && let Some(found) = sections.iter().find(|value| value.as_str() == *section)
         {
             return found.clone();
         }
@@ -328,20 +337,13 @@ pub fn heuristic_section(candidate: &ScoredArticle, sections: &[String]) -> Stri
     default_section(sections)
 }
 
-// ---------------------------------------------------------------------------
-// Response parsing
-// ---------------------------------------------------------------------------
-
-/// Keys the model might wrap the array in.
 const ARRAY_KEYS: &[&str] = &["picks", "lineup", "articles", "selection", "items"];
 
-/// Lenient parse of the editor response (§13). `why` is capped at 14 words.
 pub fn parse_selection_response(raw: &str) -> Vec<SelectionItem> {
-    let cleaned = strip_code_fence(raw);
-    let value: serde_json::Value = match serde_json::from_str(cleaned) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "stage B response was not JSON");
+    let value: serde_json::Value = match serde_json::from_str(strip_code_fence(raw)) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "editor response was not JSON");
             return Vec::new();
         }
     };
@@ -349,77 +351,64 @@ pub fn parse_selection_response(raw: &str) -> Vec<SelectionItem> {
         serde_json::Value::Array(items) => Some(items),
         serde_json::Value::Object(map) => ARRAY_KEYS
             .iter()
-            .find_map(|k| map.get(*k).and_then(serde_json::Value::as_array))
+            .find_map(|key| map.get(*key).and_then(serde_json::Value::as_array))
             .or_else(|| map.values().find_map(serde_json::Value::as_array)),
         _ => None,
     };
-    let Some(array) = array else {
-        tracing::warn!("stage B response contained no array of picks");
-        return Vec::new();
-    };
-
-    let mut out = Vec::with_capacity(array.len());
-    for (idx, item) in array.iter().enumerate() {
-        let Some(obj) = item.as_object() else {
-            tracing::warn!("skipping a non-object stage B pick");
-            continue;
-        };
-        let Some(id) = obj.get("id").and_then(|v| {
-            v.as_i64()
-                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-        }) else {
-            tracing::warn!("skipping a stage B pick without an id");
-            continue;
-        };
-        out.push(SelectionItem {
-            id,
-            section: obj
-                .get("section")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string(),
-            position: obj
-                .get("position")
-                .and_then(|v| {
-                    v.as_i64()
-                        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-                })
-                .unwrap_or(idx as i64 + 1),
-            lead_story: obj
-                .get("lead_story")
-                .or_else(|| obj.get("is_lead"))
-                .and_then(|v| {
-                    v.as_bool()
-                        .or_else(|| v.as_str().map(|s| s.eq_ignore_ascii_case("true")))
-                })
-                .unwrap_or(false),
-            why: obj
-                .get("why")
-                .and_then(serde_json::Value::as_str)
-                .map(|why| {
-                    why.split_whitespace()
-                        .take(14)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .filter(|why| !why.is_empty()),
-        });
-    }
-    out
+    array
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let object = item.as_object()?;
+            let id = object.get("id").and_then(|value| {
+                value
+                    .as_i64()
+                    .or_else(|| value.as_str()?.trim().parse().ok())
+            })?;
+            Some(SelectionItem {
+                id,
+                section: object
+                    .get("section")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                position: object
+                    .get("position")
+                    .and_then(|value| {
+                        value
+                            .as_i64()
+                            .or_else(|| value.as_str()?.trim().parse().ok())
+                    })
+                    .unwrap_or(index as i64 + 1),
+                lead_story: object
+                    .get("lead_story")
+                    .or_else(|| object.get("is_lead"))
+                    .and_then(|value| {
+                        value.as_bool().or_else(|| {
+                            value.as_str().map(|text| text.eq_ignore_ascii_case("true"))
+                        })
+                    })
+                    .unwrap_or(false),
+                why: object
+                    .get("why")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|why| {
+                        why.split_whitespace()
+                            .take(14)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .filter(|why| !why.is_empty()),
+            })
+        })
+        .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Stage driver
-// ---------------------------------------------------------------------------
-
-/// Ask the editor for the day's lineup (§13).
-///
-/// Editor first, then the same prompt on the bulk client, then
-/// [`select_without_llm`]; never an error unless a mock is misconfigured.
 pub async fn select(
     llms: &Llms,
-    candidates: Vec<ScoredArticle>,
+    candidates: Vec<Candidate>,
     sections: &[String],
     soft_target: usize,
     hard_max: usize,
@@ -441,18 +430,11 @@ pub async fn select(
             date,
         ));
     };
-    let shortlist = shortlist(&candidates, hard_max);
-    let prompt = build_prompt(&shortlist, sections, soft_target, hard_max);
-    tracing::debug!(
-        shortlist = shortlist.len(),
-        approx_tokens = super::approx_tokens(&prompt),
-        "editor request"
-    );
-
+    let prompt = build_prompt(&candidates, sections, soft_target, hard_max);
     let raw = match complete_with_fallback(llms, primary, &prompt).await {
         Ok(raw) => raw,
         Err(error) => {
-            tracing::error!(%error, "editor and bulk fallback both failed; selecting heuristically");
+            tracing::error!(%error, "editor and bulk fallback both failed; selecting by utility");
             return Ok(select_without_llm(
                 candidates,
                 sections,
@@ -464,7 +446,6 @@ pub async fn select(
     };
     let items = parse_selection_response(&raw);
     if items.is_empty() {
-        tracing::error!("editor returned no usable picks; falling back to heuristic ranking");
         return Ok(select_without_llm(
             candidates,
             sections,
@@ -473,19 +454,18 @@ pub async fn select(
             date,
         ));
     }
-
-    let by_id: HashMap<ArticleId, &ScoredArticle> =
-        candidates.iter().map(|c| (c.article.id, c)).collect();
-    let mut chosen = Vec::with_capacity(items.len());
+    let by_id = candidates
+        .iter()
+        .map(|candidate| (candidate.article.id, candidate))
+        .collect::<HashMap<_, _>>();
+    let mut chosen = Vec::new();
     let mut seen = HashSet::new();
     for item in items {
         if !seen.insert(item.id) {
-            tracing::warn!(id = item.id, "editor picked the same article twice");
             continue;
         }
-        match by_id.get(&item.id) {
-            Some(candidate) => chosen.push((item, (*candidate).clone())),
-            None => tracing::warn!(id = item.id, "editor invented an id that was not offered"),
+        if let Some(candidate) = by_id.get(&item.id) {
+            chosen.push((item, (*candidate).clone()));
         }
     }
     for candidate in &candidates {
@@ -505,12 +485,8 @@ pub async fn select(
     Ok(assemble(chosen, sections, hard_max, date))
 }
 
-/// The editor runs at the scoring temperature: this is a judgement call, not
-/// prose. The Anthropic backend ignores it (§4.2).
 const EDITOR_TEMPERATURE: f32 = 0.4;
 
-/// One attempt on `primary`; on any error (refusal, budget, API) the same prompt
-/// goes to the bulk client when that is a different provider (§13, §17).
 async fn complete_with_fallback(
     llms: &Llms,
     primary: &super::llm::LlmClient,
@@ -519,126 +495,103 @@ async fn complete_with_fallback(
     match primary.complete(prompt, EDITOR_TEMPERATURE, true).await {
         Ok(raw) => Ok(raw),
         Err(primary_error) => {
-            let fallback = llms
+            let Some(fallback) = llms
                 .bulk
                 .as_ref()
-                .filter(|bulk| primary.provider != bulk.provider);
-            let Some(fallback) = fallback else {
+                .filter(|bulk| primary.provider != bulk.provider)
+            else {
                 return Err(primary_error);
             };
-            tracing::warn!(
-                error = %primary_error,
-                provider = primary.provider,
-                "editor failed; retrying the same prompt on bulk"
-            );
             fallback.complete(prompt, EDITOR_TEMPERATURE, true).await
         }
     }
 }
 
-/// Step 4 offers the entire admitted deep set to the editor. Step 5 replaces
-/// this with the diversified shortlist.
-fn shortlist(candidates: &[ScoredArticle], _target: usize) -> Vec<ScoredArticle> {
-    let mut ranked: Vec<ScoredArticle> = candidates.to_vec();
-    sort_by_combined(&mut ranked);
-    ranked
+fn ordering_score(candidate: &Candidate) -> f64 {
+    candidate
+        .utility
+        .or(candidate.signals.preliminary)
+        .unwrap_or(f64::NEG_INFINITY)
 }
 
-fn sort_by_combined(candidates: &mut [ScoredArticle]) {
-    candidates.sort_by(|a, b| {
-        b.combined_score()
-            .partial_cmp(&a.combined_score())
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.article.id.cmp(&b.article.id))
-    });
-}
-
-/// Turn validated picks into a [`Lineup`]: trim to `hard_max`, force a single
-/// lead, order the sections and renumber positions (§13). No minimum size.
 fn assemble(
-    mut chosen: Vec<(SelectionItem, ScoredArticle)>,
+    mut chosen: Vec<(SelectionItem, Candidate)>,
     sections: &[String],
     hard_max: usize,
     date: Date,
 ) -> Lineup {
-    // Too many: drop the weakest non-auto-include picks.
     if chosen.len() > hard_max {
-        chosen.sort_by(|a, b| {
-            b.1.auto_include.cmp(&a.1.auto_include).then_with(|| {
-                b.1.combined_score()
-                    .partial_cmp(&a.1.combined_score())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        tracing::info!(
+            picked = chosen.len(),
+            hard_max,
+            "editor exceeded the ceiling; trimming by utility"
+        );
+        chosen.sort_by(|left, right| {
+            right
+                .1
+                .auto_include
+                .cmp(&left.1.auto_include)
+                .then_with(|| ordering_score(&right.1).total_cmp(&ordering_score(&left.1)))
+                .then_with(|| left.1.article.id.cmp(&right.1.article.id))
         });
-        let dropped = chosen.len() - hard_max;
         chosen.truncate(hard_max);
-        tracing::info!(dropped, hard_max, "trimmed the lineup to the size ceiling");
     }
-
-    // Normalize sections and pick the section order.
-    for (item, _) in chosen.iter_mut() {
+    for (item, _) in &mut chosen {
         item.section = resolve_section(&item.section, sections);
     }
-    let used: HashSet<&str> = chosen.iter().map(|(i, _)| i.section.as_str()).collect();
-    let mut section_order: Vec<String> = sections
+    let used = chosen
         .iter()
-        .filter(|s| used.contains(s.as_str()))
+        .map(|(item, _)| item.section.as_str())
+        .collect::<HashSet<_>>();
+    let mut section_order = sections
+        .iter()
+        .filter(|section| used.contains(section.as_str()))
         .cloned()
-        .collect();
+        .collect::<Vec<_>>();
     for (item, _) in &chosen {
         if !section_order.contains(&item.section) {
             section_order.push(item.section.clone());
         }
     }
-    let section_rank: HashMap<&str, usize> = section_order
+    let section_rank = section_order
         .iter()
         .enumerate()
-        .map(|(i, s)| (s.as_str(), i))
-        .collect();
-
-    // Order: section, then the model's position, then quality, then id.
-    chosen.sort_by(|a, b| {
+        .map(|(rank, section)| (section.as_str(), rank))
+        .collect::<HashMap<_, _>>();
+    chosen.sort_by(|left, right| {
         section_rank
-            .get(a.0.section.as_str())
-            .cmp(&section_rank.get(b.0.section.as_str()))
-            .then_with(|| a.0.position.cmp(&b.0.position))
-            .then_with(|| {
-                b.1.combined_score()
-                    .partial_cmp(&a.1.combined_score())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.1.article.id.cmp(&b.1.article.id))
+            .get(left.0.section.as_str())
+            .cmp(&section_rank.get(right.0.section.as_str()))
+            .then_with(|| left.0.position.cmp(&right.0.position))
+            .then_with(|| ordering_score(&right.1).total_cmp(&ordering_score(&left.1)))
+            .then_with(|| left.1.article.id.cmp(&right.1.article.id))
     });
-
-    // Exactly one lead, and it must live in the first section (§3.6 rule 4).
     let lead_id = chosen
         .iter()
         .find(|(item, _)| item.lead_story)
         .filter(|(item, _)| section_rank.get(item.section.as_str()) == Some(&0))
         .or_else(|| chosen.first())
         .map(|(item, _)| item.id);
-
-    let mut per_section: BTreeMap<String, i64> = BTreeMap::new();
+    let mut per_section = BTreeMap::<String, i64>::new();
     let picks = chosen
         .into_iter()
         .map(|(item, candidate)| {
             let position = per_section
                 .entry(item.section.clone())
-                .and_modify(|n| *n += 1)
+                .and_modify(|value| *value += 1)
                 .or_insert(1);
             Pick {
+                article: candidate.article,
                 section: item.section,
                 position: *position,
                 is_lead: Some(item.id) == lead_id,
                 why: item.why,
                 summary: None,
-                llm: candidate.llm.clone(),
+                llm: candidate.assessment.deep,
                 discussion: None,
-                article: candidate.article,
             }
         })
         .collect();
-
     Lineup {
         date,
         picks,
@@ -646,26 +599,21 @@ fn assemble(
     }
 }
 
-/// Heuristic fallback (`--skip-llm`, no provider, or both providers failed): the
-/// top `soft_target` by prefilter score plus the auto-includes, bucketed into
-/// sections by feed category, trimmed to `hard_max` (notes §6).
 pub fn select_without_llm(
-    candidates: Vec<ScoredArticle>,
+    mut candidates: Vec<Candidate>,
     sections: &[String],
     soft_target: usize,
     hard_max: usize,
     date: Date,
 ) -> Lineup {
-    let mut ranked = candidates;
-    ranked.sort_by(|left, right| {
-        right
-            .prefilter_score
-            .total_cmp(&left.prefilter_score)
+    candidates.sort_by(|left, right| {
+        ordering_score(right)
+            .total_cmp(&ordering_score(left))
             .then_with(|| left.article.id.cmp(&right.article.id))
     });
     let mut chosen = Vec::new();
     let mut seen = HashSet::new();
-    for candidate in ranked {
+    for candidate in candidates {
         if chosen.len() >= soft_target && !candidate.auto_include {
             continue;
         }
@@ -692,7 +640,8 @@ mod tests {
     use crate::config::{AnthropicConfig, CurationConfig, DeepseekConfig};
     use crate::curate::llm::{ChatBackend, LlmClient, MockBackend, PriceTable, UsageMeter};
     use crate::curate::prefilter::tests::article;
-    use crate::types::{LlmScore, TokenUsage};
+    use crate::curate::signals::{Neighbour, TopInterest};
+    use crate::types::{Deep, TokenUsage, Triage};
     use std::sync::Arc;
 
     const LINEUP_FIXTURE: &str = include_str!(concat!(
@@ -708,25 +657,31 @@ mod tests {
         "2026-08-15".parse().expect("date")
     }
 
-    fn candidate(id: i64, title: &str, words: i64, score: f64) -> ScoredArticle {
-        ScoredArticle {
-            article: article(id, title, words),
-            prefilter_score: 40.0 + score,
-            social_score: 1.0,
-            llm: Some(LlmScore {
-                score,
-                category: "Tech & Engineering".into(),
-                rationale: "solid".into(),
-                is_paywalled_guess: false,
-            }),
-            triage: None,
-            auto_include: false,
-            exploration: false,
-            admitted_by: Vec::new(),
+    fn deep(quality: f64, fit: f64, rationale: &str) -> Deep {
+        Deep {
+            quality,
+            fit,
+            category: Some("Tech & Engineering".into()),
+            rationale: rationale.into(),
+            paywalled_guess: false,
+            facets: Facets::default(),
+            model: "mock".into(),
+            prompt_version: 1,
+            assessed_at: "2026-09-02T05:30:00Z".parse().expect("timestamp"),
         }
     }
 
-    fn candidates(n: i64) -> Vec<ScoredArticle> {
+    /// A shortlisted candidate whose utility follows `score` (0–10).
+    fn candidate(id: i64, title: &str, words: i64, score: f64) -> Candidate {
+        let mut candidate = Candidate::new(article(id, title, words), false);
+        candidate.assessment.deep = Some(deep(score, score, "solid"));
+        candidate.utility = Some(score * 10.0);
+        candidate.signals.preliminary = Some(40.0 + score);
+        candidate.stage = "shortlisted".into();
+        candidate
+    }
+
+    fn candidates(n: i64) -> Vec<Candidate> {
         (1..=n)
             .map(|i| {
                 candidate(
@@ -794,7 +749,7 @@ mod tests {
         assert_eq!(resolve_section("Science", &s), "Science & Space");
         assert_eq!(resolve_section("Sports", &s), "Top Stories");
         assert_eq!(resolve_section("", &s), "Top Stories");
-        // The reserved section is never allowed through (§3.6).
+        // The reserved section is never allowed through.
         assert_eq!(resolve_section(WORLD_BRIEFING_SECTION, &s), "Top Stories");
         // A palette without "Top Stories" falls back to its first entry.
         let tiny = vec!["Niche Corner".to_string()];
@@ -802,21 +757,32 @@ mod tests {
     }
 
     #[test]
-    fn heuristic_sections_follow_feed_metadata() {
+    fn heuristic_sections_prefer_the_deep_category_then_feed_metadata() {
         let s = sections();
         let mut c = candidate(1, "MBTA slow zones, charted", 900, 6.0);
+        c.assessment.deep = None;
         c.article.category = Some("News".into());
         assert_eq!(heuristic_section(&c, &s), "Boston & Local");
 
-        let mut ai = candidate(2, "A new LLM benchmark", 900, 6.0);
+        let mut assessed = candidate(2, "MBTA slow zones, charted", 900, 6.0);
+        assessed.article.category = Some("News".into());
+        assessed.assessment.deep = Some(Deep {
+            category: Some("Boston & Local".into()),
+            ..deep(6.0, 6.0, "charted")
+        });
+        assert_eq!(heuristic_section(&assessed, &s), "Boston & Local");
+
+        let mut ai = candidate(3, "A new LLM benchmark", 900, 6.0);
+        ai.assessment.deep = None;
         ai.article.category = Some("Machine Learning".into());
         assert_eq!(heuristic_section(&ai, &s), "AI & Machine Learning");
 
-        let mut blog = candidate(3, "Notes from my week", 900, 6.0);
+        let mut blog = candidate(4, "Notes from my week", 900, 6.0);
         blog.auto_include = true;
         assert_eq!(heuristic_section(&blog, &s), "From the Blogroll");
 
-        let mut plain = candidate(4, "Untitled musing", 900, 6.0);
+        let mut plain = candidate(5, "Untitled musing", 900, 6.0);
+        plain.assessment.deep = None;
         plain.article.category = None;
         plain.article.feed_title = "A Journal".into();
         assert_eq!(heuristic_section(&plain, &s), "Top Stories");
@@ -859,32 +825,83 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_substitutes_the_size_targets() {
+    fn the_prompt_substitutes_the_size_targets_and_renders_the_shortlist() {
         let prompt = build_prompt(&candidates(3), &sections(), 6, 11);
         assert!(prompt.contains("aim for about 6; never more than 11; there is NO minimum"));
         assert!(!prompt.contains("{soft_target}") && !prompt.contains("{hard_max}"));
+        assert!(prompt.contains("SHORTLIST (3 candidates, best-ranked first)"));
         assert!(prompt.contains("--- id: 1\n"));
-        assert!(prompt.contains("score: 9.9 · Tech & Engineering — solid"));
-        assert!(prompt.contains("opening: "));
+        assert!(prompt.contains("feed: Some Blog · 510 words (~"));
+        assert!(prompt.contains("quality 9.9 · fit 9.9 · triage — — solid"));
+        assert!(prompt.contains("opening: word word"));
         assert!(
-            !prompt.contains("combined"),
+            !prompt.contains("utility") && !prompt.contains("99.0"),
             "the numeric blend stays out of the prompt"
         );
-        let mut flagged = candidates(1);
-        flagged[0].auto_include = true;
-        flagged[0].exploration = true;
-        flagged[0].triage = Some(crate::types::Triage {
-            interest: 7.5,
-            kind: "first_hand".into(),
-            why: "specific field notes".into(),
+        assert!(
+            !prompt.contains("facets:"),
+            "no facets line when every facet is unknown"
+        );
+    }
+
+    #[test]
+    fn prompt_renders_deep_facets_matches_neighbours_and_flags() {
+        let mut candidate = candidate(1, "A field report", 1_850, 8.5);
+        candidate.exploration = true;
+        candidate.auto_include = true;
+        candidate.article.excerpt_only = true;
+        candidate.assessment.triage = Some(Triage {
+            interest: 8.0,
+            kind: "essay".into(),
+            why: "promising".into(),
             model: "mock".into(),
             prompt_version: 1,
-            assessed_at: "2026-09-02T05:30:00Z".parse().unwrap(),
+            assessed_at: "2026-09-02T00:00:00Z".parse().expect("timestamp"),
         });
-        flagged[0].article.excerpt_only = true;
-        let prompt = build_prompt(&flagged, &sections(), 6, 11);
-        assert!(prompt.contains("triage: 7.5 · first_hand — specific field notes"));
-        assert!(prompt.contains("flags: always-include | exploration | excerpt only"));
+        candidate.assessment.deep = Some(Deep {
+            facets: Facets {
+                format: Some("first_hand_account".into()),
+                depth: Some("deep".into()),
+                evidence: Some("first_hand".into()),
+                technicality: Some("advanced".into()),
+                topic_group: Some("software_engineering".into()),
+                ..Facets::default()
+            },
+            ..deep(8.5, 7.0, "Measured field report")
+        });
+        candidate.signals.top_interests = vec![
+            TopInterest {
+                name: "Gaussian Splatting".into(),
+                z: 3.4,
+                cos: 0.61,
+            },
+            TopInterest {
+                name: "Science".into(),
+                z: 0.4,
+                cos: 0.3,
+            },
+        ];
+        candidate.signals.neighbours = vec![Neighbour {
+            article_id: 812,
+            label: "loved".into(),
+            cos: 0.71,
+            title: "The failover story".into(),
+        }];
+        let prompt = build_prompt(&[candidate], &sections(), 20, 28);
+        assert!(prompt.contains("feed: Some Blog · 1850 words (~"));
+        assert!(prompt.contains("quality 8.5 · fit 7.0 · triage 8.0 — Measured field report"));
+        assert!(prompt.contains(
+            "facets: first_hand_account · deep · first_hand · advanced · software_engineering"
+        ));
+        assert!(prompt.contains("matches: Gaussian Splatting (strong)\n"));
+        assert!(prompt.contains("closest rated: LOVED \"The failover story\" (0.71)"));
+        assert!(prompt.contains("flags: exploration | always-include | excerpt only"));
+        assert!(prompt.contains("opening: word word"));
+        let opening = prompt
+            .lines()
+            .find(|line| line.starts_with("opening:"))
+            .expect("opening line");
+        assert!(opening.split_whitespace().count() <= BLURB_WORDS + 2);
     }
 
     #[tokio::test]
@@ -894,7 +911,7 @@ mod tests {
         let llms = bulk_only(Arc::clone(&backend));
 
         // ids 101..=112 so the fixture's picks resolve.
-        let pool: Vec<ScoredArticle> = (101..=112)
+        let pool: Vec<Candidate> = (101..=112)
             .map(|i| candidate(i, &format!("Article {i}"), 800, 7.0))
             .collect();
         let lineup = select(&llms, pool, &sections(), 6, 11, date())
@@ -905,12 +922,10 @@ mod tests {
         assert_eq!(lineup.picks.len(), 6);
         assert_eq!(lineup.picks.iter().filter(|p| p.is_lead).count(), 1);
         assert_eq!(lineup.lead().map(|p| p.article.id), Some(101));
-        // Every section is from the palette and non-empty.
         for section in &lineup.section_order {
             assert!(sections().contains(section), "{section} is off-palette");
             assert!(!lineup.section_picks(section).is_empty());
         }
-        // Positions restart at 1 inside each section and ascend.
         for section in &lineup.section_order {
             let positions: Vec<i64> = lineup
                 .section_picks(section)
@@ -923,12 +938,12 @@ mod tests {
                 "{section} positions"
             );
         }
-        // The lead sits in the first section used.
         assert_eq!(
             lineup.lead().map(|p| p.section.clone()),
             lineup.section_order.first().cloned()
         );
-        // The prompt carried the shortlist and the palette.
+        // Picks carry their deep assessment for the editorial stage.
+        assert!(lineup.picks.iter().all(|p| p.llm.is_some()));
         let prompt = &backend.prompts()[0].user;
         assert!(prompt.starts_with("TASK: assemble today's issue of The Daily EPUB"));
         assert!(prompt.contains("--- id: 101"));
@@ -1005,24 +1020,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hard_max_trims_oversized_answers_by_ranking() {
+    async fn hard_max_trims_oversized_answers_by_utility() {
         let backend = Arc::new(MockBackend::new());
         backend.push(picks_json(30), TokenUsage::default());
-        let lineup = select(
-            &bulk_only(backend),
-            candidates(30),
-            &sections(),
-            6,
-            11,
-            date(),
-        )
-        .await
-        .expect("selection");
+        // Utility, not the deep scores or the blend, decides who survives:
+        // id 30 has the weakest quality but the strongest utility.
+        let mut pool = candidates(30);
+        pool[29].utility = Some(200.0);
+        let lineup = select(&bulk_only(backend), pool, &sections(), 6, 11, date())
+            .await
+            .expect("selection");
         assert_eq!(lineup.picks.len(), 11);
-        // The strongest by today's ranking key survive: ids 1..=11 score highest.
         let mut ids: Vec<ArticleId> = lineup.picks.iter().map(|p| p.article.id).collect();
         ids.sort_unstable();
-        assert_eq!(ids, (1..=11).collect::<Vec<_>>());
+        let mut expected: Vec<ArticleId> = (1..=10).collect();
+        expected.push(30);
+        assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    async fn hard_max_trim_falls_back_to_the_preliminary_blend_without_utility() {
+        let backend = Arc::new(MockBackend::new());
+        backend.push(picks_json(6), TokenUsage::default());
+        let mut pool = candidates(6);
+        for candidate in &mut pool {
+            candidate.utility = None;
+        }
+        pool[5].signals.preliminary = Some(99.0);
+        let lineup = select(&bulk_only(backend), pool, &sections(), 2, 3, date())
+            .await
+            .expect("selection");
+        let mut ids: Vec<ArticleId> = lineup.picks.iter().map(|p| p.article.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 6]);
     }
 
     #[tokio::test]
@@ -1030,7 +1060,7 @@ mod tests {
         let backend = Arc::new(MockBackend::new());
         backend.push(picks_json(4), TokenUsage::default());
         let mut pool = candidates(30);
-        pool[29].auto_include = true; // id 30, the weakest by score
+        pool[29].auto_include = true; // id 30, the weakest by utility
         let lineup = select(&bulk_only(backend), pool, &sections(), 2, 4, date())
             .await
             .expect("selection");
@@ -1071,16 +1101,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_error_on_both_providers_selects_heuristically() {
+    async fn an_error_on_both_providers_selects_by_utility() {
         let editor = Arc::new(MockBackend::new());
         editor.push_error("500 opus is down");
         let bulk = Arc::new(MockBackend::new());
         bulk.push_error("500 deepseek is down too");
         let llms = editor_and_bulk(Arc::clone(&editor), Arc::clone(&bulk));
-        let lineup = select(&llms, candidates(10), &sections(), 4, 10, date())
+        let mut pool = candidates(10);
+        pool[9].utility = Some(150.0);
+        let lineup = select(&llms, pool, &sections(), 4, 10, date())
             .await
             .expect("heuristic fallback");
         assert_eq!(lineup.picks.len(), 4);
+        assert_eq!(lineup.lead().map(|p| p.article.id), Some(10));
         assert_eq!(editor.calls(), 1);
         assert_eq!(bulk.calls(), 1);
     }
@@ -1122,20 +1155,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_provider_selects_heuristically() {
+    async fn no_provider_selects_by_utility() {
         let lineup = select(&Llms::default(), candidates(20), &sections(), 6, 28, date())
             .await
             .expect("fallback");
         assert_eq!(lineup.picks.len(), 6);
+        assert_eq!(lineup.lead().map(|p| p.article.id), Some(1));
     }
 
     #[test]
-    fn skip_llm_lineup_uses_preliminary_blend_order() {
+    fn select_without_llm_orders_by_utility() {
         let mut pool = candidates(10);
-        pool.iter_mut().for_each(|c| c.llm = None);
-        pool[7].prefilter_score = 99.0; // id 8 is the strongest heuristically
+        pool[7].utility = Some(150.0); // id 8 is the strongest by utility
+        pool[7].signals.preliminary = Some(1.0); // ...despite the weakest blend
         pool[9].auto_include = true; // id 10 is a personal blog
-        pool[9].prefilter_score = 1.0;
+        pool[9].utility = Some(1.0);
 
         let lineup = select_without_llm(pool, &sections(), 4, 28, date());
         assert_eq!(lineup.picks.len(), 5, "4 picks + the auto-include");
@@ -1153,6 +1187,19 @@ mod tests {
             assert!(pick.why.is_none());
         }
         assert!(!lineup.section_order.is_empty());
+    }
+
+    #[test]
+    fn select_without_llm_falls_back_to_the_preliminary_blend() {
+        let mut pool = candidates(4);
+        for candidate in &mut pool {
+            candidate.utility = None;
+            candidate.assessment.deep = None;
+        }
+        pool[2].signals.preliminary = Some(99.0);
+        let lineup = select_without_llm(pool, &sections(), 2, 4, date());
+        assert_eq!(lineup.picks.len(), 2);
+        assert_eq!(lineup.lead().map(|pick| pick.article.id), Some(3));
     }
 
     #[test]

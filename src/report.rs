@@ -75,22 +75,20 @@ pub struct StageCounts {
     pub rated_with_embeddings: i64,
     /// Articles with a reusable or newly produced triage assessment.
     pub triaged: i64,
-    /// Articles admitted to legacy Stage A / the editor.
+    /// Articles admitted to close reading.
     pub admitted: i64,
     /// First admitting retriever counts.
     pub admitted_by: BTreeMap<String, i64>,
     pub exploration_admitted: i64,
     pub exploration_selected: i64,
-    /// Legacy Stage A assessments in step 4; deep assessments beginning step 5.
+    /// Deep assessments, whether reused or newly produced.
     pub assessed: i64,
-    /// Candidates shown to the editor (the admitted set in step 4).
+    /// Candidates shown to the editor after diversification.
     pub shortlisted: i64,
-    /// Compatibility count for the admitted deep set in step 4.
+    /// Leader clusters formed over the deep set.
+    pub clusters: i64,
+    /// Admitted deep-set count retained for the colophon and runs table.
     pub candidates: i64,
-    /// Articles scored by the LLM (§3.6 stage A).
-    pub llm_scored: i64,
-    /// Candidates left unscored after failures or a bulk-provider budget trip (§5).
-    pub llm_unscored: i64,
     /// Articles in the final lineup (§3.6 stage B).
     pub selected: i64,
     /// Discussion chapters rendered (§3.7).
@@ -306,7 +304,6 @@ mod tests {
     fn serializes_round_trip() {
         let mut r = RunReport::new("2026-08-15".parse().unwrap(), ts("2026-08-15T05:30:00Z"));
         r.counts.entries_fetched = 412;
-        r.counts.llm_unscored = 3;
         r.per_feed_counts.insert("Hacker News".into(), 30);
         r.per_feed_counts.insert("Lobsters".into(), 12);
         r.timings.record("ingest", 1500);

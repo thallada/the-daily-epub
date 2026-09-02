@@ -125,9 +125,7 @@ pub fn roundup_penalty(title: &str) -> f64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::types::{
-        ArticleId, ExtractMethod, FeedId, SocialRef, SocialSource, SourceKind, SourceRef,
-    };
+    use crate::types::{ArticleId, ExtractMethod, SocialRef, SocialSource, SourceKind, SourceRef};
     use jiff::Timestamp;
 
     pub(crate) fn ts() -> Timestamp {
@@ -177,17 +175,6 @@ pub(crate) mod tests {
             item_url: None,
             fetched_at: ts(),
         }];
-        article
-    }
-
-    pub(crate) fn via(mut article: Article, kind: SourceKind, feed_id: FeedId) -> Article {
-        article.sources.push(SourceRef {
-            entry_id: article.best_entry_id,
-            feed_id,
-            feed_title: format!("{kind:?} feed"),
-            category: None,
-            kind,
-        });
         article
     }
 

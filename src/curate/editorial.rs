@@ -195,22 +195,28 @@ pub fn build_brief_prompt(lineup: &Lineup, summaries: &BTreeMap<ArticleId, Strin
     for section in &lineup.section_order {
         let _ = writeln!(prompt, "\n## {section}");
         for pick in lineup.section_picks(section) {
-            let score = pick
+            let quality = pick
                 .llm
                 .as_ref()
-                .map(|score| format!("{:.1}", score.score))
-                .unwrap_or_else(|| "unscored".into());
+                .map(|assessment| format!("{:.1}", assessment.quality))
+                .unwrap_or_else(|| "unassessed".into());
+            let fit = pick
+                .llm
+                .as_ref()
+                .map(|assessment| format!("{:.1}", assessment.fit))
+                .unwrap_or_else(|| "unassessed".into());
             let summary = summaries
                 .get(&pick.article.id)
                 .cloned()
                 .unwrap_or_else(|| excerpt_summary(pick));
             let _ = writeln!(
                 prompt,
-                "- {}\n  feed: {}\n  why: {}\n  score: {}\n  summary: {}",
+                "- {}\n  feed: {}\n  why: {}\n  quality: {}\n  fit: {}\n  summary: {}",
                 pick.article.title.trim(),
                 pick.article.feed_title.trim(),
                 pick.why.as_deref().unwrap_or("not supplied"),
-                score,
+                quality,
+                fit,
                 summary
             );
         }
@@ -462,7 +468,8 @@ mod tests {
         assert!(prompt.contains("- Migrating 40TB off Postgres"));
         assert!(prompt.contains("why: the Migrating 40TB off Postgres piece you'd argue with"));
         assert!(prompt.contains("summary: A migration story with numbers."));
-        assert!(prompt.contains("score: unscored"));
+        assert!(prompt.contains("quality: unassessed"));
+        assert!(prompt.contains("fit: unassessed"));
         assert!(prompt.contains("2026-08-15"));
         assert!(
             !prompt.contains("section_intros"),

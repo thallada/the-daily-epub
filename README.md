@@ -4,9 +4,10 @@ A personalized daily newspaper, delivered as an EPUB.
 
 Every morning a systemd timer wakes one Rust binary. It pulls the last ~26 hours
 from a self-hosted [Miniflux](https://miniflux.app), deduplicates and extracts
-the articles, enriches them with HackerNews/Lobsters/Reddit social proof, filters
-300–500 candidates down to ~120 with cheap heuristics, asks DeepSeek to score them,
-and hands the shortlist to Claude Opus 5 — the editor — which assembles the issue
+the articles, enriches them with HackerNews/Lobsters/Reddit social proof, has
+DeepSeek triage every eligible opening and closely assess a 120-article union,
+then utility-ranks and diversity-caps a 60-item shortlist for Claude Opus 5 — the editor —
+which assembles the issue
 (no minimum size, a hard ceiling), writes a one-line *why* under every headline,
 the summaries and *The Brief*. It assembles two EPUB editions (a standard one
 and one tuned for the Xteink X4 e-ink reader), converts the X4 edition to XTC, and
@@ -29,7 +30,8 @@ hard spend limits in the providers' dashboards as the real backstop.
 
 ```
 Miniflux ingest ─▶ dedupe ─▶ extraction ─▶ persist ─▶ social enrichment
-  ─▶ hygiene ─▶ embeddings (Voyage) + cheap signals ─▶ pre-filter ─▶ scoring (DeepSeek)
+  ─▶ hygiene ─▶ embeddings (Voyage) + cheap signals ─▶ triage (DeepSeek)
+  ─▶ union admission ─▶ deep assessment (DeepSeek) ─▶ utility + diversity
   ─▶ editor (Claude) ─▶ comments ─▶ editorial (Claude)
   ─▶ world briefing ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
 ```
@@ -56,7 +58,7 @@ fallback (`fallbacks = "default"`) is enabled on every editor request.
 |---|---|---|
 | Rust (2024 edition toolchain) | building | `cargo build --release` |
 | **Miniflux** with an API key | the only content source | Settings → API Keys. The client is read-only and never mutates read state. |
-| **DeepSeek API key** | scoring, and the fallback for every editor call | <https://platform.deepseek.com>. Optional: `--skip-llm` runs the whole pipeline without it. |
+| **DeepSeek API key** | triage and deep assessment, and the fallback for every editor call | <https://platform.deepseek.com>. Optional: `--skip-llm` runs the whole pipeline without it. |
 | **Anthropic API key** | the editor: selection, summaries, The Brief, the weekly profile rebuild | <https://console.anthropic.com>. Optional: without it every editor call runs on DeepSeek. Set a dashboard spend limit; `anthropic.max_daily_usd` is only a runaway guard. |
 | **Voyage AI API key** | article and interest embeddings behind the learned ranking signals | <https://www.voyageai.com>. Optional: without it (or with `--skip-embeddings`) the run uses cached vectors only and the learned signals are absent, never a penalty. |
 | A 32+ byte random secret | signs the article rating links | `openssl rand -hex 32` |
@@ -106,11 +108,13 @@ does not advance the ingest watermark. It prints the lineup and the cost report.
 `explain` answers "why was this (not) in the paper" from the `candidate_runs`
 row the run persisted for every considered article: the stage it reached and the
 reason it stopped, every raw and normalized signal with its presence and
-effective weight, the top interests, the nearest rated neighbours, any cached
-LLM assessments, and the editor's reason for a pick. `--url` canonicalizes the
-address; an article that is not in the database at all is reported as never
-ingested (a feed problem, not a ranking one). `--near-misses` lists the highest
-ranked articles that were not selected.
+effective weight, the top interests, the nearest rated neighbours, the triage
+and deep assessments (quality, fit, category, rationale, facets), utility and
+rank, the cluster it landed in and what suppressed it, and the editor's reason
+for a pick. `--url` canonicalizes the address; an article that is not in the
+database at all is reported as never ingested (a feed problem, not a ranking
+one). `--near-misses` lists the highest-utility articles that were not selected
+(by preliminary blend for articles the ranker never reached).
 
 `features backfill` embeds the rated and published articles first (the learned
 set), then the standing interests, then — only with `--all` — every other
@@ -159,9 +163,9 @@ Secrets belong in the environment file, never in the TOML.
 | `deepseek.base_url` | `https://api.deepseek.com/v1` | OpenAI-compatible endpoint. |
 | `deepseek.model` | `deepseek-v4-flash` | Verified 2026-08-15 (DeepSeek-V4-Flash-0731). |
 | `deepseek.api_key` | — | **`DAILY_EPUB_DEEPSEEK__API_KEY`**. Absent ⇒ the run curates heuristically. |
-| `deepseek.score_batch_size` | `12` | Articles per stage-A scoring request. |
+| `deepseek.deep_batch_size` | `8` | Articles per close-reading assessment request. The removed `score_batch_size` key is a startup error. |
 | `deepseek.triage_batch_size` | `25` | Articles per first-pass triage request. |
-| `deepseek.max_concurrent_requests` | `4` | Triage and stage-A batches in flight at once; the budget is checked before each is spawned. |
+| `deepseek.max_concurrent_requests` | `4` | Triage and deep-assessment batches in flight at once; the budget is checked before each is spawned. |
 | `deepseek.score_temperature` | `0.3` | Scoring temperature. |
 | `deepseek.editorial_temperature` | `0.8` | Summaries and The Brief, only when DeepSeek is the fallback editor. |
 | `deepseek.price_input_per_mtok` | `0.14` | USD per 1M cache-miss input tokens (cost guardrail arithmetic). |
@@ -223,9 +227,11 @@ signal is absent. Ratings decay with `rating_half_life_days` (60) over
 `deep_keep` (120), `shortlist_keep` (60), `assessment_reuse_days` (3),
 `semantic_min_words` (300), `exploration_slots` (5), `[curation.ranking.quotas]`
 (`triage` 60 · `interest` 20 · `knn` 20), `[curation.ranking.weights.utility]`
-and `[curation.ranking.diversity]` (`cluster_threshold` 0.85, `per_cluster_cap`
-2, `utility_protected` 10) are validated now and drive the LLM triage, deep
-assessment and diversification stages as they land.
+(`quality` 0.40 · `fit` 0.20 · `knn` 0.15 · `interest` 0.10 · `feed` 0.05 ·
+`triage` 0.05 · `social` 0.03 · `heuristic` 0.02, over the signals present for
+each article of the deep set) and `[curation.ranking.diversity]`
+(`cluster_threshold` 0.85, `per_cluster_cap` 2, `utility_protected` 10) drive
+the LLM triage, deep assessment, utility ranking and diversification stages.
 `[curation.ranking.weights.preliminary]` (`interest` 0.35 · `knn` 0.25 ·
 `heuristic` 0.20 · `feed` 0.10 · `social` 0.10) blends the cheap signals; weights
 are renormalized over the signals present for each article, so they need not sum
@@ -499,9 +505,9 @@ and database rows, with no network access anywhere.
 server. The stages themselves:
 
 ```text
-miniflux.rs   ingest            curate/       scoring and selection
-dedupe.rs     clustering          prefilter, llm, triage, admit, score, select,
-                                  editorial, embedding, signals, telemetry
+miniflux.rs   ingest            curate/       triage, assessment and selection
+dedupe.rs     clustering          prefilter, llm, triage, admit, assess, rank,
+                                  editor, editorial, embedding, signals, telemetry
 extract.rs    body text           profile/    the reader's taste profile
 images/       article images    comments.rs   discussion chapters
   normalize     usable <img>    world.rs      the world briefing
@@ -582,5 +588,9 @@ From spec §7, plus what implementation turned up:
   the union of triage, interest, neighbour, exploration, blend and auto-include
   retrievers. `explain` shows the assessment and `admitted_by`. Learned signals
   stay absent until their gates open (8 and 15 ratings respectively).
+- **Deep assessment and diversity are live.** DeepSeek reads a representative
+  beginning/middle/end sample, separates editorial quality from reader fit, and
+  records descriptive facets. Utility is normalized over the deep set; embedding
+  leader clusters cap near-duplicates before the 60-item editor shortlist.
 - **One reader, one issue per day.** There is no multi-user support and no
   weekly/retrospective edition (spec §6).

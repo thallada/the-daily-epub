@@ -36,9 +36,9 @@ page_limit = 250
 base_url = "https://api.deepseek.com/v1"
 model = "deepseek-v4-flash"          # DeepSeek-V4-Flash-0731 (confirmed 2026-08-15)
 # api_key via DAILY_EPUB_DEEPSEEK__API_KEY env
-score_batch_size = 12
+deep_batch_size = 8                  # articles per close-reading assessment request
 triage_batch_size = 25               # articles per first-pass triage request
-max_concurrent_requests = 4          # triage and stage-A batches in flight at once
+max_concurrent_requests = 4          # triage and deep-assessment batches in flight
 score_temperature = 0.3
 editorial_temperature = 0.8          # used only when DeepSeek is the fallback editor
 # USD per 1M tokens, used for the cost guardrail.

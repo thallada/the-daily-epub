@@ -357,11 +357,14 @@ pub async fn run(
         let rows = sqlx::query(
             "SELECT article_id, stage, score, kind, rationale, assessed_at
              FROM article_assessments
-             WHERE model = ? AND prompt_version = ? AND assessed_at >= ?",
+             WHERE model = ? AND assessed_at >= ?
+               AND ((stage = 'triage' AND prompt_version = ?)
+                 OR (stage = 'deep' AND prompt_version = ?))",
         )
         .bind(&llm.model)
-        .bind(TRIAGE_PROMPT_VERSION)
         .bind(fmt_ts(since))
+        .bind(TRIAGE_PROMPT_VERSION)
+        .bind(super::assess::DEEP_PROMPT_VERSION)
         .fetch_all(db.pool())
         .await?;
         let pool_ids = pool;

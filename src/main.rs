@@ -343,17 +343,11 @@ fn print_report(report: &RunReport) {
         report.counts.duplicates_merged,
         report.counts.entries_dropped,
     );
-    let unscored = if report.counts.llm_unscored > 0 {
-        format!(" ({} unscored)", report.counts.llm_unscored)
-    } else {
-        String::new()
-    };
     println!(
-        "curation: {} eligible · {} embedded · {} triaged → {} admitted → {} assessed{unscored} → {} shortlisted → {} selected",
+        "curation: {} considered → {} eligible → {} triaged → {} assessed → {} shortlisted → {} selected",
+        report.counts.articles,
         report.counts.eligible,
-        report.counts.embedded,
         report.counts.triaged,
-        report.counts.admitted,
         report.counts.assessed,
         report.counts.shortlisted,
         report.counts.selected,
