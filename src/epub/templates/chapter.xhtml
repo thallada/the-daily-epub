@@ -7,6 +7,9 @@
         <p class="byline">{{ line }}</p>
 {% endif %}
         <p class="meta">{{ meta_line }}</p>
+{% if let Some(text) = why %}
+        <p class="why"><em>Why it&#39;s here: {{ text }}</em></p>
+{% endif %}
 {% if let Some(line) = social_line %}
         <p class="social">{{ line }}</p>
 {% endif %}

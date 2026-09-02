@@ -6,8 +6,9 @@
 //!
 //! [`Curator`] is the thin orchestration layer the `generate` pipeline calls; the
 //! interesting logic lives in the stage modules. Every stage is safe to run with
-//! `llm == None` (`--skip-llm`): the prefilter order stands in for selection and
-//! feed excerpts stand in for summaries (notes §6).
+//! no provider at all (`--skip-llm`): the prefilter order stands in for selection
+//! and feed excerpts stand in for summaries (notes §6). Scoring runs on the bulk
+//! client; selection and editorial on the editor with per-call bulk fallback.
 
 pub mod editorial;
 pub mod llm;
@@ -26,14 +27,15 @@ use crate::types::{Article, Editorial, Lineup, ScoredArticle};
 pub struct Curator {
     pub config: Config,
     pub db: Db,
-    pub llm: Option<llm::LlmClient>,
+    pub llms: llm::Llms,
 }
 
 impl Curator {
-    /// `llm == None` corresponds to `--skip-llm`: prefilter order is used for
-    /// selection and feed excerpts stand in for summaries (notes §6).
-    pub fn new(config: Config, db: Db, llm: Option<llm::LlmClient>) -> Self {
-        Self { config, db, llm }
+    /// An empty [`llm::Llms`] corresponds to `--skip-llm`: prefilter order is
+    /// used for selection and feed excerpts stand in for summaries (notes §6).
+    /// With only `bulk`, every editor call runs on DeepSeek (§4.2).
+    pub fn new(config: Config, db: Db, llms: llm::Llms) -> Self {
+        Self { config, db, llms }
     }
 
     /// Heuristic pre-filter: 300–500 articles → `prefilter_keep` (§3.5).
@@ -75,7 +77,7 @@ impl Curator {
     ///
     /// A no-op under `--skip-llm`. Scores are persisted per `(article, date)`.
     pub async fn score(&self, candidates: &mut [ScoredArticle], date: Date) -> anyhow::Result<()> {
-        let Some(llm) = self.llm.as_ref() else {
+        let Some(llm) = self.llms.bulk.as_ref() else {
             tracing::info!("--skip-llm: stage A scoring skipped");
             return Ok(());
         };
@@ -86,6 +88,7 @@ impl Curator {
             llm,
             candidates,
             self.config.deepseek.score_batch_size,
+            self.config.deepseek.max_concurrent_requests,
             &self.config.curation.sections,
             self.config.deepseek.score_temperature,
         )
@@ -116,23 +119,29 @@ impl Curator {
         date: Date,
     ) -> anyhow::Result<Lineup> {
         let sections = &self.config.curation.sections;
-        let target = self.config.target_article_count;
-        let Some(llm) = self.llm.as_ref() else {
-            tracing::info!("--skip-llm: selecting by prefilter order");
-            return Ok(select::select_without_llm(
-                candidates, sections, target, date,
-            ));
-        };
-        let span = tracing::info_span!("llm_select", candidates = candidates.len());
+        let soft_target = self.config.target_article_count;
+        let hard_max = self.config.curation.max_article_count;
+        let span = tracing::info_span!("llm_editor", candidates = candidates.len());
         let _guard = span.enter();
-
-        match select::select(llm, candidates.clone(), sections, target, date).await {
+        match select::select(
+            &self.llms,
+            candidates.clone(),
+            sections,
+            soft_target,
+            hard_max,
+            date,
+        )
+        .await
+        {
             Ok(lineup) => Ok(lineup),
-            Err(e) => {
-                tracing::error!(error = %e,
-                    "stage B selection failed; falling back to prefilter order");
+            Err(error) => {
+                tracing::error!(%error, "editor and bulk fallback failed; selecting heuristically");
                 Ok(select::select_without_llm(
-                    candidates, sections, target, date,
+                    candidates,
+                    sections,
+                    soft_target,
+                    hard_max,
+                    date,
                 ))
             }
         }
@@ -142,13 +151,19 @@ impl Curator {
     ///
     /// Never fails the run: a budget trip or an API error degrades to excerpts.
     pub async fn editorial(&self, lineup: &Lineup) -> anyhow::Result<Editorial> {
-        let Some(llm) = self.llm.as_ref() else {
+        if self.llms.editor_or_bulk().is_none() {
             tracing::info!("--skip-llm: using feed excerpts as summaries");
             return Ok(editorial::fallback_editorial(lineup));
-        };
+        }
         let span = tracing::info_span!("llm_editorial", picks = lineup.picks.len());
         let _guard = span.enter();
-        Ok(editorial::run(llm, lineup, self.config.deepseek.editorial_temperature).await)
+        Ok(editorial::run(
+            &self.llms,
+            lineup,
+            &self.config.editorial,
+            self.config.deepseek.editorial_temperature,
+        )
+        .await)
     }
 }
 

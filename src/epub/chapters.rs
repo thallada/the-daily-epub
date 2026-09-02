@@ -39,6 +39,7 @@ struct IndexEntry {
     source: String,
     reading_minutes: i64,
     summary: String,
+    why: Option<String>,
 }
 
 struct IndexSection {
@@ -59,7 +60,6 @@ struct InThisIssue {
 struct SectionPage {
     title: String,
     name: String,
-    intro: Option<String>,
 }
 
 struct RatingLinks {
@@ -76,6 +76,7 @@ struct ArticleChapter {
     byline: Option<String>,
     meta_line: String,
     social_line: Option<String>,
+    why: Option<String>,
     summary: Option<String>,
     excerpt_only: bool,
     body_html: String,
@@ -108,7 +109,10 @@ struct ColophonChapter {
     issue_number: i64,
     display_date: String,
     generated_at: String,
-    model: String,
+    bulk_model: String,
+    editor_model: String,
+    summaries_model: String,
+    provider_costs: Vec<ProviderCostLine>,
     entries_fetched: i64,
     feeds_seen: i64,
     candidates: i64,
@@ -118,6 +122,11 @@ struct ColophonChapter {
     reading_line: String,
     cost_usd: String,
     generator_version: String,
+}
+
+struct ProviderCostLine {
+    provider: String,
+    cost: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +283,7 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
                 source: pick.article.feed_title.clone(),
                 reading_minutes: pick.article.reading_minutes(),
                 summary: summary_for(issue, pick).unwrap_or_default().to_string(),
+                why: pick.why.clone(),
             })
             .collect();
         sections.push(IndexSection { name, entries });
@@ -287,6 +297,7 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
                 source: "Wikipedia Current Events".into(),
                 reading_minutes: 3,
                 summary: "The day's events, as recorded by the Current Events portal.".into(),
+                why: None,
             }],
         });
     }
@@ -304,14 +315,11 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
     })
 }
 
-/// A section title page: name + LLM intro (§3.10).
-pub fn render_section_page(name: &str, intro: Option<&str>) -> Result<Chapter, EpubError> {
+/// A section title page: the name only (§14.2 removed the LLM intros).
+pub fn render_section_page(name: &str) -> Result<Chapter, EpubError> {
     let tpl = SectionPage {
         title: name.to_string(),
         name: name.to_string(),
-        intro: intro
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
     };
     Ok(Chapter {
         id: format!("sec-{name}"),
@@ -364,6 +372,7 @@ pub fn render_article(
         byline: article.author.as_ref().map(|a| format!("By {a}")),
         meta_line: meta_parts.join(" \u{00b7} "),
         social_line: social_line(&article.social),
+        why: pick.why.clone(),
         summary: summary_for(issue, pick).map(str::to_string),
         excerpt_only: article.excerpt_only,
         body_html: prepare_body(&article.content_html, images_),
@@ -429,16 +438,23 @@ pub fn render_world_briefing(issue: &Issue) -> Result<Option<Chapter>, EpubError
 /// Colophon: generation timestamp, models used, token cost, feed counts (§3.10).
 pub fn render_colophon(issue: &Issue) -> Result<Chapter, EpubError> {
     let colophon = &issue.colophon;
+    let provider_costs = colophon
+        .provider_costs
+        .iter()
+        .map(|(provider, cost)| ProviderCostLine {
+            provider: provider.clone(),
+            cost: format!("${cost:.4}"),
+        })
+        .collect();
     let tpl = ColophonChapter {
         title: "Colophon".into(),
         issue_number: issue.meta.issue_number,
         display_date: issue.meta.display_date.clone(),
         generated_at: issue.meta.generated_at.to_string(),
-        model: if colophon.model.is_empty() {
-            "none (heuristic selection)".into()
-        } else {
-            colophon.model.clone()
-        },
+        bulk_model: colophon.models.bulk.clone(),
+        editor_model: colophon.models.editor.clone(),
+        summaries_model: colophon.models.summaries.clone(),
+        provider_costs,
         entries_fetched: colophon.entries_fetched,
         feeds_seen: colophon.feeds_seen,
         candidates: colophon.candidates,

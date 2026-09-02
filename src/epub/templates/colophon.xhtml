@@ -9,12 +9,17 @@
       </p>
       <p class="fact-line"><strong>Issue:</strong> No. {{ issue_number }} &#183; {{ display_date }}</p>
       <p class="fact-line"><strong>Generated:</strong> {{ generated_at }}</p>
-      <p class="fact-line"><strong>Curation model:</strong> {{ model }}</p>
+      <p class="fact-line"><strong>Bulk model:</strong> {{ bulk_model }}</p>
+      <p class="fact-line"><strong>Editor model:</strong> {{ editor_model }}</p>
+      <p class="fact-line"><strong>Summaries model:</strong> {{ summaries_model }}</p>
       <p class="fact-line"><strong>Entries considered:</strong> {{ entries_fetched }} from {{ feeds_seen }} feeds</p>
       <p class="fact-line"><strong>Candidates scored:</strong> {{ candidates }}</p>
       <p class="fact-line"><strong>Articles selected:</strong> {{ article_count }} across {{ section_count }} sections</p>
       <p class="fact-line"><strong>Words:</strong> {{ total_words }} &#183; {{ reading_line }}</p>
-      <p class="fact-line"><strong>Token cost:</strong> {{ cost_usd }}</p>
+{% for line in provider_costs %}
+      <p class="fact-line"><strong>{{ line.provider }} cost:</strong> {{ line.cost }}</p>
+{% endfor %}
+      <p class="fact-line"><strong>Total token cost:</strong> {{ cost_usd }}</p>
       <p class="fact-line"><strong>Generator:</strong> {{ generator_version }}</p>
       <p class="attribution">
         Article text belongs to its authors and publications; excerpts and links are

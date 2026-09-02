@@ -296,3 +296,5 @@ blockquote.comment blockquote.comment {
 .fact-line {
   margin: 0 0 0.35em 0;
 }
+
+.why, .index-why { font-size: 0.9em; font-style: italic; }

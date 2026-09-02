@@ -74,7 +74,9 @@ pub struct Config {
 
     pub miniflux: MinifluxConfig,
     pub deepseek: DeepseekConfig,
+    pub anthropic: AnthropicConfig,
     pub curation: CurationConfig,
+    pub editorial: EditorialConfig,
     pub publish: PublishConfig,
     pub xtc: XtcConfig,
     pub server: ServerConfig,
@@ -97,7 +99,9 @@ impl Default for Config {
             profile_path: PathBuf::from("data/profile.md"),
             miniflux: MinifluxConfig::default(),
             deepseek: DeepseekConfig::default(),
+            anthropic: AnthropicConfig::default(),
             curation: CurationConfig::default(),
+            editorial: EditorialConfig::default(),
             publish: PublishConfig::default(),
             xtc: XtcConfig::default(),
             server: ServerConfig::default(),
@@ -136,6 +140,7 @@ pub struct DeepseekConfig {
     pub api_key: Option<String>,
     /// Articles per stage-A scoring request (§3.6).
     pub score_batch_size: usize,
+    pub max_concurrent_requests: usize,
     pub score_temperature: f32,
     pub editorial_temperature: f32,
     /// USD per 1M cache-miss input tokens.
@@ -153,6 +158,7 @@ impl Default for DeepseekConfig {
             model: "deepseek-v4-flash".into(),
             api_key: None,
             score_batch_size: 12,
+            max_concurrent_requests: 4,
             score_temperature: 0.3,
             editorial_temperature: 0.8,
             price_input_per_mtok: 0.14,
@@ -162,10 +168,73 @@ impl Default for DeepseekConfig {
     }
 }
 
+/// `[anthropic]` — Claude editor, editorial and profile settings (§4.2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AnthropicConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    /// Supply only via `DAILY_EPUB_ANTHROPIC__API_KEY`.
+    pub api_key: Option<String>,
+    pub effort: String,
+    pub price_input_per_mtok: f64,
+    pub price_cache_write_per_mtok: f64,
+    pub price_cache_read_per_mtok: f64,
+    pub price_output_per_mtok: f64,
+    pub max_daily_usd: f64,
+    pub max_concurrent_requests: usize,
+}
+
+impl Default for AnthropicConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude-opus-5".into(),
+            api_key: None,
+            effort: "high".into(),
+            price_input_per_mtok: 5.0,
+            price_cache_write_per_mtok: 6.25,
+            price_cache_read_per_mtok: 0.5,
+            price_output_per_mtok: 25.0,
+            max_daily_usd: 3.0,
+            max_concurrent_requests: 4,
+        }
+    }
+}
+
+/// Which provider writes per-article summaries (§14.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SummaryModel {
+    Editor,
+    Bulk,
+}
+
+/// `[editorial]` — summary provider and per-article input budget (§14).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EditorialConfig {
+    pub summary_model: SummaryModel,
+    pub summary_input_tokens: usize,
+}
+
+impl Default for EditorialConfig {
+    fn default() -> Self {
+        Self {
+            summary_model: SummaryModel::Editor,
+            summary_input_tokens: 3_000,
+        }
+    }
+}
+
 /// `[curation]` — pre-filter and section palette (§3.5, §3.6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CurationConfig {
+    /// Absolute issue-size ceiling; the editor has no minimum (§13).
+    pub max_article_count: usize,
     /// Miniflux feed ids or site URLs that can never be dropped (§3.5).
     pub always_include_feeds: Vec<String>,
     /// Hosts excluded outright (§3.5).
@@ -181,6 +250,7 @@ pub struct CurationConfig {
 impl Default for CurationConfig {
     fn default() -> Self {
         Self {
+            max_article_count: 28,
             always_include_feeds: Vec::new(),
             blocked_domains: Vec::new(),
             paywall_domains: Vec::new(),
@@ -376,6 +446,39 @@ impl Config {
                 "prefilter_keep must be >= target_article_count".into(),
             ));
         }
+        if self.curation.max_article_count < self.target_article_count {
+            return Err(ConfigError::Invalid(
+                "curation.max_article_count must be >= target_article_count".into(),
+            ));
+        }
+        if self.deepseek.score_batch_size == 0 {
+            return Err(ConfigError::Invalid(
+                "deepseek.score_batch_size must be >= 1".into(),
+            ));
+        }
+        if self.deepseek.max_concurrent_requests == 0 {
+            return Err(ConfigError::Invalid(
+                "deepseek.max_concurrent_requests must be >= 1".into(),
+            ));
+        }
+        if self.anthropic.max_concurrent_requests == 0 {
+            return Err(ConfigError::Invalid(
+                "anthropic.max_concurrent_requests must be >= 1".into(),
+            ));
+        }
+        if self.editorial.summary_input_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "editorial.summary_input_tokens must be >= 1".into(),
+            ));
+        }
+        if !matches!(
+            self.anthropic.effort.as_str(),
+            "low" | "medium" | "high" | "xhigh" | "max"
+        ) {
+            return Err(ConfigError::Invalid(
+                "anthropic.effort must be one of low, medium, high, xhigh, max".into(),
+            ));
+        }
         if self.curation.sections.is_empty() {
             return Err(ConfigError::Invalid(
                 "curation.sections must not be empty".into(),
@@ -498,6 +601,42 @@ mod tests {
         assert_eq!(c.xtc.format, XtcFormat::Xtch);
         assert_eq!(c.server.bind, "127.0.0.1:3499");
         assert_eq!(c.deepseek.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(c.deepseek.max_concurrent_requests, 4);
+        assert!(c.anthropic.enabled);
+        assert_eq!(c.anthropic.model, "claude-opus-5");
+        assert_eq!(c.anthropic.effort, "high");
+        assert!(c.anthropic.api_key.is_none(), "keys never live in the file");
+        assert_eq!(c.anthropic.max_daily_usd, 3.0);
+        assert_eq!(c.curation.max_article_count, 28);
+        assert_eq!(c.editorial.summary_model, SummaryModel::Editor);
+        assert_eq!(c.editorial.summary_input_tokens, 3000);
+    }
+
+    #[test]
+    fn provider_validation_rejects_nonsense() {
+        let mut c = Config::default();
+        c.curation.max_article_count = c.target_article_count - 1;
+        assert!(c.validate().is_err(), "max_article_count below the target");
+        let mut c = Config::default();
+        c.anthropic.effort = "turbo".into();
+        assert!(c.validate().is_err(), "unknown effort");
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            let mut c = Config::default();
+            c.anthropic.effort = effort.into();
+            assert!(c.validate().is_ok(), "{effort} is a valid effort");
+        }
+        let mut c = Config::default();
+        c.deepseek.max_concurrent_requests = 0;
+        assert!(c.validate().is_err());
+        let mut c = Config::default();
+        c.anthropic.max_concurrent_requests = 0;
+        assert!(c.validate().is_err());
+        let mut c = Config::default();
+        c.deepseek.score_batch_size = 0;
+        assert!(c.validate().is_err());
+        let mut c = Config::default();
+        c.editorial.summary_input_tokens = 0;
+        assert!(c.validate().is_err());
     }
 
     #[test]

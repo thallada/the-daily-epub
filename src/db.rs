@@ -5,6 +5,7 @@
 //! (implementation notes §2). Pipeline writes are idempotent upserts so that
 //! `generate --date X` can be re-run safely; feedback events are append-only.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
@@ -43,6 +44,12 @@ pub enum DbError {
     },
     #[error("malformed value in column `{column}`: {value}")]
     Decode { column: &'static str, value: String },
+    #[error("malformed JSON in column `{column}`: {source}")]
+    Json {
+        column: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 type Result<T> = std::result::Result<T, DbError>;
@@ -480,8 +487,8 @@ impl Db {
             .await?;
         for pick in picks {
             sqlx::query(
-                "INSERT INTO issue_articles (issue_date, article_id, section, position, is_lead, summary)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO issue_articles (issue_date, article_id, section, position, is_lead, summary, why)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(date.to_string())
             .bind(pick.article.id)
@@ -489,6 +496,7 @@ impl Db {
             .bind(pick.position)
             .bind(pick.is_lead)
             .bind(pick.summary.as_deref())
+            .bind(pick.why.as_deref())
             .execute(&mut *tx)
             .await?;
         }
@@ -656,7 +664,7 @@ impl Db {
         sqlx::query(
             "UPDATE runs SET finished_at = ?, entries_fetched = ?, candidates = ?, selected = ?,
                              input_tokens = ?, cached_tokens = ?, output_tokens = ?, cost_usd = ?,
-                             status = ?, error = ?
+                             status = ?, error = ?, provider_costs_json = ?, config_json = ?
              WHERE id = ?",
         )
         .bind(report.finished_at.map(fmt_ts))
@@ -669,20 +677,55 @@ impl Db {
         .bind(report.cost_usd)
         .bind(report.status.as_str())
         .bind(report.error.as_deref())
+        .bind(
+            serde_json::to_string(&report.provider_costs).map_err(|source| DbError::Json {
+                column: "runs.provider_costs_json",
+                source,
+            })?,
+        )
+        .bind(
+            serde_json::to_string(&report.config_json).map_err(|source| DbError::Json {
+                column: "runs.config_json",
+                source,
+            })?,
+        )
         .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Total spend recorded for a date, for the `max_daily_usd` guardrail (§3.6).
-    pub async fn spend_for_date(&self, date: Date) -> Result<f64> {
-        let row =
-            sqlx::query("SELECT COALESCE(SUM(cost_usd), 0.0) AS total FROM runs WHERE date = ?")
-                .bind(date.to_string())
-                .fetch_one(&self.pool)
-                .await?;
-        Ok(row.get::<f64, _>("total"))
+    /// Earlier provider spend on the UTC date containing this run's start (§5).
+    pub async fn provider_spend_for_utc_day(
+        &self,
+        started_at: Timestamp,
+    ) -> Result<BTreeMap<String, f64>> {
+        let utc_date = started_at
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .date()
+            .to_string();
+        let rows = sqlx::query(
+            "SELECT provider_costs_json FROM runs
+             WHERE substr(started_at, 1, 10) = ? AND started_at < ?
+               AND provider_costs_json IS NOT NULL",
+        )
+        .bind(utc_date)
+        .bind(fmt_ts(started_at))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut totals = BTreeMap::new();
+        for row in rows {
+            let raw = row.get::<String, _>("provider_costs_json");
+            let providers: BTreeMap<String, crate::report::ProviderUsage> =
+                serde_json::from_str(&raw).map_err(|source| DbError::Json {
+                    column: "runs.provider_costs_json",
+                    source,
+                })?;
+            for (provider, usage) in providers {
+                *totals.entry(provider).or_insert(0.0) += usage.cost_usd;
+            }
+        }
+        Ok(totals)
     }
 }
 
@@ -988,7 +1031,7 @@ mod tests {
         report.counts.entries_fetched = 412;
         report.counts.candidates = 120;
         report.counts.selected = 20;
-        report.finish(ts("2026-08-15T05:36:00Z"), 0.14, 0.0028, 0.28);
+        report.finish(ts("2026-08-15T05:36:00Z"));
         db.finish_run(run_id, &report).await.unwrap();
 
         db.upsert_issue(
@@ -1006,7 +1049,82 @@ mod tests {
         let next: Date = "2026-08-16".parse().unwrap();
         assert_eq!(db.next_issue_number(next).await.unwrap(), 2);
         assert_eq!(db.recent_reports(5).await.unwrap().len(), 1);
-        assert_eq!(db.spend_for_date(date).await.unwrap(), 0.0);
+        // No provider spend was recorded, so the budget-day preload is empty.
+        let spend = db
+            .provider_spend_for_utc_day(ts("2026-08-15T23:00:00Z"))
+            .await
+            .unwrap();
+        assert!(spend.values().all(|usd| *usd == 0.0));
+    }
+
+    async fn record_run(db: &Db, date: Date, started: &str, deepseek: f64, anthropic: f64) {
+        use crate::report::{ProviderUsage, RunReport};
+        let started_at = ts(started);
+        let run_id = db.start_run(date, started_at).await.unwrap();
+        let mut report = RunReport::new(date, started_at);
+        report.provider_costs.insert(
+            "deepseek".into(),
+            ProviderUsage {
+                usage: crate::types::TokenUsage {
+                    input_tokens: 10,
+                    ..Default::default()
+                },
+                cost_usd: deepseek,
+            },
+        );
+        report.provider_costs.insert(
+            "anthropic".into(),
+            ProviderUsage {
+                usage: crate::types::TokenUsage::default(),
+                cost_usd: anthropic,
+            },
+        );
+        report.config_json = serde_json::json!({"models": {"editor": "claude-opus-5"}});
+        report.finish(started_at);
+        db.finish_run(run_id, &report).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_spend_is_summed_by_the_utc_day_of_started_at() {
+        let (_dir, db) = temp_db().await;
+        let date: Date = "2026-08-15".parse().unwrap();
+        record_run(&db, date, "2026-08-15T03:00:00Z", 0.10, 0.50).await;
+        record_run(&db, date, "2026-08-15T23:30:00Z", 0.05, 0.0).await;
+        // Nominal issue date 08-15 in New York, but already 08-16 in UTC: a
+        // different budget day (§5).
+        record_run(&db, date, "2026-08-16T01:00:00Z", 1.0, 1.0).await;
+
+        let spend = db
+            .provider_spend_for_utc_day(ts("2026-08-15T23:45:00Z"))
+            .await
+            .unwrap();
+        assert!((spend["deepseek"] - 0.15).abs() < 1e-9);
+        assert!((spend["anthropic"] - 0.5).abs() < 1e-9);
+        // Only runs that started earlier than this one count.
+        let spend = db
+            .provider_spend_for_utc_day(ts("2026-08-15T12:00:00Z"))
+            .await
+            .unwrap();
+        assert!((spend["deepseek"] - 0.10).abs() < 1e-9);
+        let spend = db
+            .provider_spend_for_utc_day(ts("2026-08-17T12:00:00Z"))
+            .await
+            .unwrap();
+        assert!(spend.is_empty());
+
+        // `provider_costs_json` and `config_json` were written and round-trip.
+        let row =
+            sqlx::query("SELECT provider_costs_json, config_json FROM runs ORDER BY id LIMIT 1")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        let costs: BTreeMap<String, crate::report::ProviderUsage> =
+            serde_json::from_str(&row.get::<String, _>("provider_costs_json")).unwrap();
+        assert_eq!(costs["deepseek"].usage.input_tokens, 10);
+        assert!((costs["anthropic"].cost_usd - 0.5).abs() < 1e-9);
+        let config: serde_json::Value =
+            serde_json::from_str(&row.get::<String, _>("config_json")).unwrap();
+        assert_eq!(config["models"]["editor"], "claude-opus-5");
     }
 
     #[tokio::test]

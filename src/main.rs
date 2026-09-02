@@ -270,13 +270,30 @@ fn print_report(report: &RunReport) {
         report.counts.duplicates_merged,
         report.counts.entries_dropped,
     );
+    if report.counts.llm_unscored > 0 {
+        println!(
+            "curation: {} scored · {} unscored · {} selected",
+            report.counts.llm_scored, report.counts.llm_unscored, report.counts.selected,
+        );
+    }
     println!(
-        "tokens: {} input · {} cached · {} output = ${:.4}",
+        "tokens: {} input · {} cache read · {} cache write · {} output = ${:.4}",
         report.usage.input_tokens,
         report.usage.cached_tokens,
+        report.usage.cache_write_tokens,
         report.usage.output_tokens,
         report.cost_usd,
     );
+    for (provider, usage) in &report.provider_costs {
+        println!(
+            "  {provider}: {} input · {} cache read · {} cache write · {} output = ${:.4}",
+            usage.usage.input_tokens,
+            usage.usage.cached_tokens,
+            usage.usage.cache_write_tokens,
+            usage.usage.output_tokens,
+            usage.cost_usd,
+        );
+    }
     for warning in &report.warnings {
         println!("warning: {warning}");
     }
@@ -316,8 +333,15 @@ fn print_lineup(issue: &daily_epub::types::Issue) {
 // Other subcommands
 // ---------------------------------------------------------------------------
 
+/// `profile rebuild` runs on the editor when configured, else bulk (§14.3).
 async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<()> {
-    let meter = curate::llm::UsageMeter::new(&config.deepseek, config.max_daily_usd);
+    use curate::llm::{Llms, PriceTable, UsageMeter};
+    let bulk_meter =
+        UsageMeter::with_prices(PriceTable::deepseek(&config.deepseek), config.max_daily_usd);
+    let editor_meter = UsageMeter::with_prices(
+        PriceTable::anthropic(&config.anthropic),
+        config.anthropic.max_daily_usd,
+    );
     let profile = curate::profile::load_or_build(
         db,
         &config.interests_opml,
@@ -325,10 +349,22 @@ async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<()> {
         config.curation.feedback.verdicts_in_prompt,
     )
     .await?;
-    let llm = curate::llm::LlmClient::new(&config.deepseek, profile.text, meter)?;
+    let llms = Llms::from_config(
+        &config.deepseek,
+        &config.anthropic,
+        profile.text,
+        bulk_meter,
+        editor_meter,
+    );
+    let Some(llm) = llms.editor_or_bulk() else {
+        anyhow::bail!(
+            "no LLM provider is configured; set DAILY_EPUB_ANTHROPIC__API_KEY or DAILY_EPUB_DEEPSEEK__API_KEY"
+        );
+    };
+    tracing::info!(provider = llm.provider, model = %llm.model, "rebuilding the profile");
     let rebuilt = curate::profile::rebuild(
         db,
-        &llm,
+        llm,
         &config.interests_opml,
         &config.profile_path,
         config.curation.feedback.verdicts_in_prompt,

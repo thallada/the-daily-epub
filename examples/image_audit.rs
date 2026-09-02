@@ -369,6 +369,7 @@ fn pick_for(target: &Target, content_html: String) -> Pick {
         section: target.issue.clone(),
         position: 0,
         is_lead: false,
+        why: None,
         summary: None,
         llm: None,
         discussion: None,
@@ -412,7 +413,6 @@ fn write_audit_epub(out_dir: &Path, picks: &[Pick], assets: &[ImageAsset]) {
                  Articles are re-extracted live; editorial, discussions and the \
                  world briefing are absent by design.</p>"
                 .into(),
-            section_intros: Default::default(),
             summaries: Default::default(),
         },
         world_briefing: None,

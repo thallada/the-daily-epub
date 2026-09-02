@@ -66,12 +66,7 @@ pub fn render_all(
     ];
 
     for name in section_names(issue) {
-        let intro = issue
-            .editorial
-            .section_intros
-            .get(&name)
-            .map(|s| s.as_str());
-        chapters.push(render_section_page(&name, intro)?);
+        chapters.push(render_section_page(&name)?);
         for pick in issue.lineup.section_picks(&name) {
             chapters.push(render_article(
                 issue,

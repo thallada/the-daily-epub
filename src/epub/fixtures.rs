@@ -86,6 +86,7 @@ pub fn issue() -> Issue {
         section: "Top Stories".into(),
         position: 0,
         is_lead: true,
+        why: Some("The systems story with enough operational detail to matter".into()),
         summary: Some("What it argues, and why it is worth the time.".into()),
         llm: None,
         discussion: Some(discussion(1, 1001)),
@@ -95,12 +96,11 @@ pub fn issue() -> Issue {
         section: "Niche Corner".into(),
         position: 0,
         is_lead: false,
+        why: Some("A small-scene delight outside the usual technical orbit".into()),
         summary: None,
         llm: None,
         discussion: None,
     };
-    let mut section_intros = BTreeMap::new();
-    section_intros.insert("Top Stories".to_string(), "The day in brief.".to_string());
     let mut summaries = BTreeMap::new();
     summaries.insert(2, "A short abstract for the second piece.".to_string());
 
@@ -122,7 +122,6 @@ pub fn issue() -> Issue {
         },
         editorial: Editorial {
             front_page_html: "<p>Two stories today, both worth your coffee.</p>".into(),
-            section_intros,
             summaries,
         },
         world_briefing: Some(WorldBriefing {
@@ -141,7 +140,15 @@ pub fn issue() -> Issue {
             }],
         }),
         colophon: Colophon {
-            model: "deepseek-v4-flash".into(),
+            provider_costs: BTreeMap::from([
+                ("deepseek".into(), 0.0231),
+                ("anthropic".into(), 0.05),
+            ]),
+            models: Models {
+                bulk: "deepseek-v4-flash".into(),
+                editor: "claude-opus-5".into(),
+                summaries: "claude-opus-5".into(),
+            },
             entries_fetched: 431,
             feeds_seen: 92,
             candidates: 120,

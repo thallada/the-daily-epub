@@ -5,15 +5,20 @@ A personalized daily newspaper, delivered as an EPUB.
 Every morning a systemd timer wakes one Rust binary. It pulls the last ~26 hours
 from a self-hosted [Miniflux](https://miniflux.app), deduplicates and extracts
 the articles, enriches them with HackerNews/Lobsters/Reddit social proof, filters
-300–500 candidates down to ~120 with cheap heuristics, and asks DeepSeek to score,
-select and introduce 15–25 of them. It assembles two EPUB editions (a standard one
+300–500 candidates down to ~120 with cheap heuristics, asks DeepSeek to score them,
+and hands the shortlist to Claude Opus 5 — the editor — which assembles the issue
+(no minimum size, a hard ceiling), writes a one-line *why* under every headline,
+the summaries and *The Brief*. It assembles two EPUB editions (a standard one
 and one tuned for the Xteink X4 e-ink reader), converts the X4 edition to XTC, and
 publishes the lot over its own OPDS catalog — which doubles as a
 [BookOrbit](https://github.com/thallada/bookorbit) watched folder if you run one.
 Each article chapter ends with Loved it / Good / Not for me links that feed back into tomorrow's curation.
 
-Steady-state cost is roughly **$0.05–0.30/day** in DeepSeek tokens, hard-capped by
-`max_daily_usd`.
+Steady-state cost is roughly **$1/day**: $0.05–0.30 in DeepSeek tokens plus
+~$0.50–0.80 for the Claude editor, each with its own per-UTC-day ceiling
+(`max_daily_usd` and `anthropic.max_daily_usd`). Those ceilings are runaway
+guards, not accounting — set hard spend limits in both providers' dashboards as
+the real backstop.
 
 - Full design: [`docs/plans/2026-08-15-the-daily-epub.md`](docs/plans/2026-08-15-the-daily-epub.md)
 - Implementation decisions: [`docs/plans/2026-08-15-implementation-notes.md`](docs/plans/2026-08-15-implementation-notes.md)
@@ -24,7 +29,7 @@ Steady-state cost is roughly **$0.05–0.30/day** in DeepSeek tokens, hard-cappe
 
 ```
 Miniflux ingest ─▶ dedupe ─▶ extraction ─▶ persist ─▶ social enrichment
-  ─▶ pre-filter ─▶ LLM scoring ─▶ selection ─▶ comments ─▶ editorial
+  ─▶ pre-filter ─▶ scoring (DeepSeek) ─▶ editor (Claude) ─▶ comments ─▶ editorial (Claude)
   ─▶ world briefing ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
 ```
 
@@ -35,9 +40,12 @@ Every stage writes to SQLite, so a run is idempotent per date: re-running
 are fatal — without them there is no issue, and the `runs` row records why.
 Social lookups, comment fetching, the world briefing, images and the XTC
 conversion are best-effort: they log, add a warning (run status `degraded`) and
-the run continues. Every DeepSeek stage *degrades*: a missing key, a dead API or
-a tripped budget turns the run into the `--skip-llm` shape (prefilter order
-selects, feed excerpts stand in for summaries) instead of losing the day's issue.
+the run continues. Every LLM stage *degrades*: a Claude call that fails, is
+refused, or is over its daily ceiling is retried with the same prompt on
+DeepSeek; if DeepSeek is missing, dead or over budget too, the run takes the
+`--skip-llm` shape (prefilter order selects, feed excerpts stand in for
+summaries) instead of losing the day's issue. Anthropic's server-side refusal
+fallback (`fallbacks = "default"`) is enabled on every editor request.
 
 ---
 
@@ -47,7 +55,8 @@ selects, feed excerpts stand in for summaries) instead of losing the day's issue
 |---|---|---|
 | Rust (2024 edition toolchain) | building | `cargo build --release` |
 | **Miniflux** with an API key | the only content source | Settings → API Keys. The client is read-only and never mutates read state. |
-| **DeepSeek API key** | curation + editorial | <https://platform.deepseek.com>. Optional: `--skip-llm` runs the whole pipeline without it. |
+| **DeepSeek API key** | scoring, and the fallback for every editor call | <https://platform.deepseek.com>. Optional: `--skip-llm` runs the whole pipeline without it. |
+| **Anthropic API key** | the editor: selection, summaries, The Brief, the weekly profile rebuild | <https://console.anthropic.com>. Optional: without it every editor call runs on DeepSeek. Set a dashboard spend limit; `anthropic.max_daily_usd` is only a runaway guard. |
 | A 32+ byte random secret | signs the article rating links | `openssl rand -hex 32` |
 | **BookOrbit** library + watched folder | *optional* — a richer library UI on top of the same folder | Delivery does not need it: `daily-epub serve` has its own OPDS catalog over `publish.epub_dir`. If you do run it, create a dedicated "The Daily EPUB" library, enable *Watch folders*, and point `publish.epub_dir` at it. |
 | **Node.js 18+** and a clone of [`epub-to-xtc-converter`](https://github.com/bigbag/epub-to-xtc-converter) | XTC/XTCH output for the Xteink X4 | Optional (`xtc.enabled = false` turns it off). Needs `npm install` **inside `cli/`**, and a settings JSON naming a real TTF/OTF — see below. It has **no global npm bin** — it is invoked as `node <repo>/cli/index.js convert …`, which is why `xtc.command`/`xtc.args` are fully general. |
@@ -109,11 +118,11 @@ Secrets belong in the environment file, never in the TOML.
 |---|---|---|
 | `timezone` | `America/New_York` | Day boundaries and `--date` interpretation. |
 | `lookback_hours` | `26` | Size of the ingest window ending at the issue day's end (clamped to now). |
-| `target_article_count` | `20` | Lineup size the selector aims for. `--max-articles` overrides it. |
+| `target_article_count` | `20` | Soft target the editor aims for. There is no minimum: a nine-pick issue is published as nine. |
 | `prefilter_keep` | `120` | Candidates surviving the heuristic pre-filter. Must be ≥ `target_article_count`. |
 | `retention_days` | `21` | EPUBs older than this are deleted from `publish.epub_dir`. SQLite history is kept forever. |
 | `xtc_retention_count` | `5` | How many XTC issues to keep in `publish.xtc_dir`. Counted, not dated: each `.xtch` is ~80–100 MB, so the binding constraint is disk, not age. |
-| `max_daily_usd` | `2.0` | Hard ceiling on DeepSeek spend **per day**, not per run — a re-run inherits what earlier runs for that date already spent. Tripping it skips remaining LLM work and degrades to excerpts. |
+| `max_daily_usd` | `2.0` | Ceiling on DeepSeek spend per **UTC day** of the run's start, not per run — a re-run inherits what earlier runs that day already spent (`runs.provider_costs_json`). Tripping it skips remaining DeepSeek calls; in-flight requests finish and the paper still publishes. |
 | `world_briefing` | `true` | Include the Wikipedia Current Events section. |
 | `database_path` | `/var/lib/daily-epub/daily-epub.db` | SQLite file; parent dirs are created. |
 | `out_dir` | `/var/lib/daily-epub/out` | Where `generate` writes artifacts before publishing. |
@@ -126,11 +135,24 @@ Secrets belong in the environment file, never in the TOML.
 | `deepseek.model` | `deepseek-v4-flash` | Verified 2026-08-15 (DeepSeek-V4-Flash-0731). |
 | `deepseek.api_key` | — | **`DAILY_EPUB_DEEPSEEK__API_KEY`**. Absent ⇒ the run curates heuristically. |
 | `deepseek.score_batch_size` | `12` | Articles per stage-A scoring request. |
-| `deepseek.score_temperature` | `0.3` | Scoring/selection temperature. |
-| `deepseek.editorial_temperature` | `0.8` | Summaries, intros, front page. |
+| `deepseek.max_concurrent_requests` | `4` | Stage-A batches in flight at once; the budget is checked before each is spawned. |
+| `deepseek.score_temperature` | `0.3` | Scoring temperature. |
+| `deepseek.editorial_temperature` | `0.8` | Summaries and The Brief, only when DeepSeek is the fallback editor. |
 | `deepseek.price_input_per_mtok` | `0.14` | USD per 1M cache-miss input tokens (cost guardrail arithmetic). |
 | `deepseek.price_cached_input_per_mtok` | `0.0028` | USD per 1M prefix-cache-hit input tokens. |
 | `deepseek.price_output_per_mtok` | `0.28` | USD per 1M output tokens. |
+| `anthropic.enabled` | `true` | `false` runs every editor call on DeepSeek. |
+| `anthropic.base_url` | `https://api.anthropic.com` | Messages API root. |
+| `anthropic.model` | `claude-opus-5` | The editor. Requests carry `output_config.effort`, a cached system block, and `fallbacks = "default"` with the `server-side-fallback-2026-07-01` beta so a classifier refusal is re-routed server-side. |
+| `anthropic.api_key` | — | **`DAILY_EPUB_ANTHROPIC__API_KEY`**. Absent ⇒ editor calls fall back to DeepSeek. |
+| `anthropic.effort` | `high` | `low`, `medium`, `high`, `xhigh` or `max`. |
+| `anthropic.price_input_per_mtok` | `5.0` | USD per 1M uncached input tokens. |
+| `anthropic.price_cache_write_per_mtok` | `6.25` | USD per 1M tokens written to the prompt cache. |
+| `anthropic.price_cache_read_per_mtok` | `0.5` | USD per 1M cache-read input tokens. |
+| `anthropic.price_output_per_mtok` | `25.0` | USD per 1M output tokens. |
+| `anthropic.max_daily_usd` | `3.0` | Claude ceiling per UTC day; tripping it moves the remaining editor work to DeepSeek. |
+| `anthropic.max_concurrent_requests` | `4` | Reserved for the parallel editor stages. |
+| `curation.max_article_count` | `28` | Hard ceiling on issue size. `--max-articles N` lowers it to `min(28, N)` and drags the soft target down with it. Must be ≥ `target_article_count`. |
 | `curation.always_include_feeds` | `[]` | Miniflux feed ids or URL substrings that can never be dropped. |
 | `curation.blocked_domains` | `[]` | Hosts excluded outright. |
 | `curation.paywall_domains` | `[]` | Extra paywalled hosts, merged with the built-in list (nytimes, wsj, ft, economist, …). |
@@ -139,6 +161,8 @@ Secrets belong in the environment file, never in the TOML.
 | `curation.feedback.good_value` | `0.35` | Weight for a Good verdict. |
 | `curation.feedback.not_for_me_value` | `-1.0` | Weight for a Not for me verdict. |
 | `curation.feedback.verdicts_in_prompt` | `60` | Recent explicit verdicts included in the system prompt. |
+| `editorial.summary_model` | `editor` | `editor` (Claude) or `bulk` (DeepSeek) for the per-article summaries. |
+| `editorial.summary_input_tokens` | `3000` | Article text offered to the summary prompt. |
 | `publish.epub_dir` | `/srv/bookorbit/libraries/daily-epub` | Both EPUB editions land here by atomic copy, and this is the directory the OPDS feed lists. The editions are distinguished by a `(X4)` tag in **both** the filename and `dc:title` — libraries and OPDS clients list books by title, so the filename alone would make them look identical. Point a BookOrbit watched folder at it if you want its UI too. **Renamed from `bookorbit_dir`**; the old key is a hard config error. |
 | `publish.xtc_dir` | `/var/lib/daily-epub/xtc` | XTC artifacts. **Not** listed in the OPDS feed — CrossPoint cannot acquire them — but downloadable at `/files/xtc/<name>` for sideloading. |
 | `xtc.enabled` | `true` | Set `false` to skip the converter entirely. |
@@ -174,6 +198,7 @@ sudo -e /etc/daily-epub/config.toml            # set publish dirs, xtc args, pub
 sudo tee /etc/daily-epub/env >/dev/null <<EOF
 DAILY_EPUB_MINIFLUX__API_KEY=…
 DAILY_EPUB_DEEPSEEK__API_KEY=…
+DAILY_EPUB_ANTHROPIC__API_KEY=…
 DAILY_EPUB_SERVER__HMAC_SECRET=$(openssl rand -hex 32)
 EOF
 sudo chown daily-epub:daily-epub /etc/daily-epub/env && sudo chmod 0600 /etc/daily-epub/env
@@ -344,12 +369,13 @@ DAILY_EPUB_OUT_DIR=./out daily-epub generate --dry-run --skip-llm --max-articles
 # 3. Inspect the artifacts
 ls -la ./out                       # two .epub files
 epubcheck "./out/The Daily EPUB - $(date +%F).epub"   # expect zero errors
-#    open the standard edition in Calibre / KOReader: cover, From the Editor,
+#    open the standard edition in Calibre / KOReader: cover, The Brief,
 #    In This Issue, sections, discussions, colophon; TOC depth 2
 
-# 4. Now with DeepSeek, still not publishing
+# 4. Now with DeepSeek and Claude, still not publishing
 daily-epub generate --dry-run --out ./out --max-articles 6
-#    → check the lineup is sane and the printed cost is well under $0.50
+#    → check the lineup is sane (at most 6 picks, each with a "why" line) and the
+#      printed per-provider cost is well under $1
 
 # 5. Full live run
 sudo systemctl start daily-epub-generate
@@ -485,7 +511,9 @@ From spec §7, plus what implementation turned up:
   stack, so `curate/llm.rs` speaks the OpenAI-compatible wire protocol over the
   shared `reqwest` client instead, behind a `ChatBackend` trait. The dependency
   was removed.
-- **Only DeepSeek is wired.** Another provider means another `ChatBackend` impl.
+- **Two providers are wired**, DeepSeek (bulk) and Anthropic (editor), each a
+  `ChatBackend` impl with its own `UsageMeter` and price table. A third means
+  another impl.
 - **No embedding-based personal ranker yet** (spec §3.9 future work); the schema
   is ready for it once ~200 ratings exist.
 - **One reader, one issue per day.** There is no multi-user support and no

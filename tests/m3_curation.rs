@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use daily_epub::curate::editorial::FrontPageResponse;
+use daily_epub::curate::editorial::BriefResponse;
 use daily_epub::curate::profile;
 use daily_epub::curate::score::parse_score_response;
 use daily_epub::curate::select::parse_selection_response;
@@ -130,35 +130,41 @@ fn stage_b_fixture_parses_into_a_lineup() {
     );
 }
 
-/// Stage C's front-page response must deserialize into a 250–400 word editor's
-/// note plus per-section intros (§3.6).
+/// The Brief must deserialize into 120–200 words of plain prose that names at
+/// least three picks by title (§14.2). Section intros are gone.
 #[test]
-fn stage_c_fixture_parses_into_a_front_page() {
-    let response: FrontPageResponse = serde_json::from_str(&fixture("deepseek_front_page.json"))
-        .expect("the front-page fixture must match FrontPageResponse");
+fn stage_c_fixture_parses_into_the_brief() {
+    let response: BriefResponse = serde_json::from_str(&fixture("claude_brief.json"))
+        .expect("the brief fixture must match BriefResponse");
 
-    let words = response.from_the_editor.split_whitespace().count();
+    let words = response.brief.split_whitespace().count();
     assert!(
-        (150..=450).contains(&words),
-        "From the Editor is {words} words; the prompt asks for 250-400"
+        (100..=220).contains(&words),
+        "The Brief is {words} words; the prompt asks for 120-200"
     );
     assert!(
-        response.from_the_editor.contains("\n\n"),
-        "the prompt asks for 2-4 blank-line separated paragraphs"
+        !response.brief.contains("- ") && !response.brief.contains('#'),
+        "no bullets or headings in the brief"
     );
+    let titles = response.brief.matches('"').count() / 2;
     assert!(
-        !response.from_the_editor.contains("- "),
-        "no bullet lists on the front page"
+        titles >= 3,
+        "the brief names at least three picks; found {titles}"
     );
-
-    assert!(response.section_intros.len() >= 2);
-    for (section, intro) in &response.section_intros {
-        let words = intro.split_whitespace().count();
+    for banned in [
+        "delve",
+        "dive",
+        "explore",
+        "a mix of",
+        "something for everyone",
+    ] {
         assert!(
-            (10..=90).contains(&words),
-            "intro for {section} is {words} words; the prompt asks for 35-60"
+            !response.brief.to_lowercase().contains(banned),
+            "banned phrase {banned}"
         );
     }
+    let value: serde_json::Value = serde_json::from_str(&fixture("claude_brief.json")).unwrap();
+    assert!(value.get("section_intros").is_none());
 }
 
 /// The taste profile is seeded from this file; a broken export would silently

@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -331,6 +332,7 @@ pub async fn score_all(
     llm: &LlmClient,
     candidates: &mut [ScoredArticle],
     batch_size: usize,
+    max_concurrent_requests: usize,
     sections: &[String],
     temperature: f32,
 ) -> Result<usize, LlmError> {
@@ -339,61 +341,47 @@ pub async fn score_all(
     }
     let batch_size = batch_size.max(1);
     let batches = candidates.len().div_ceil(batch_size);
-    let mut scores: HashMap<ArticleId, LlmScore> = HashMap::with_capacity(candidates.len());
+    let prompts = candidates
+        .chunks(batch_size)
+        .enumerate()
+        .map(|(index, batch)| (index, batch.len(), build_batch_prompt(batch, sections)))
+        .collect::<Vec<_>>();
 
-    for (n, batch) in candidates.chunks(batch_size).enumerate() {
-        if let Err(e) = llm.meter.check_budget() {
-            tracing::error!(
-                error = %e,
-                batch = n + 1,
-                of = batches,
-                unscored = candidates.len() - scores.len(),
-                "COST CEILING HIT during stage A scoring — remaining batches skipped; \
-                 the lineup will fall back to heuristic ranking for them"
-            );
-            break;
-        }
-        let prompt = build_batch_prompt(batch, sections);
-        tracing::debug!(
-            batch = n + 1,
-            of = batches,
-            articles = batch.len(),
-            approx_tokens = super::approx_tokens(&prompt),
-            "stage A request"
-        );
-        match llm.complete(&prompt, temperature, true).await {
-            Ok(raw) => {
-                let items = parse_score_response(&raw);
-                if items.is_empty() {
-                    tracing::warn!(
-                        batch = n + 1,
-                        of = batches,
-                        "stage A batch returned no scores"
-                    );
-                }
-                for item in items {
-                    scores.insert(item.id, item.into());
-                }
+    let results = stream::iter(prompts)
+        .map(|(index, article_count, prompt)| async move {
+            if let Err(error) = llm.meter.check_budget() {
+                tracing::warn!(batch = index + 1, of = batches, %error, "bulk budget tripped; skipping stage A batch");
+                return (index, Vec::new());
             }
-            Err(e) => {
-                tracing::warn!(batch = n + 1, of = batches, error = %e,
-                    "stage A batch failed; its articles stay unscored");
-            }
+            tracing::debug!(batch = index + 1, of = batches, articles = article_count, approx_tokens = super::approx_tokens(&prompt), "stage A request");
+            let items = match llm.complete(&prompt, temperature, true).await {
+                Ok(raw) => parse_score_response(&raw),
+                Err(error) => {
+                    tracing::warn!(batch = index + 1, of = batches, %error, "stage A batch failed; its articles stay unscored");
+                    Vec::new()
+                }
+            };
+            (index, items)
+        })
+        .buffer_unordered(max_concurrent_requests.max(1))
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut scores: HashMap<ArticleId, LlmScore> = HashMap::with_capacity(candidates.len());
+    for (_, items) in results {
+        for item in items {
+            scores.insert(item.id, item.into());
         }
     }
-
-    let mut applied = 0usize;
-    for candidate in candidates.iter_mut() {
+    let mut applied = 0;
+    for candidate in candidates {
         if let Some(score) = scores.remove(&candidate.article.id) {
             candidate.llm = Some(score);
             applied += 1;
         }
     }
     if !scores.is_empty() {
-        tracing::warn!(
-            unknown_ids = scores.len(),
-            "stage A returned scores for ids that were not in the batch"
-        );
+        tracing::warn!(unknown_ids = scores.len(), "stage A returned unknown ids");
     }
     Ok(applied)
 }
@@ -535,7 +523,7 @@ mod tests {
             candidate(2, "Two", 1000),
             candidate(3, "Three", 1000),
         ];
-        let scored = score_all(&llm, &mut candidates, 2, &sections(), 0.3)
+        let scored = score_all(&llm, &mut candidates, 2, 4, &sections(), 0.3)
             .await
             .expect("scoring");
         assert_eq!(scored, 3);
@@ -556,7 +544,7 @@ mod tests {
         );
         let llm = client(Arc::clone(&backend), 2.0);
         let mut candidates = vec![candidate(1, "One", 900), candidate(2, "Two", 900)];
-        let scored = score_all(&llm, &mut candidates, 1, &sections(), 0.3)
+        let scored = score_all(&llm, &mut candidates, 1, 4, &sections(), 0.3)
             .await
             .expect("scoring must not abort");
         assert_eq!(scored, 1);
@@ -573,6 +561,7 @@ mod tests {
             TokenUsage {
                 input_tokens: 1_000_000,
                 cached_tokens: 0,
+                cache_write_tokens: 0,
                 output_tokens: 0,
             },
         );
@@ -582,7 +571,7 @@ mod tests {
         );
         let llm = client(Arc::clone(&backend), 0.05);
         let mut candidates = vec![candidate(1, "One", 900), candidate(2, "Two", 900)];
-        let scored = score_all(&llm, &mut candidates, 1, &sections(), 0.3)
+        let scored = score_all(&llm, &mut candidates, 1, 4, &sections(), 0.3)
             .await
             .expect("scoring");
         assert_eq!(scored, 1, "only the first batch ran");

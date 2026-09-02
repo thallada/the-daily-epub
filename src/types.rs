@@ -292,6 +292,8 @@ pub struct Pick {
     /// Order within the section, ascending.
     pub position: i64,
     pub is_lead: bool,
+    /// Editor-written reason, at most 14 words (§13).
+    pub why: Option<String>,
     /// Newspaper-abstract summary from stage C; `None` until editorial runs.
     pub summary: Option<String>,
     pub llm: Option<LlmScore>,
@@ -331,8 +333,6 @@ impl Lineup {
 pub struct Editorial {
     /// "From the Editor", 250–400 words, already sanitized XHTML.
     pub front_page_html: String,
-    /// Section name → 2–3 sentence intro.
-    pub section_intros: BTreeMap<String, String>,
     /// Article id → 2–3 sentence newspaper abstract.
     pub summaries: BTreeMap<ArticleId, String>,
 }
@@ -525,10 +525,19 @@ pub struct Issue {
     pub colophon: Colophon,
 }
 
+/// Resolved model names printed in the colophon (§15.1).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Models {
+    pub bulk: String,
+    pub editor: String,
+    pub summaries: String,
+}
+
 /// Back-matter facts printed in the colophon chapter (§3.10).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Colophon {
-    pub model: String,
+    pub provider_costs: BTreeMap<String, f64>,
+    pub models: Models,
     pub entries_fetched: i64,
     pub feeds_seen: i64,
     pub candidates: i64,
@@ -653,8 +662,10 @@ pub struct RatedArticle {
 pub struct TokenUsage {
     /// Cache-miss input tokens (billed at the full input rate).
     pub input_tokens: i64,
-    /// Prefix-cache hits (billed at the cached rate).
+    /// Prefix-cache reads (billed at the provider's cache-read rate).
     pub cached_tokens: i64,
+    /// Tokens written into a prompt cache (Anthropic only).
+    pub cache_write_tokens: i64,
     pub output_tokens: i64,
 }
 
@@ -662,13 +673,21 @@ impl TokenUsage {
     pub fn add(&mut self, other: TokenUsage) {
         self.input_tokens += other.input_tokens;
         self.cached_tokens += other.cached_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
         self.output_tokens += other.output_tokens;
     }
 
     /// USD cost given the per-1M-token prices from `[deepseek]` config (§3.6).
-    pub fn cost_usd(&self, price_input: f64, price_cached: f64, price_output: f64) -> f64 {
+    pub fn cost_usd(
+        &self,
+        price_input: f64,
+        price_cache_write: f64,
+        price_cache_read: f64,
+        price_output: f64,
+    ) -> f64 {
         (self.input_tokens as f64 * price_input
-            + self.cached_tokens as f64 * price_cached
+            + self.cache_write_tokens as f64 * price_cache_write
+            + self.cached_tokens as f64 * price_cache_read
             + self.output_tokens as f64 * price_output)
             / 1_000_000.0
     }

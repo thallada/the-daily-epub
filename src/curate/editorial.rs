@@ -1,34 +1,19 @@
-//! Stage C — summaries, section intros and the front page (spec §3.6).
-//!
-//! Voice: warm, literate, a little playful; never fabricates facts that are not
-//! present in the summaries.
-//!
-//! Everything here is best-effort. If the cost ceiling trips mid-way (§3.6) or a
-//! call fails, the affected article silently falls back to its own opening words
-//! and the run continues — an issue with plain excerpts is far better than no
-//! issue at all.
+//! Claude-first summaries and The Brief, with per-call DeepSeek fallback (§14).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use serde::{Deserialize, Serialize};
+use futures::{StreamExt, stream};
+use serde::Deserialize;
 
-use super::llm::{LlmClient, LlmError};
+use super::llm::{LlmClient, LlmError, Llms};
 use super::{escape_html, prompt_text, text_to_paragraphs, truncate_tokens, truncate_words};
+use crate::config::{EditorialConfig, SummaryModel};
 use crate::types::{ArticleId, Editorial, Lineup, Pick};
 
-/// Article text is truncated to roughly this many tokens per summary call (§3.6).
-pub const SUMMARY_INPUT_TOKEN_BUDGET: usize = 5000;
-/// Target length of the "From the Editor" front page, in words (§3.6).
-pub const FRONT_PAGE_WORDS: (usize, usize) = (250, 400);
-/// Words of body text used when a summary has to fall back to the excerpt.
 pub const FALLBACK_SUMMARY_WORDS: usize = 45;
+pub const SUMMARY_CONCURRENCY: usize = 4;
 
-// ---------------------------------------------------------------------------
-// Prompts (reusable instructions here; per-call material in the user message)
-// ---------------------------------------------------------------------------
-
-/// Per-article summary instructions (§3.6 stage C).
 pub const SUMMARY_INSTRUCTIONS: &str = "\
 TASK: write the newspaper abstract for one article in today's issue.
 
@@ -57,66 +42,35 @@ excerpt.
 
 Return JSON exactly: {\"summary\": \"<two or three sentences>\"}";
 
-/// Front-page + section-intro instructions (§3.6 stage C).
-pub const FRONT_PAGE_INSTRUCTIONS: &str = "\
-TASK: write the front page of today's issue of The Daily EPUB.
+/// The Brief instructions (§14.2).
+pub const BRIEF_INSTRUCTIONS: &str = r#"TASK: write "The Brief" for today's issue — the note at the top of the paper.
 
-You are given the whole lineup: sections, headlines, sources and the abstract \
-written for each article. Everything you write must come from those abstracts — \
-you have not read the articles themselves, and inventing a fact would be worse \
-than saying less.
+120-200 words, one or two paragraphs. It must earn its place: if a reader skipped
+it, what would he miss? Name at least three of today's picks by title and say the
+specific thing that makes each worth his time (the result, the argument, the scale,
+the person). If there is a thread connecting several pieces, say it in one sentence;
+if there is not, do not invent one. If the issue is short, say why in one clause.
 
-Produce two things.
+Do not: welcome the reader, describe the weather, summarize every section, use
+"delve", "dive", "explore", "a mix of", "something for everyone", or any sentence
+that could introduce any other issue. No headings. No bullet points.
 
-1. \"from_the_editor\" — 250 to 400 words of prose addressed to the paper's one \
-reader. Find the two or three threads that actually run through today's lineup \
-(a shared question, an argument between two pieces, an accidental theme) and use \
-them to guide the read: what to start with over coffee, what to save for the \
-commute, what rewards patience. Name the lead story and say why it leads. It is \
-fine — good, even — to note when a day is quiet or lopsided. Voice: warm, \
-literate, lightly playful, never breathless; a real editor writing to someone \
-whose taste he knows. No bullet lists, no headings, no emoji, 2–4 paragraphs \
-separated by a blank line.
+Return JSON exactly: {"brief": "<the text, plain prose>"}"#;
 
-2. \"section_intros\" — for EACH section name given below, two or three \
-sentences (35–60 words) introducing what is in it today. Concrete, specific to \
-these articles, no filler like \"a variety of interesting stories\". Use the \
-section names exactly as spelled in the lineup.
-
-Return JSON exactly:
-{\"from_the_editor\": \"<paragraphs separated by \\n\\n>\", \
-\"section_intros\": {\"<section name>\": \"<2-3 sentences>\"}}";
-
-/// The single front-page call's JSON response (§3.6).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FrontPageResponse {
-    /// "From the Editor", 250–400 words.
-    pub from_the_editor: String,
-    /// Section name → 2–3 sentence intro.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BriefResponse {
     #[serde(default)]
-    pub section_intros: BTreeMap<String, String>,
+    pub brief: String,
 }
 
-/// The per-article summary call's JSON response.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct SummaryResponse {
     #[serde(default)]
     summary: String,
 }
 
-// ---------------------------------------------------------------------------
-// Per-article summaries
-// ---------------------------------------------------------------------------
-
-/// One 2–3 sentence newspaper abstract: what it argues, why it's worth reading (§3.6).
-pub async fn summarize_article(
-    llm: &LlmClient,
-    title: &str,
-    body_html: &str,
-    temperature: f32,
-) -> Result<String, LlmError> {
-    llm.meter.check_budget()?;
-    let body = truncate_tokens(&prompt_text(body_html), SUMMARY_INPUT_TOKEN_BUDGET);
+fn summary_prompt(title: &str, body_html: &str, input_tokens: usize) -> String {
+    let body = truncate_tokens(&prompt_text(body_html), input_tokens);
     let mut prompt = String::with_capacity(body.len() + SUMMARY_INSTRUCTIONS.len() + 256);
     prompt.push_str(SUMMARY_INSTRUCTIONS);
     let _ = write!(
@@ -129,184 +83,182 @@ pub async fn summarize_article(
             ""
         },
         if body.is_empty() {
-            "(no body text was extracted; summarize from the headline alone and say the \
-             full text was unavailable)"
+            "(no body text was extracted; summarize from the headline alone and say the full text was unavailable)"
         } else {
             &body
         }
     );
+    prompt
+}
+
+pub async fn summarize_article(
+    llm: &LlmClient,
+    title: &str,
+    body_html: &str,
+    input_tokens: usize,
+    temperature: f32,
+) -> Result<String, LlmError> {
+    let prompt = summary_prompt(title, body_html, input_tokens);
     let response: SummaryResponse = llm.complete_json(&prompt, temperature).await?;
     let summary = response.summary.trim().to_string();
     if summary.is_empty() {
-        return Err(LlmError::EmptyResponse);
+        return Err(LlmError::EmptyResponse {
+            provider: llm.provider,
+        });
     }
     Ok(summary)
 }
 
-/// Summarize every pick, returning `article_id → summary` (§3.6).
-///
-/// Stops early and returns what it has when the cost guardrail trips (§3.6).
+/// `(primary, fallback)` for the summaries per `editorial.summary_model` (§14.1).
+fn summary_clients(llms: &Llms, model: SummaryModel) -> (Option<&LlmClient>, Option<&LlmClient>) {
+    match model {
+        SummaryModel::Bulk => (llms.bulk.as_ref(), None),
+        SummaryModel::Editor => {
+            let primary = llms.editor_or_bulk();
+            let fallback = primary.and_then(|client| {
+                llms.bulk
+                    .as_ref()
+                    .filter(|bulk| bulk.provider != client.provider)
+            });
+            (primary, fallback)
+        }
+    }
+}
+
+async fn summarize_pick(
+    pick: &Pick,
+    primary: Option<&LlmClient>,
+    fallback: Option<&LlmClient>,
+    config: &EditorialConfig,
+    temperature: f32,
+) -> Option<String> {
+    let primary = primary?;
+    match summarize_article(
+        primary,
+        &pick.article.title,
+        &pick.article.content_html,
+        config.summary_input_tokens,
+        temperature,
+    )
+    .await
+    {
+        Ok(summary) => Some(summary),
+        Err(error) => {
+            let Some(fallback) = fallback else {
+                tracing::warn!(article_id = pick.article.id, %error, "summary failed; using excerpt");
+                return None;
+            };
+            tracing::warn!(article_id = pick.article.id, %error, "editor summary failed; retrying on bulk");
+            summarize_article(
+                fallback,
+                &pick.article.title,
+                &pick.article.content_html,
+                config.summary_input_tokens,
+                temperature,
+            )
+            .await
+            .map_err(|fallback_error| {
+                tracing::warn!(article_id = pick.article.id, %fallback_error, "bulk summary failed; using excerpt");
+            })
+            .ok()
+        }
+    }
+}
+
 pub async fn summarize_all(
-    llm: &LlmClient,
+    llms: &Llms,
     lineup: &Lineup,
+    config: &EditorialConfig,
     temperature: f32,
 ) -> BTreeMap<ArticleId, String> {
-    let mut out = BTreeMap::new();
-    for (n, pick) in lineup.picks.iter().enumerate() {
-        if llm.meter.budget_exceeded() {
-            tracing::error!(
-                summarized = out.len(),
-                remaining = lineup.picks.len() - n,
-                spent_usd = llm.meter.cost_usd(),
-                "COST CEILING HIT during stage C — the remaining articles fall back to \
-                 feed excerpts as summaries"
-            );
-            break;
-        }
-        match summarize_article(
-            llm,
-            &pick.article.title,
-            &pick.article.content_html,
-            temperature,
-        )
+    let (primary, fallback) = summary_clients(llms, config.summary_model);
+    stream::iter(lineup.picks.iter())
+        .map(|pick| async move {
+            let summary = summarize_pick(pick, primary, fallback, config, temperature).await;
+            (pick.article.id, summary)
+        })
+        .buffer_unordered(SUMMARY_CONCURRENCY)
+        .filter_map(|(id, summary)| async move { summary.map(|summary| (id, summary)) })
+        .collect()
         .await
-        {
-            Ok(summary) => {
-                out.insert(pick.article.id, summary);
-            }
-            Err(LlmError::BudgetExceeded { spent, limit }) => {
-                tracing::error!(spent, limit, "COST CEILING HIT during stage C");
-                break;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    article_id = pick.article.id,
-                    title = %pick.article.title,
-                    error = %e,
-                    "summary failed; falling back to the article's own opening"
-                );
-            }
-        }
-    }
-    tracing::info!(
-        summarized = out.len(),
-        picks = lineup.picks.len(),
-        "stage C summaries complete"
-    );
-    out
 }
 
-// ---------------------------------------------------------------------------
-// Front page
-// ---------------------------------------------------------------------------
-
-/// The single front-page + section-intro call (§3.6).
-pub async fn front_page(
-    llm: &LlmClient,
-    lineup: &Lineup,
-    summaries: &BTreeMap<ArticleId, String>,
-    temperature: f32,
-) -> Result<FrontPageResponse, LlmError> {
-    llm.meter.check_budget()?;
-    let prompt = build_front_page_prompt(lineup, summaries);
-    tracing::debug!(
-        approx_tokens = super::approx_tokens(&prompt),
-        "stage C front-page request"
-    );
-    let mut response: FrontPageResponse = llm.complete_json(&prompt, temperature).await?;
-    response.from_the_editor = response.from_the_editor.trim().to_string();
-    if response.from_the_editor.is_empty() {
-        return Err(LlmError::EmptyResponse);
-    }
-    // Keep only intros for sections that actually exist in the issue.
-    response
-        .section_intros
-        .retain(|name, text| lineup.section_order.contains(name) && !text.trim().is_empty());
-    Ok(response)
-}
-
-/// Render the front-page user prompt: the whole lineup with its abstracts (§3.6).
-pub fn build_front_page_prompt(lineup: &Lineup, summaries: &BTreeMap<ArticleId, String>) -> String {
+pub fn build_brief_prompt(lineup: &Lineup, summaries: &BTreeMap<ArticleId, String>) -> String {
     let mut prompt = String::with_capacity(4096);
-    prompt.push_str(FRONT_PAGE_INSTRUCTIONS);
-    let minutes: i64 = lineup
-        .picks
-        .iter()
-        .map(|p| p.article.reading_minutes())
-        .sum();
+    prompt.push_str(BRIEF_INSTRUCTIONS);
     let _ = write!(
         prompt,
-        "\n\nISSUE: {} · {} articles across {} sections · about {} minutes of reading\n\
-         SECTIONS, in order: {}\n\nLINEUP\n",
+        "\n\nISSUE: {} · {} articles\n\nLINEUP\n",
         lineup.date,
-        lineup.picks.len(),
-        lineup.section_order.len(),
-        minutes,
-        lineup.section_order.join(" | ")
+        lineup.picks.len()
     );
     for section in &lineup.section_order {
-        let _ = write!(prompt, "\n## {section}\n");
+        let _ = writeln!(prompt, "\n## {section}");
         for pick in lineup.section_picks(section) {
-            let _ = write!(prompt, "{}", render_pick(pick, summaries));
+            let score = pick
+                .llm
+                .as_ref()
+                .map(|score| format!("{:.1}", score.score))
+                .unwrap_or_else(|| "unscored".into());
+            let summary = summaries
+                .get(&pick.article.id)
+                .cloned()
+                .unwrap_or_else(|| excerpt_summary(pick));
+            let _ = writeln!(
+                prompt,
+                "- {}\n  feed: {}\n  why: {}\n  score: {}\n  summary: {}",
+                pick.article.title.trim(),
+                pick.article.feed_title.trim(),
+                pick.why.as_deref().unwrap_or("not supplied"),
+                score,
+                summary
+            );
         }
     }
     prompt
 }
 
-fn render_pick(pick: &Pick, summaries: &BTreeMap<ArticleId, String>) -> String {
-    let a = &pick.article;
-    let mut block = String::with_capacity(400);
-    let _ = writeln!(
-        block,
-        "\n- {}{}",
-        a.title.trim(),
-        if pick.is_lead { "  [LEAD STORY]" } else { "" }
-    );
-    let _ = writeln!(
-        block,
-        "  source: {} · {} words (~{} min){}",
-        if a.feed_title.is_empty() {
-            "unknown"
-        } else {
-            a.feed_title.trim()
-        },
-        a.word_count,
-        a.reading_minutes(),
-        social_note(pick)
-    );
-    let abstract_text = summaries
-        .get(&a.id)
-        .cloned()
-        .unwrap_or_else(|| excerpt_summary(pick));
-    let _ = writeln!(block, "  abstract: {abstract_text}");
-    block
-}
-
-fn social_note(pick: &Pick) -> String {
-    if pick.article.social.is_empty() {
-        return String::new();
+pub async fn brief(
+    llms: &Llms,
+    lineup: &Lineup,
+    summaries: &BTreeMap<ArticleId, String>,
+    temperature: f32,
+) -> Result<String, LlmError> {
+    let prompt = build_brief_prompt(lineup, summaries);
+    let Some(primary) = llms.editor_or_bulk() else {
+        return Err(LlmError::Api {
+            provider: "editorial",
+            message: "no provider configured".into(),
+        });
+    };
+    let response = match primary
+        .complete_json::<BriefResponse>(&prompt, temperature)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let Some(fallback) = llms
+                .bulk
+                .as_ref()
+                .filter(|bulk| bulk.provider != primary.provider)
+            else {
+                return Err(error);
+            };
+            tracing::warn!(%error, "brief failed on editor; retrying on bulk");
+            fallback
+                .complete_json::<BriefResponse>(&prompt, temperature)
+                .await?
+        }
+    };
+    let brief = response.brief.trim().to_string();
+    if brief.is_empty() {
+        return Err(LlmError::EmptyResponse {
+            provider: primary.provider,
+        });
     }
-    let parts: Vec<String> = pick
-        .article
-        .social
-        .iter()
-        .map(|s| {
-            format!(
-                "{} {} pts/{} comments",
-                s.source.display_name(),
-                s.score,
-                s.num_comments
-            )
-        })
-        .collect();
-    format!(" · {}", parts.join(", "))
+    Ok(brief)
 }
 
-// ---------------------------------------------------------------------------
-// Fallbacks (§3.6, notes §6)
-// ---------------------------------------------------------------------------
-
-/// The article's own opening words, used when no LLM summary exists (§3.6).
 pub fn excerpt_summary(pick: &Pick) -> String {
     let text = truncate_words(
         &prompt_text(&pick.article.content_html),
@@ -326,17 +278,14 @@ pub fn excerpt_summary(pick: &Pick) -> String {
     }
 }
 
-/// A plain, factual front page used when the model is unavailable (§3.6, notes §6).
 pub fn fallback_front_page_html(lineup: &Lineup) -> String {
     let minutes: i64 = lineup
         .picks
         .iter()
-        .map(|p| p.article.reading_minutes())
+        .map(|pick| pick.article.reading_minutes())
         .sum();
     let mut text = format!(
-        "Today's issue collects {} articles across {} sections — about {} minutes of \
-         reading. Editorial notes are unavailable for this issue, so the lineup speaks \
-         for itself.",
+        "Today's issue collects {} articles across {} sections — about {} minutes of reading. Editorial notes are unavailable for this issue, so the lineup speaks for itself.",
         lineup.picks.len(),
         lineup.section_order.len(),
         minutes
@@ -346,29 +295,15 @@ pub fn fallback_front_page_html(lineup: &Lineup) -> String {
             text,
             "\n\nLeading today: “{}” ({}).",
             lead.article.title.trim(),
-            if lead.article.feed_title.is_empty() {
-                "source unknown"
-            } else {
-                lead.article.feed_title.trim()
-            }
-        );
-    }
-    if !lineup.section_order.is_empty() {
-        let _ = write!(
-            text,
-            "\n\nIn this issue: {}.",
-            lineup.section_order.join(", ")
+            lead.article.feed_title.trim()
         );
     }
     text_to_paragraphs(&text)
 }
 
-/// `--skip-llm` / budget-exceeded fallback: feed excerpts stand in for summaries
-/// and the front page is a plain stats line (§3.6, notes §6).
 pub fn fallback_editorial(lineup: &Lineup) -> Editorial {
     Editorial {
         front_page_html: fallback_front_page_html(lineup),
-        section_intros: BTreeMap::new(),
         summaries: lineup
             .picks
             .iter()
@@ -377,54 +312,34 @@ pub fn fallback_editorial(lineup: &Lineup) -> Editorial {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Stage driver
-// ---------------------------------------------------------------------------
-
-/// Stage C end to end: summaries, then one front-page call, with excerpts filling
-/// every gap (§3.6).
-pub async fn run(llm: &LlmClient, lineup: &Lineup, temperature: f32) -> Editorial {
+pub async fn run(
+    llms: &Llms,
+    lineup: &Lineup,
+    config: &EditorialConfig,
+    temperature: f32,
+) -> Editorial {
     if lineup.picks.is_empty() {
         return fallback_editorial(lineup);
     }
-
-    let mut summaries = summarize_all(llm, lineup, temperature).await;
-    let missing: Vec<&Pick> = lineup
-        .picks
-        .iter()
-        .filter(|p| !summaries.contains_key(&p.article.id))
-        .collect();
-    if !missing.is_empty() {
-        tracing::warn!(
-            count = missing.len(),
-            "using feed excerpts as summaries for articles the model did not cover"
-        );
-        for pick in missing {
-            summaries.insert(pick.article.id, excerpt_summary(pick));
-        }
+    let mut summaries = summarize_all(llms, lineup, config, temperature).await;
+    for pick in &lineup.picks {
+        summaries
+            .entry(pick.article.id)
+            .or_insert_with(|| excerpt_summary(pick));
     }
-
-    let (front_page_html, section_intros) =
-        match front_page(llm, lineup, &summaries, temperature).await {
-            Ok(response) => (
-                text_to_paragraphs(&response.from_the_editor),
-                response.section_intros,
-            ),
-            Err(e) => {
-                tracing::error!(error = %e,
-                    "front-page generation failed; using the plain front page");
-                (fallback_front_page_html(lineup), BTreeMap::new())
-            }
-        };
-
+    let front_page_html = match brief(llms, lineup, &summaries, temperature).await {
+        Ok(text) => text_to_paragraphs(&text),
+        Err(error) => {
+            tracing::warn!(%error, "brief failed; using fallback front page");
+            fallback_front_page_html(lineup)
+        }
+    };
     Editorial {
         front_page_html,
-        section_intros,
         summaries,
     }
 }
 
-/// Escape-and-wrap helper for callers rendering a summary straight into XHTML.
 pub fn summary_to_html(summary: &str) -> String {
     format!("<p>{}</p>", escape_html(summary.trim()))
 }
@@ -432,15 +347,15 @@ pub fn summary_to_html(summary: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DeepseekConfig;
-    use crate::curate::llm::{MockBackend, UsageMeter};
+    use crate::config::{AnthropicConfig, DeepseekConfig};
+    use crate::curate::llm::{ChatBackend, MockBackend, PriceTable, UsageMeter};
     use crate::curate::prefilter::tests::article;
     use crate::types::TokenUsage;
     use std::sync::Arc;
 
-    const FRONT_PAGE_FIXTURE: &str = include_str!(concat!(
+    const BRIEF_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/deepseek_front_page.json"
+        "/tests/fixtures/claude_brief.json"
     ));
 
     fn pick(id: i64, title: &str, section: &str, is_lead: bool) -> Pick {
@@ -451,6 +366,7 @@ mod tests {
             section: section.into(),
             position: 1,
             is_lead,
+            why: Some(format!("the {title} piece you'd argue with")),
             summary: None,
             llm: None,
             discussion: None,
@@ -468,13 +384,38 @@ mod tests {
         }
     }
 
-    fn client(backend: Arc<MockBackend>, limit: f64) -> LlmClient {
-        LlmClient::with_backend(
-            "deepseek-v4-flash",
+    fn mock(provider: &'static str, backend: Arc<MockBackend>, limit: f64) -> LlmClient {
+        let prices = if provider == "anthropic" {
+            PriceTable::anthropic(&AnthropicConfig::default())
+        } else {
+            PriceTable::deepseek(&DeepseekConfig::default())
+        };
+        LlmClient::with_backend_options(
+            provider,
+            "model",
             "SYSTEM".into(),
-            UsageMeter::new(&DeepseekConfig::default(), limit),
-            backend,
+            None,
+            UsageMeter::with_prices(prices, limit),
+            backend as Arc<dyn ChatBackend>,
         )
+    }
+
+    fn bulk_only(backend: Arc<MockBackend>, limit: f64) -> Llms {
+        Llms {
+            bulk: Some(mock("deepseek", backend, limit)),
+            editor: None,
+        }
+    }
+
+    fn editor_and_bulk(editor: Arc<MockBackend>, bulk: Arc<MockBackend>) -> Llms {
+        Llms {
+            bulk: Some(mock("deepseek", bulk, 2.0)),
+            editor: Some(mock("anthropic", editor, 3.0)),
+        }
+    }
+
+    fn config() -> EditorialConfig {
+        EditorialConfig::default()
     }
 
     #[tokio::test]
@@ -484,9 +425,9 @@ mod tests {
             r#"{"summary": "A team moves 40TB of relational data off Postgres and documents every rollback."}"#,
             TokenUsage::default(),
         );
-        let llm = client(Arc::clone(&backend), 2.0);
+        let llm = mock("deepseek", Arc::clone(&backend), 2.0);
         let body = format!("<p>{}</p>", "word ".repeat(20_000));
-        let summary = summarize_article(&llm, "Migrating 40TB", &body, 0.8)
+        let summary = summarize_article(&llm, "Migrating 40TB", &body, 3_000, 0.8)
             .await
             .expect("summary");
         assert!(summary.starts_with("A team moves 40TB"));
@@ -495,60 +436,133 @@ mod tests {
         assert!(prompt.starts_with(SUMMARY_INSTRUCTIONS));
         assert!(prompt.contains("HEADLINE: Migrating 40TB"));
         assert!(prompt.contains("(truncated for length)"));
-        // ~5k tokens ≈ 20k characters of body, not the full 100k.
-        assert!(prompt.len() < 26_000, "prompt was {} bytes", prompt.len());
+        // 3k tokens ≈ 12k characters of body, not the full 100k.
+        assert!(prompt.len() < 16_000, "prompt was {} bytes", prompt.len());
     }
 
     #[tokio::test]
-    async fn front_page_parses_and_filters_unknown_sections() {
+    async fn the_brief_is_parsed_and_rendered() {
         let backend = Arc::new(MockBackend::new());
-        backend.push(FRONT_PAGE_FIXTURE, TokenUsage::default());
-        let llm = client(Arc::clone(&backend), 2.0);
+        backend.push(BRIEF_FIXTURE, TokenUsage::default());
+        let llms = bulk_only(Arc::clone(&backend), 2.0);
         let lineup = lineup();
         let summaries = BTreeMap::from([
             (1, "A migration story with numbers.".to_string()),
             (2, "Transit data, charted.".to_string()),
         ]);
 
-        let response = front_page(&llm, &lineup, &summaries, 0.8)
-            .await
-            .expect("front page");
-        assert!(response.from_the_editor.split_whitespace().count() > 40);
-        assert_eq!(response.section_intros.len(), 2);
-        assert!(response.section_intros.contains_key("Top Stories"));
-        assert!(
-            !response.section_intros.contains_key("Niche Corner"),
-            "intros for absent sections are dropped"
-        );
+        let text = brief(&llms, &lineup, &summaries, 0.8).await.expect("brief");
+        assert!(text.split_whitespace().count() > 100);
+        assert!(text.contains("Migrating 40TB off Postgres"));
 
         let prompt = &backend.prompts()[0].user;
-        assert!(prompt.starts_with(FRONT_PAGE_INSTRUCTIONS));
+        assert!(prompt.starts_with(BRIEF_INSTRUCTIONS));
         assert!(prompt.contains("## Top Stories"));
-        assert!(prompt.contains("[LEAD STORY]"));
-        assert!(prompt.contains("abstract: A migration story with numbers."));
+        assert!(prompt.contains("## Boston & Local"));
+        assert!(prompt.contains("- Migrating 40TB off Postgres"));
+        assert!(prompt.contains("why: the Migrating 40TB off Postgres piece you'd argue with"));
+        assert!(prompt.contains("summary: A migration story with numbers."));
+        assert!(prompt.contains("score: unscored"));
         assert!(prompt.contains("2026-08-15"));
+        assert!(
+            !prompt.contains("section_intros"),
+            "section intros are gone"
+        );
     }
 
     #[tokio::test]
-    async fn full_stage_c_produces_summaries_intros_and_front_page() {
+    async fn full_stage_c_produces_summaries_and_the_brief() {
         let backend = Arc::new(MockBackend::new());
         backend.push(r#"{"summary": "First abstract."}"#, TokenUsage::default());
         backend.push(r#"{"summary": "Second abstract."}"#, TokenUsage::default());
-        backend.push(FRONT_PAGE_FIXTURE, TokenUsage::default());
-        let llm = client(Arc::clone(&backend), 2.0);
+        backend.push(BRIEF_FIXTURE, TokenUsage::default());
+        let llms = bulk_only(Arc::clone(&backend), 2.0);
 
-        let editorial = run(&llm, &lineup(), 0.8).await;
-        assert_eq!(
-            backend.calls(),
-            3,
-            "one call per article plus the front page"
-        );
+        let editorial = run(&llms, &lineup(), &config(), 0.8).await;
+        assert_eq!(backend.calls(), 3, "one call per article plus the brief");
         assert_eq!(editorial.summaries.len(), 2);
         assert_eq!(editorial.summaries[&1], "First abstract.");
         assert!(editorial.front_page_html.starts_with("<p>"));
         assert!(editorial.front_page_html.contains("</p>"));
+        assert!(
+            editorial
+                .front_page_html
+                .contains("Migrating 40TB off Postgres")
+        );
         assert!(!editorial.front_page_html.contains("<script"));
-        assert_eq!(editorial.section_intros.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn summaries_run_on_the_editor_and_fall_back_per_article() {
+        let editor = Arc::new(MockBackend::new());
+        editor.push(
+            r#"{"summary": "Opus wrote this one."}"#,
+            TokenUsage::default(),
+        );
+        editor.push_llm_error(LlmError::Refusal {
+            provider: "anthropic",
+        });
+        editor.push(BRIEF_FIXTURE, TokenUsage::default());
+        let bulk = Arc::new(MockBackend::new());
+        bulk.push(
+            r#"{"summary": "DeepSeek covered the refusal."}"#,
+            TokenUsage::default(),
+        );
+        let llms = editor_and_bulk(Arc::clone(&editor), Arc::clone(&bulk));
+
+        let editorial = run(&llms, &lineup(), &config(), 0.8).await;
+        assert_eq!(
+            editor.calls(),
+            3,
+            "two summaries and the brief on the editor"
+        );
+        assert_eq!(bulk.calls(), 1, "only the refused summary went to bulk");
+        assert_eq!(editorial.summaries[&1], "Opus wrote this one.");
+        assert_eq!(editorial.summaries[&2], "DeepSeek covered the refusal.");
+        assert_eq!(
+            editor.prompts()[1].user,
+            bulk.prompts()[0].user,
+            "the bulk client gets the identical summary prompt"
+        );
+        assert!(
+            editorial
+                .front_page_html
+                .contains("Migrating 40TB off Postgres")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_brief_falls_back_to_bulk_with_the_same_prompt() {
+        let editor = Arc::new(MockBackend::new());
+        editor.push_error("500 opus is down");
+        let bulk = Arc::new(MockBackend::new());
+        bulk.push(BRIEF_FIXTURE, TokenUsage::default());
+        let llms = editor_and_bulk(Arc::clone(&editor), Arc::clone(&bulk));
+
+        let text = brief(&llms, &lineup(), &BTreeMap::new(), 0.8)
+            .await
+            .expect("bulk brief");
+        assert!(text.contains("Migrating 40TB off Postgres"));
+        assert_eq!(editor.prompts()[0].user, bulk.prompts()[0].user);
+    }
+
+    #[tokio::test]
+    async fn summary_model_bulk_skips_the_editor_for_summaries() {
+        let editor = Arc::new(MockBackend::new());
+        editor.push(BRIEF_FIXTURE, TokenUsage::default());
+        let bulk = Arc::new(MockBackend::new());
+        bulk.push(r#"{"summary": "First abstract."}"#, TokenUsage::default());
+        bulk.push(r#"{"summary": "Second abstract."}"#, TokenUsage::default());
+        let llms = editor_and_bulk(Arc::clone(&editor), Arc::clone(&bulk));
+        let config = EditorialConfig {
+            summary_model: SummaryModel::Bulk,
+            ..EditorialConfig::default()
+        };
+
+        let editorial = run(&llms, &lineup(), &config, 0.8).await;
+        assert_eq!(bulk.calls(), 2);
+        assert_eq!(editor.calls(), 1, "the brief still runs on the editor");
+        assert_eq!(editorial.summaries[&2], "Second abstract.");
     }
 
     #[tokio::test]
@@ -560,14 +574,15 @@ mod tests {
             TokenUsage {
                 input_tokens: 1_000_000,
                 cached_tokens: 0,
+                cache_write_tokens: 0,
                 output_tokens: 0,
             },
         );
-        let llm = client(Arc::clone(&backend), 0.05);
+        let llms = bulk_only(Arc::clone(&backend), 0.05);
 
-        let editorial = run(&llm, &lineup(), 0.8).await;
+        let editorial = run(&llms, &lineup(), &config(), 0.8).await;
         assert_eq!(backend.calls(), 1, "no further calls after the ceiling");
-        assert!(llm.meter.budget_exceeded());
+        assert!(llms.bulk.as_ref().expect("bulk").meter.budget_exceeded());
         assert_eq!(
             editorial.summaries.len(),
             2,
@@ -581,7 +596,6 @@ mod tests {
         );
         // The front page degraded to the plain version.
         assert!(editorial.front_page_html.contains("2 articles"));
-        assert!(editorial.section_intros.is_empty());
     }
 
     #[tokio::test]
@@ -589,14 +603,21 @@ mod tests {
         let backend = Arc::new(MockBackend::new());
         backend.push_error("400 bad request");
         backend.push(r#"{"summary": "Second abstract."}"#, TokenUsage::default());
-        backend.push_error("500 front page exploded");
-        let llm = client(Arc::clone(&backend), 2.0);
+        backend.push_error("500 brief exploded");
+        let llms = bulk_only(Arc::clone(&backend), 2.0);
 
-        let editorial = run(&llm, &lineup(), 0.8).await;
+        let editorial = run(&llms, &lineup(), &config(), 0.8).await;
         assert_eq!(editorial.summaries.len(), 2);
         assert!(editorial.summaries[&1].contains("opens with a specific"));
         assert_eq!(editorial.summaries[&2], "Second abstract.");
         assert!(editorial.front_page_html.contains("Leading today"));
+    }
+
+    #[tokio::test]
+    async fn no_provider_means_the_fallback_editorial() {
+        let editorial = run(&Llms::default(), &lineup(), &config(), 0.8).await;
+        assert_eq!(editorial.summaries.len(), 2);
+        assert!(editorial.front_page_html.contains("2 articles"));
     }
 
     #[test]
@@ -604,13 +625,8 @@ mod tests {
         let lineup = lineup();
         let editorial = fallback_editorial(&lineup);
         assert_eq!(editorial.summaries.len(), lineup.picks.len());
-        assert!(editorial.section_intros.is_empty());
         assert!(editorial.front_page_html.contains("2 articles"));
-        assert!(
-            editorial
-                .front_page_html
-                .contains("Top Stories, Boston &amp; Local")
-        );
+        assert!(editorial.front_page_html.contains("2 sections"));
         assert!(editorial.front_page_html.starts_with("<p>"));
 
         // An empty lineup is still a valid editorial.

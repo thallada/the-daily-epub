@@ -18,18 +18,19 @@
 //! no article in the fixtures carries an image, so the EPUB builder's image
 //! downloader has nothing to fetch.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use jiff::Timestamp;
 use jiff::civil::Date;
 
 use daily_epub::config::{Config, PublishConfig, ServerConfig, XtcConfig};
-use daily_epub::curate::llm::{LlmClient, MockBackend, UsageMeter};
+use daily_epub::curate::llm::{LlmClient, Llms, MockBackend, UsageMeter};
 use daily_epub::curate::{Curator, editorial, prefilter};
 use daily_epub::db::Db;
 use daily_epub::extract::Extractor;
 use daily_epub::types::{
-    Article, Colophon, Edition, Entry, Issue, Lineup, ScoredArticle, SourceKind, Vote,
+    Article, Colophon, Edition, Entry, Issue, Lineup, Models, ScoredArticle, SourceKind, Vote,
 };
 use daily_epub::{auth, dedupe, epub, miniflux, pipeline, publish};
 
@@ -400,7 +401,7 @@ async fn skip_llm_pipeline_produces_a_published_issue() {
     let articles = ingest_dedupe_extract_persist(&db).await;
 
     // --- Stages 6–7 with no LLM at all (notes §6) ---
-    let curator = Curator::new(cfg.clone(), db.clone(), None);
+    let curator = Curator::new(cfg.clone(), db.clone(), Llms::default());
     let candidates = curator
         .prefilter(articles, date())
         .await
@@ -432,7 +433,12 @@ async fn skip_llm_pipeline_produces_a_published_issue() {
     );
 
     let colophon = Colophon {
-        model: "none (--skip-llm)".into(),
+        provider_costs: BTreeMap::new(),
+        models: Models {
+            bulk: "none".into(),
+            editor: "none".into(),
+            summaries: "none".into(),
+        },
         entries_fetched: 8,
         feeds_seen: 8,
         candidates: 5,
@@ -504,6 +510,7 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
     let usage = daily_epub::types::TokenUsage {
         input_tokens: 1000,
         cached_tokens: 500,
+        cache_write_tokens: 0,
         output_tokens: 200,
     };
     let scores: Vec<String> = ids
@@ -544,8 +551,7 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
         );
     }
     backend.push(
-        r#"{"from_the_editor": "Today's issue leans on storage internals.\n\nRead on.",
-            "section_intros": {"Top Stories": "The day in one place."}}"#,
+        r#"{"brief": "Today's issue leans on storage internals.\n\nRead on."}"#,
         usage,
     );
 
@@ -556,7 +562,14 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
         meter.clone(),
         backend.clone(),
     );
-    let curator = Curator::new(cfg.clone(), db.clone(), Some(llm));
+    let curator = Curator::new(
+        cfg.clone(),
+        db.clone(),
+        Llms {
+            bulk: Some(llm),
+            editor: None,
+        },
+    );
 
     let mut candidates = candidates;
     curator
@@ -590,12 +603,9 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
         "the model's summaries were used, not excerpts"
     );
     assert!(editorial_doc.front_page_html.contains("storage internals"));
-    assert_eq!(
-        editorial_doc
-            .section_intros
-            .get("Top Stories")
-            .map(String::as_str),
-        Some("The day in one place.")
+    assert!(
+        lineup.picks.iter().all(|p| p.why.is_none()),
+        "the scripted editor gave no why lines"
     );
 
     // Every scripted response was consumed, and the meter priced them (§3.6).
@@ -615,7 +625,12 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
 
     // And it all assembles, builds and publishes like the skip-llm route does.
     let colophon = Colophon {
-        model: cfg.deepseek.model.clone(),
+        provider_costs: BTreeMap::from([("deepseek".to_string(), meter.cost_usd())]),
+        models: Models {
+            bulk: cfg.deepseek.model.clone(),
+            editor: format!("{} (bulk fallback)", cfg.deepseek.model),
+            summaries: cfg.deepseek.model.clone(),
+        },
         entries_fetched: 8,
         feeds_seen: 8,
         candidates: 5,
@@ -625,6 +640,6 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
     let mut lineup = lineup;
     pipeline::apply_summaries(&mut lineup, &editorial_doc);
     let issue = assemble_build_publish(&db, &cfg, lineup, colophon).await;
-    assert_eq!(issue.colophon.model, cfg.deepseek.model);
+    assert_eq!(issue.colophon.models.bulk, cfg.deepseek.model);
     assert!(issue.colophon.cost_usd > 0.0);
 }

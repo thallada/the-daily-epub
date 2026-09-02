@@ -31,15 +31,15 @@ use jiff::civil::Date;
 use jiff::{Timestamp, Zoned};
 
 use crate::config::Config;
-use crate::curate::llm::{LlmClient, UsageMeter};
+use crate::curate::llm::{Llms, PriceTable, UsageMeter};
 use crate::curate::{Curator, editorial, profile};
 use crate::db::Db;
 use crate::extract::Extractor;
 use crate::miniflux::MinifluxClient;
 use crate::publish::Published;
-use crate::report::{RunReport, RunStatus};
+use crate::report::{ProviderUsage, RunReport, RunStatus};
 use crate::types::{
-    Article, Artifact, Colophon, Edition, Issue, IssueMeta, Lineup, reading_minutes,
+    Article, Artifact, Colophon, Edition, Issue, IssueMeta, Lineup, Models, reading_minutes,
 };
 use crate::{comments, dedupe, epub, http, miniflux, publish, social, world};
 
@@ -185,7 +185,7 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
     let started_at = Timestamp::now();
     let (window_start, window_end) = ingest_window(config, date)?;
     let out_dir = opts.out.clone().unwrap_or_else(|| config.out_dir.clone());
-    let target = opts.max_articles.unwrap_or(config.target_article_count);
+    let (soft_target, hard_max) = issue_size_bounds(config, opts.max_articles);
 
     let span = tracing::info_span!("generate", %date, dry_run = opts.dry_run);
     let _guard = span.enter();
@@ -193,16 +193,19 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
         %window_start,
         %window_end,
         lookback_hours = config.lookback_hours,
-        target,
+        soft_target,
+        hard_max,
         skip_llm = opts.skip_llm,
         out = %out_dir.display(),
         "starting run"
     );
+    log_resolved_providers(config, opts.skip_llm);
 
     let run_id = db.start_run(date, started_at).await?;
     let mut report = RunReport::new(date, started_at);
     report.window_start = Some(window_start);
     report.window_end = Some(window_end);
+    report.config_json = resolved_run_config(config, soft_target, hard_max);
     if opts.dry_run {
         report.status = RunStatus::DryRun;
     }
@@ -211,19 +214,16 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
         config,
         db,
         date,
-        target,
+        soft_target,
+        hard_max,
+        started_at,
         out_dir,
         dry_run: opts.dry_run,
         skip_llm: opts.skip_llm,
     };
     let stages = match run_stages(&ctx, window_start, window_end, &mut report).await {
         Ok(stages) => {
-            report.finish(
-                Timestamp::now(),
-                config.deepseek.price_input_per_mtok,
-                config.deepseek.price_cached_input_per_mtok,
-                config.deepseek.price_output_per_mtok,
-            );
+            report.finish(Timestamp::now());
             stages
         }
         Err(e) => {
@@ -276,7 +276,9 @@ struct StageContext<'a> {
     config: &'a Config,
     db: &'a Db,
     date: Date,
-    target: usize,
+    soft_target: usize,
+    hard_max: usize,
+    started_at: Timestamp,
     out_dir: PathBuf,
     dry_run: bool,
     skip_llm: bool,
@@ -369,23 +371,28 @@ async fn run_stages(
 
     // --- Stage 6: heuristic pre-filter (§3.5) ---
     let stage = Timestamp::now();
-    let meter = UsageMeter::new(&config.deepseek, config.max_daily_usd);
-    // `max_daily_usd` is a ceiling for the *day*, not for one invocation, so a
-    // re-run inherits what earlier runs for this date already spent (§3.6).
-    match db.spend_for_date(date).await {
-        Ok(spent) if spent > 0.0 => {
-            tracing::info!(spent, "preloading today's recorded DeepSeek spend");
-            meter.preload_cost(spent);
+    let bulk_meter =
+        UsageMeter::with_prices(PriceTable::deepseek(&config.deepseek), config.max_daily_usd);
+    let editor_meter = UsageMeter::with_prices(
+        PriceTable::anthropic(&config.anthropic),
+        config.anthropic.max_daily_usd,
+    );
+    match db.provider_spend_for_utc_day(ctx.started_at).await {
+        Ok(spend) => {
+            bulk_meter.preload_cost(spend.get("deepseek").copied().unwrap_or(0.0));
+            editor_meter.preload_cost(spend.get("anthropic").copied().unwrap_or(0.0));
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "could not read today's spend; starting from zero"),
+        Err(error) => {
+            tracing::warn!(%error, "could not preload provider spend; starting from zero")
+        }
     }
 
-    let llm = build_llm(ctx, &meter, report).await;
-    let llm_available = llm.is_some();
+    let llms = build_llms(ctx, &bulk_meter, &editor_meter, report).await;
+    let bulk_available = llms.bulk.is_some();
     let mut curator_config = config.clone();
-    curator_config.target_article_count = ctx.target;
-    let curator = Curator::new(curator_config, db.clone(), llm);
+    curator_config.target_article_count = ctx.soft_target;
+    curator_config.curation.max_article_count = ctx.hard_max;
+    let curator = Curator::new(curator_config, db.clone(), llms);
 
     let mut candidates = curator
         .prefilter(articles, date)
@@ -396,12 +403,13 @@ async fn run_stages(
 
     // --- Stage 7: LLM scoring, then selection (§3.6 A + B) ---
     let stage = Timestamp::now();
-    if llm_available && let Err(e) = curator.score(&mut candidates, date).await {
+    if bulk_available && let Err(e) = curator.score(&mut candidates, date).await {
         // A dead API or a tripped budget must not cost us the issue: selection
         // degrades to prefilter order exactly as `--skip-llm` does.
         report.warn(format!("LLM scoring failed; ranking heuristically: {e:#}"));
     }
     report.counts.llm_scored = candidates.iter().filter(|c| c.llm.is_some()).count() as i64;
+    report.counts.llm_unscored = report.counts.candidates - report.counts.llm_scored;
 
     let mut lineup = curator
         .select(candidates, date)
@@ -440,7 +448,7 @@ async fn run_stages(
     if config.world_briefing {
         match world_briefing.as_mut() {
             Some(briefing) => {
-                for warning in world::enrich(&http, briefing, curator.llm.as_ref()).await {
+                for warning in world::enrich(&http, briefing, curator.llms.bulk.as_ref()).await {
                     report.warn(warning);
                 }
             }
@@ -454,19 +462,55 @@ async fn run_stages(
         .next_issue_number(date)
         .await
         .context("computing the issue number")?;
+    report.provider_costs.insert(
+        "deepseek".into(),
+        ProviderUsage {
+            usage: bulk_meter.total(),
+            cost_usd: bulk_meter.cost_usd(),
+        },
+    );
+    report.provider_costs.insert(
+        "anthropic".into(),
+        ProviderUsage {
+            usage: editor_meter.total(),
+            cost_usd: editor_meter.cost_usd(),
+        },
+    );
+    let summary_model = match config.editorial.summary_model {
+        crate::config::SummaryModel::Editor if curator.llms.editor.is_some() => {
+            config.anthropic.model.clone()
+        }
+        _ if curator.llms.bulk.is_some() => config.deepseek.model.clone(),
+        _ => "none".into(),
+    };
+    let provider_costs = report
+        .provider_costs
+        .iter()
+        .map(|(provider, usage)| (provider.clone(), usage.cost_usd))
+        .collect();
     let colophon = Colophon {
-        model: if llm_available {
-            config.deepseek.model.clone()
-        } else {
-            "none (--skip-llm)".into()
+        provider_costs,
+        models: Models {
+            bulk: if bulk_available {
+                config.deepseek.model.clone()
+            } else {
+                "none".into()
+            },
+            editor: if curator.llms.editor.is_some() {
+                config.anthropic.model.clone()
+            } else if bulk_available {
+                format!("{} (bulk fallback)", config.deepseek.model)
+            } else {
+                "none".into()
+            },
+            summaries: summary_model,
         },
         entries_fetched: report.counts.entries_fetched,
         feeds_seen: report.counts.feeds_seen,
         candidates: report.counts.candidates,
-        cost_usd: meter.cost_usd(),
+        cost_usd: bulk_meter.cost_usd() + editor_meter.cost_usd(),
         generator_version: format!("daily-epub {}", crate::VERSION),
     };
-    report.usage = meter.total();
     let issue = build_issue(
         date,
         issue_number,
@@ -582,11 +626,12 @@ async fn record_issue(db: &Db, issue: &Issue, published: &Published) -> Result<(
 ///
 /// Returns `None` for `--skip-llm` and for every configuration/API problem: the
 /// caller then curates heuristically instead of failing the run (§3.6).
-async fn build_llm(
+async fn build_llms(
     ctx: &StageContext<'_>,
-    meter: &UsageMeter,
+    bulk_meter: &UsageMeter,
+    editor_meter: &UsageMeter,
     report: &mut RunReport,
-) -> Option<LlmClient> {
+) -> Llms {
     let profile = match profile::load_or_build(
         ctx.db,
         &ctx.config.interests_opml,
@@ -596,32 +641,36 @@ async fn build_llm(
     .await
     {
         Ok(profile) => profile,
-        Err(e) => {
+        Err(error) => {
             report.warn(format!(
-                "could not build the taste profile; curating heuristically: {e:#}"
+                "could not build the taste profile; curating heuristically: {error:#}"
             ));
-            return None;
+            return Llms::default();
         }
     };
     if ctx.skip_llm {
-        tracing::info!("--skip-llm: profile rebuilt; no DeepSeek call will be made");
-        return None;
+        tracing::info!("--skip-llm: profile rebuilt; no provider calls will be made");
+        return Llms::default();
     }
-    let client = match LlmClient::new(&ctx.config.deepseek, profile.text, meter.clone()) {
-        Ok(client) => client,
-        Err(e) => {
-            report.warn(format!(
-                "DeepSeek is unavailable; curating heuristically: {e}"
-            ));
-            return None;
-        }
+
+    let make_clients = |prompt: String| {
+        Llms::from_config(
+            &ctx.config.deepseek,
+            &ctx.config.anthropic,
+            prompt,
+            bulk_meter.clone(),
+            editor_meter.clone(),
+        )
     };
 
-    // Weekly rewrite of the "learned adjustments" section (§3.6c). It changes the
-    // system prompt, so the client is rebuilt around the new profile.
+    let mut llms = make_clients(profile.text);
+    let Some(rebuild_client) = llms.editor_or_bulk() else {
+        report.warn("no LLM provider is available; curating heuristically");
+        return llms;
+    };
     match profile::weekly_rebuild_if_due(
         ctx.db,
-        &client,
+        rebuild_client,
         &ctx.config.interests_opml,
         &ctx.config.profile_path,
         ctx.config.curation.feedback.verdicts_in_prompt,
@@ -629,21 +678,78 @@ async fn build_llm(
     .await
     {
         Ok(Some(rebuilt)) => {
-            tracing::info!(version = rebuilt.version, "taste profile rebuilt");
-            match LlmClient::new(&ctx.config.deepseek, rebuilt.text, meter.clone()) {
-                Ok(refreshed) => Some(refreshed),
-                Err(e) => {
-                    tracing::warn!(error = %e, "keeping the previous profile client");
-                    Some(client)
-                }
-            }
+            tracing::info!(
+                version = rebuilt.version,
+                "taste profile rebuilt with editor-or-bulk"
+            );
+            llms = make_clients(rebuilt.text);
         }
-        Ok(None) => Some(client),
-        Err(e) => {
-            report.warn(format!("weekly profile rebuild failed: {e:#}"));
-            Some(client)
-        }
+        Ok(None) => {}
+        Err(error) => report.warn(format!("weekly profile rebuild failed: {error:#}")),
     }
+    llms
+}
+
+/// `--max-articles N` is a ceiling, never a target (§13): the hard ceiling is
+/// the smaller of `curation.max_article_count` and `N`, and the soft target
+/// never exceeds it. Returns `(soft_target, hard_max)`.
+pub fn issue_size_bounds(config: &Config, max_articles: Option<usize>) -> (usize, usize) {
+    let hard_max = max_articles.map_or(config.curation.max_article_count, |ceiling| {
+        ceiling.min(config.curation.max_article_count)
+    });
+    (config.target_article_count.min(hard_max), hard_max)
+}
+
+/// Startup line naming the resolved models and whether each provider is on
+/// (§19): the root config ignores unknown sections, so an `[anthropics]` typo
+/// would otherwise be silent. Keys are never logged, only their presence.
+fn log_resolved_providers(config: &Config, skip_llm: bool) {
+    let has_key = |key: Option<&str>| key.is_some_and(|k| !k.trim().is_empty());
+    tracing::info!(
+        bulk_model = %config.deepseek.model,
+        bulk_enabled = !skip_llm && has_key(config.deepseek.api_key.as_deref()),
+        bulk_max_daily_usd = config.max_daily_usd,
+        editor_model = %config.anthropic.model,
+        editor_enabled = !skip_llm
+            && config.anthropic.enabled
+            && has_key(config.anthropic.api_key.as_deref()),
+        editor_effort = %config.anthropic.effort,
+        editor_max_daily_usd = config.anthropic.max_daily_usd,
+        summary_model = ?config.editorial.summary_model,
+        "resolved providers"
+    );
+}
+
+/// Prompt versions recorded per run so old telemetry stays interpretable (§7.6).
+/// Bump a number when the corresponding instruction block changes.
+const PROMPT_VERSIONS: &[(&str, u32)] = &[
+    ("score", 1),
+    ("editor", 2),
+    ("summary", 1),
+    ("brief", 2),
+    ("profile", 2),
+];
+
+/// The resolved `[curation]`, `[editorial]`, model names and prompt versions
+/// written to `runs.config_json` (§7.6, §19). Never includes keys.
+fn resolved_run_config(config: &Config, soft_target: usize, hard_max: usize) -> serde_json::Value {
+    let mut curation = config.curation.clone();
+    curation.max_article_count = hard_max;
+    serde_json::json!({
+        "target_article_count": soft_target,
+        "prefilter_keep": config.prefilter_keep,
+        "curation": curation,
+        "editorial": config.editorial,
+        "models": {
+            "bulk": config.deepseek.model,
+            "editor": if config.anthropic.enabled { config.anthropic.model.as_str() } else { "disabled" },
+            "editor_effort": config.anthropic.effort,
+        },
+        "prompt_versions": PROMPT_VERSIONS
+            .iter()
+            .map(|(name, version)| ((*name).to_string(), serde_json::Value::from(*version)))
+            .collect::<serde_json::Map<_, _>>(),
+    })
 }
 
 fn elapsed_ms(since: Timestamp) -> i64 {
@@ -687,6 +793,41 @@ mod tests {
         );
         assert!(resolve_date(&config, Some("nope")).is_err());
         assert!(resolve_date(&config, None).is_ok());
+    }
+
+    #[test]
+    fn max_articles_is_a_ceiling_not_a_target() {
+        let config = Config {
+            target_article_count: 20,
+            ..Config::default()
+        };
+        assert_eq!(config.curation.max_article_count, 28);
+        assert_eq!(issue_size_bounds(&config, None), (20, 28));
+        // A ceiling below the target drags the target down with it.
+        assert_eq!(issue_size_bounds(&config, Some(6)), (6, 6));
+        // A ceiling above the configured maximum does not raise it.
+        assert_eq!(issue_size_bounds(&config, Some(40)), (20, 28));
+        assert_eq!(issue_size_bounds(&config, Some(24)), (20, 24));
+    }
+
+    #[test]
+    fn run_config_json_records_the_resolved_settings_and_no_keys() {
+        let mut config = Config::default();
+        config.anthropic.api_key = Some("sk-secret".into());
+        config.deepseek.api_key = Some("ds-secret".into());
+        let value = resolved_run_config(&config, 6, 6);
+        assert_eq!(value["target_article_count"], 6);
+        assert_eq!(value["curation"]["max_article_count"], 6);
+        assert_eq!(value["editorial"]["summary_model"], "editor");
+        assert_eq!(value["editorial"]["summary_input_tokens"], 3000);
+        assert_eq!(value["models"]["bulk"], "deepseek-v4-flash");
+        assert_eq!(value["models"]["editor"], "claude-opus-5");
+        assert!(value["prompt_versions"]["editor"].is_number());
+        let text = value.to_string();
+        assert!(
+            !text.contains("secret"),
+            "keys must never reach the database"
+        );
     }
 
     #[test]

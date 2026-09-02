@@ -1,28 +1,23 @@
-//! DeepSeek client and token/cost accounting (spec §3.6).
+//! Provider-neutral LLM clients, transports, retry, and token accounting (§4, §5).
 //!
-//! The OpenAI-compatible chat-completions endpoint at `https://api.deepseek.com/v1`.
-//! DeepSeek prefix-caches automatically, so the (identical, long) taste-profile
-//! system prompt must come first in every request: cached input is $0.0028/M vs
-//! $0.14/M.
+//! Two transports speak to the wire directly through the shared `reqwest`
+//! client (no vendor SDK; implementation notes, cross-cutting item 5 is stale):
 //!
-//! **Why not `async-openai`** (spec §2 crate table): the published crate exposes
-//! neither `Client` nor `types::chat` under any feature combination we could get
-//! to build here, and it would drag in a second HTTP stack besides the shared
-//! `reqwest` client (notes §4). [`DeepseekBackend`] therefore speaks the same
-//! OpenAI-compatible wire protocol directly — about 80 lines, no new dependency,
-//! and the request/response shapes are pinned by this module's tests. The
-//! dependency was dropped from `Cargo.toml`; swapping a vendor SDK back in later
-//! is a single [`ChatBackend`] impl and nothing else moves.
+//! - [`DeepseekBackend`]: the OpenAI-compatible chat-completions endpoint. The
+//!   system prompt is the first message so DeepSeek's prefix cache hits.
+//! - [`AnthropicBackend`]: `POST /v1/messages` with the system prompt as one
+//!   `cache_control: ephemeral` block, `output_config.effort`, and server-side
+//!   `fallbacks: "default"` (§4.2). No sampling parameters, no `thinking`, no
+//!   prefill — Opus 5 rejects them. A `stop_reason: "refusal"` (HTTP 200) is
+//!   [`LlmError::Refusal`], which the callers use to fall back to the bulk client.
 //!
-//! Every call in the project goes through [`LlmClient`], which
+//! Every call goes through [`LlmClient`], which sends the byte-identical system
+//! prompt on every request, folds token usage into a per-provider [`UsageMeter`]
+//! priced by a [`PriceTable`], and refuses further work once that provider's
+//! `max_daily_usd` is spent. [`Llms`] pairs the bulk and editor clients.
 //!
-//! 1. always sends [`LlmClient::system_prompt`] as the **first** message, byte for
-//!    byte identical across requests (that is what makes the prefix cache hit),
-//! 2. folds the response's token usage into a shared [`UsageMeter`], and
-//! 3. refuses further work once `max_daily_usd` has been spent (§3.6 guardrail).
-//!
-//! The network is reached through a [`ChatBackend`] so tests can inject canned
-//! responses ([`MockBackend`]) without touching the wire (notes §6).
+//! Tests inject [`MockBackend`] or a loopback `axum` listener; nothing here
+//! touches the network under test.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -32,100 +27,150 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::DeepseekConfig;
+use crate::config::{AnthropicConfig, DeepseekConfig};
 use crate::http::RetryPolicy;
 use crate::types::TokenUsage;
 
-/// `response_format` value used for every structured call (§3.6).
 pub const JSON_OBJECT: &str = "json_object";
+const DEEPSEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const ANTHROPIC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_BETA: &str = "server-side-fallback-2026-07-01";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
-    #[error("deepseek api key is not configured (set DAILY_EPUB_DEEPSEEK__API_KEY)")]
-    MissingApiKey,
-    #[error("deepseek request failed: {0}")]
-    Api(String),
-    /// A 5xx/429/network failure: worth retrying (crate table "retry").
-    #[error("deepseek request failed (transient): {0}")]
-    Transient(String),
-    #[error("deepseek returned an empty completion")]
-    EmptyResponse,
-    #[error("deepseek returned unparseable JSON: {0}")]
+    #[error("{provider} api key is not configured (set {env_var})")]
+    MissingApiKey {
+        provider: &'static str,
+        env_var: &'static str,
+    },
+    #[error("{provider} request failed: {message}")]
+    Api {
+        provider: &'static str,
+        message: String,
+    },
+    #[error("{provider} request failed (transient): {message}")]
+    Transient {
+        provider: &'static str,
+        message: String,
+    },
+    #[error("{provider} returned a refusal")]
+    Refusal { provider: &'static str },
+    #[error("{provider} returned an empty completion")]
+    EmptyResponse { provider: &'static str },
+    #[error("llm returned unparseable JSON: {0}")]
     Json(#[from] serde_json::Error),
-    /// The `max_daily_usd` ceiling was reached: callers must skip remaining
-    /// editorial calls and fall back to feed excerpts, loudly (§3.6).
     #[error("daily cost ceiling of ${limit:.2} reached (spent ${spent:.4})")]
     BudgetExceeded { spent: f64, limit: f64 },
 }
 
 impl LlmError {
-    /// True for failures the [`RetryPolicy`] should retry.
     pub fn is_transient(&self) -> bool {
-        matches!(self, LlmError::Transient(_))
+        matches!(self, LlmError::Transient { .. })
+    }
+
+    fn api(provider: &'static str, message: impl Into<String>) -> Self {
+        Self::Api {
+            provider,
+            message: message.into(),
+        }
+    }
+
+    fn transient(provider: &'static str, message: impl Into<String>) -> Self {
+        Self::Transient {
+            provider,
+            message: message.into(),
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Usage metering (§3.6 cost guardrail, notes §5)
-// ---------------------------------------------------------------------------
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriceTable {
+    pub input_per_mtok: f64,
+    pub cache_write_per_mtok: f64,
+    pub cache_read_per_mtok: f64,
+    pub output_per_mtok: f64,
+}
 
-/// Shared token/cost accumulator enforcing `max_daily_usd` (notes §5).
-///
-/// Cloning shares the counters: one meter per run, cloned into every stage.
+impl PriceTable {
+    pub fn deepseek(cfg: &DeepseekConfig) -> Self {
+        Self {
+            input_per_mtok: cfg.price_input_per_mtok,
+            cache_write_per_mtok: 0.0,
+            cache_read_per_mtok: cfg.price_cached_input_per_mtok,
+            output_per_mtok: cfg.price_output_per_mtok,
+        }
+    }
+
+    pub fn anthropic(cfg: &AnthropicConfig) -> Self {
+        Self {
+            input_per_mtok: cfg.price_input_per_mtok,
+            cache_write_per_mtok: cfg.price_cache_write_per_mtok,
+            cache_read_per_mtok: cfg.price_cache_read_per_mtok,
+            output_per_mtok: cfg.price_output_per_mtok,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UsageMeter {
     inner: Arc<Mutex<TokenUsage>>,
-    /// Sticky: once the ceiling is crossed the run stays degraded (§3.6).
     exceeded: Arc<AtomicBool>,
+    prior_spend_usd: Arc<Mutex<f64>>,
     limit_usd: f64,
-    price_input: f64,
-    price_cached: f64,
-    price_output: f64,
+    prices: PriceTable,
 }
 
 impl UsageMeter {
+    /// Compatibility constructor for the existing DeepSeek call sites.
     pub fn new(cfg: &DeepseekConfig, limit_usd: f64) -> Self {
+        Self::with_prices(PriceTable::deepseek(cfg), limit_usd)
+    }
+
+    pub fn with_prices(prices: PriceTable, limit_usd: f64) -> Self {
         Self {
             inner: Arc::new(Mutex::new(TokenUsage::default())),
             exceeded: Arc::new(AtomicBool::new(false)),
+            prior_spend_usd: Arc::new(Mutex::new(0.0)),
             limit_usd,
-            price_input: cfg.price_input_per_mtok,
-            price_cached: cfg.price_cached_input_per_mtok,
-            price_output: cfg.price_output_per_mtok,
+            prices,
         }
     }
 
-    /// Seed the meter with spend already recorded for the day (§3.6): the
-    /// guardrail is a *daily* ceiling, not a per-run one.
     pub fn preload_cost(&self, spent_usd: f64) {
-        if spent_usd > 0.0 && self.limit_usd > 0.0 && spent_usd >= self.limit_usd {
-            self.trip("prior spend for today already exceeds the ceiling");
+        let spent_usd = spent_usd.max(0.0);
+        match self.prior_spend_usd.lock() {
+            Ok(mut guard) => *guard = spent_usd,
+            Err(poisoned) => *poisoned.into_inner() = spent_usd,
+        }
+        if self.limit_usd > 0.0 && spent_usd >= self.limit_usd {
+            self.trip("prior spend for the run's UTC day reached the ceiling");
         }
     }
 
-    /// Fold one response's usage in and return the running total.
     pub fn record(&self, usage: TokenUsage) -> TokenUsage {
         let total = match self.inner.lock() {
             Ok(mut guard) => {
                 guard.add(usage);
                 *guard
             }
-            // A poisoned mutex must not abort a run: accounting is advisory.
             Err(poisoned) => {
                 let mut guard = poisoned.into_inner();
                 guard.add(usage);
                 *guard
             }
         };
-        let cost = self.cost_of(total);
+        let spent = self.spent_usd();
         tracing::debug!(
             input = usage.input_tokens,
-            cached = usage.cached_tokens,
+            cache_write = usage.cache_write_tokens,
+            cache_read = usage.cached_tokens,
             output = usage.output_tokens,
-            total_cost_usd = cost,
+            live_cost_usd = self.cost_usd(),
+            day_spend_usd = spent,
             "recorded llm usage"
         );
-        if self.limit_usd > 0.0 && cost > self.limit_usd && !self.exceeded.load(Ordering::SeqCst) {
+        if self.limit_usd > 0.0 && spent > self.limit_usd {
             self.trip("token spend crossed the ceiling");
         }
         total
@@ -134,10 +179,9 @@ impl UsageMeter {
     fn trip(&self, why: &str) {
         self.exceeded.store(true, Ordering::SeqCst);
         tracing::error!(
-            spent_usd = self.cost_usd(),
+            spent_usd = self.spent_usd(),
             limit_usd = self.limit_usd,
-            "LLM budget exceeded ({why}): remaining editorial calls will be skipped \
-             and feed excerpts used instead"
+            "LLM budget exceeded ({why}); remaining calls for this provider are skipped"
         );
     }
 
@@ -148,29 +192,40 @@ impl UsageMeter {
         }
     }
 
-    fn cost_of(&self, usage: TokenUsage) -> f64 {
-        usage.cost_usd(self.price_input, self.price_cached, self.price_output)
+    pub fn cost_of(&self, usage: TokenUsage) -> f64 {
+        usage.cost_usd(
+            self.prices.input_per_mtok,
+            self.prices.cache_write_per_mtok,
+            self.prices.cache_read_per_mtok,
+            self.prices.output_per_mtok,
+        )
     }
 
     pub fn cost_usd(&self) -> f64 {
         self.cost_of(self.total())
     }
 
+    pub fn spent_usd(&self) -> f64 {
+        let prior = match self.prior_spend_usd.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
+        prior + self.cost_usd()
+    }
+
     pub fn limit_usd(&self) -> f64 {
         self.limit_usd
     }
 
-    /// True once the ceiling has been crossed — editorial stages check this and
-    /// silently degrade to excerpts (§3.6).
     pub fn budget_exceeded(&self) -> bool {
         self.exceeded.load(Ordering::SeqCst)
     }
 
-    /// `Err(BudgetExceeded)` once the run has spent more than `max_daily_usd` (§3.6).
     pub fn check_budget(&self) -> Result<(), LlmError> {
-        if self.budget_exceeded() {
+        if self.budget_exceeded() || (self.limit_usd > 0.0 && self.spent_usd() >= self.limit_usd) {
+            self.exceeded.store(true, Ordering::SeqCst);
             return Err(LlmError::BudgetExceeded {
-                spent: self.cost_usd(),
+                spent: self.spent_usd(),
                 limit: self.limit_usd,
             });
         }
@@ -178,23 +233,16 @@ impl UsageMeter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Backend abstraction (notes §6: no network in tests)
-// ---------------------------------------------------------------------------
-
-/// One chat completion request. The system prompt is an [`Arc`] so that the
-/// identical bytes are reused for every call (DeepSeek prefix caching, §3.6).
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub model: String,
     pub system: Arc<String>,
     pub user: String,
     pub temperature: f32,
-    /// Ask for `response_format: {"type": "json_object"}` (§3.6).
     pub json: bool,
+    pub effort: Option<String>,
 }
 
-/// One chat completion response, reduced to what the pipeline needs.
 #[derive(Debug, Clone, Default)]
 pub struct ChatCompletion {
     pub content: String,
@@ -203,15 +251,10 @@ pub struct ChatCompletion {
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// The seam between [`LlmClient`] and the network (notes §6).
 pub trait ChatBackend: std::fmt::Debug + Send + Sync {
     fn complete<'a>(&'a self, req: ChatRequest) -> BoxFuture<'a, Result<ChatCompletion, LlmError>>;
 }
 
-/// LLM calls are slow; the shared 10s HTTP timeout would kill them (notes §4).
-const LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
-
-/// The real thing: the OpenAI-compatible endpoint at `deepseek.base_url` (§3.6).
 #[derive(Debug, Clone)]
 pub struct DeepseekBackend {
     http: reqwest::Client,
@@ -225,11 +268,14 @@ impl DeepseekBackend {
             .api_key
             .as_deref()
             .map(str::trim)
-            .filter(|k| !k.is_empty())
-            .ok_or(LlmError::MissingApiKey)?
+            .filter(|key| !key.is_empty())
+            .ok_or(LlmError::MissingApiKey {
+                provider: "deepseek",
+                env_var: "DAILY_EPUB_DEEPSEEK__API_KEY",
+            })?
             .to_string();
-        let http = crate::http::build_client(LLM_TIMEOUT)
-            .map_err(|e| LlmError::Api(format!("building the deepseek http client: {e}")))?;
+        let http = crate::http::build_client(DEEPSEEK_TIMEOUT)
+            .map_err(|error| LlmError::api("deepseek", format!("building http client: {error}")))?;
         Ok(Self {
             http,
             endpoint: format!("{}/chat/completions", cfg.base_url.trim_end_matches('/')),
@@ -244,7 +290,6 @@ impl ChatBackend for DeepseekBackend {
             let mut body = json!({
                 "model": req.model,
                 "messages": [
-                    // FIRST and byte-identical across every request: prefix cache (§3.6).
                     {"role": "system", "content": req.system.as_str()},
                     {"role": "user", "content": req.user},
                 ],
@@ -252,11 +297,10 @@ impl ChatBackend for DeepseekBackend {
                 "stream": false,
             });
             if req.json
-                && let Some(obj) = body.as_object_mut()
+                && let Some(object) = body.as_object_mut()
             {
-                obj.insert("response_format".into(), json!({"type": JSON_OBJECT}));
+                object.insert("response_format".into(), json!({"type": JSON_OBJECT}));
             }
-
             let response = self
                 .http
                 .post(&self.endpoint)
@@ -264,60 +308,50 @@ impl ChatBackend for DeepseekBackend {
                 .json(&body)
                 .send()
                 .await
-                .map_err(classify_reqwest_error)?;
-
+                .map_err(|error| classify_reqwest_error("deepseek", error))?;
             let status = response.status();
             if !status.is_success() {
-                let detail = response.text().await.unwrap_or_default();
-                let detail = detail.chars().take(500).collect::<String>();
-                let msg = format!("{status}: {detail}");
-                return Err(if status.is_server_error() || status.as_u16() == 429 {
-                    LlmError::Transient(msg)
-                } else {
-                    LlmError::Api(msg)
-                });
+                return Err(classify_status("deepseek", status, response).await);
             }
-
-            let parsed: ApiResponse = response.json().await.map_err(|e| {
-                LlmError::Api(format!("decoding the deepseek chat completion: {e}"))
+            let parsed: DeepseekResponse = response.json().await.map_err(|error| {
+                LlmError::api("deepseek", format!("decoding chat completion: {error}"))
             })?;
             let content = parsed
                 .choices
                 .into_iter()
                 .next()
-                .and_then(|c| c.message.content)
-                .filter(|c| !c.trim().is_empty())
-                .ok_or(LlmError::EmptyResponse)?;
-            let usage = parsed.usage.map(usage_from_api).unwrap_or_default();
+                .and_then(|choice| choice.message.content)
+                .filter(|content| !content.trim().is_empty())
+                .ok_or(LlmError::EmptyResponse {
+                    provider: "deepseek",
+                })?;
+            let usage = parsed.usage.map(deepseek_usage).unwrap_or_default();
             Ok(ChatCompletion { content, usage })
         })
     }
 }
 
-/// The slice of the chat-completions response we consume.
 #[derive(Debug, Deserialize)]
-struct ApiResponse {
+struct DeepseekResponse {
     #[serde(default)]
-    choices: Vec<ApiChoice>,
+    choices: Vec<DeepseekChoice>,
     #[serde(default)]
-    usage: Option<ApiUsage>,
+    usage: Option<DeepseekUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ApiChoice {
-    message: ApiMessage,
+struct DeepseekChoice {
+    message: DeepseekMessage,
 }
 
 #[derive(Debug, Deserialize)]
-struct ApiMessage {
+struct DeepseekMessage {
     #[serde(default)]
     content: Option<String>,
 }
 
-/// DeepSeek reports cache hits both OpenAI-style (`prompt_tokens_details`) and
-/// natively (`prompt_cache_hit_tokens`); we accept either (§3.6 pricing).
 #[derive(Debug, Default, Deserialize)]
-struct ApiUsage {
+struct DeepseekUsage {
     #[serde(default)]
     prompt_tokens: i64,
     #[serde(default)]
@@ -325,95 +359,260 @@ struct ApiUsage {
     #[serde(default)]
     prompt_cache_hit_tokens: Option<i64>,
     #[serde(default)]
-    prompt_tokens_details: Option<ApiPromptTokensDetails>,
+    prompt_tokens_details: Option<PromptTokenDetails>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct ApiPromptTokensDetails {
+struct PromptTokenDetails {
     #[serde(default)]
     cached_tokens: Option<i64>,
 }
 
-/// Split `prompt_tokens` into cache-miss and cache-hit halves (§3.6 pricing).
-fn usage_from_api(u: ApiUsage) -> TokenUsage {
-    let cached = u
+fn deepseek_usage(usage: DeepseekUsage) -> TokenUsage {
+    let cached = usage
         .prompt_tokens_details
         .as_ref()
-        .and_then(|d| d.cached_tokens)
-        .or(u.prompt_cache_hit_tokens)
+        .and_then(|details| details.cached_tokens)
+        .or(usage.prompt_cache_hit_tokens)
         .unwrap_or(0)
         .max(0);
-    let prompt = u.prompt_tokens.max(0);
+    let prompt = usage.prompt_tokens.max(0);
     let cached = cached.min(prompt);
     TokenUsage {
         input_tokens: prompt - cached,
         cached_tokens: cached,
-        output_tokens: u.completion_tokens.max(0),
+        cache_write_tokens: 0,
+        output_tokens: usage.completion_tokens.max(0),
     }
 }
 
-fn classify_reqwest_error(err: reqwest::Error) -> LlmError {
-    if crate::http::is_retryable(&err) {
-        LlmError::Transient(err.to_string())
+#[derive(Debug, Clone)]
+pub struct AnthropicBackend {
+    http: reqwest::Client,
+    endpoint: String,
+    api_key: String,
+}
+
+impl AnthropicBackend {
+    pub fn new(cfg: &AnthropicConfig) -> Result<Self, LlmError> {
+        let api_key = cfg
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .ok_or(LlmError::MissingApiKey {
+                provider: "anthropic",
+                env_var: "DAILY_EPUB_ANTHROPIC__API_KEY",
+            })?
+            .to_string();
+        let http = crate::http::build_client(ANTHROPIC_TIMEOUT).map_err(|error| {
+            LlmError::api("anthropic", format!("building http client: {error}"))
+        })?;
+        Ok(Self {
+            http,
+            endpoint: format!("{}/v1/messages", cfg.base_url.trim_end_matches('/')),
+            api_key,
+        })
+    }
+}
+
+impl ChatBackend for AnthropicBackend {
+    fn complete<'a>(&'a self, req: ChatRequest) -> BoxFuture<'a, Result<ChatCompletion, LlmError>> {
+        Box::pin(async move {
+            let body = json!({
+                "model": req.model,
+                "max_tokens": 16_000,
+                "system": [{
+                    "type": "text",
+                    "text": req.system.as_str(),
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                "messages": [{"role": "user", "content": req.user}],
+                "output_config": {"effort": req.effort.as_deref().unwrap_or("high")},
+                "fallbacks": "default",
+            });
+            let response = self
+                .http
+                .post(&self.endpoint)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("anthropic-beta", ANTHROPIC_BETA)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| classify_reqwest_error("anthropic", error))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(classify_status("anthropic", status, response).await);
+            }
+            let parsed: AnthropicResponse = response.json().await.map_err(|error| {
+                LlmError::api("anthropic", format!("decoding messages response: {error}"))
+            })?;
+            if parsed.stop_reason.as_deref() == Some("refusal") {
+                return Err(LlmError::Refusal {
+                    provider: "anthropic",
+                });
+            }
+            let content = parsed
+                .content
+                .into_iter()
+                .filter(|block| block.kind == "text")
+                .filter_map(|block| block.text)
+                .collect::<Vec<_>>()
+                .join("");
+            if content.trim().is_empty() {
+                return Err(LlmError::EmptyResponse {
+                    provider: "anthropic",
+                });
+            }
+            Ok(ChatCompletion {
+                content,
+                usage: anthropic_usage(parsed.usage),
+            })
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicResponse {
+    #[serde(default)]
+    content: Vec<AnthropicContent>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    usage: AnthropicUsage,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicContent {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    cache_creation_input_tokens: i64,
+    #[serde(default)]
+    cache_read_input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+}
+
+fn anthropic_usage(usage: AnthropicUsage) -> TokenUsage {
+    TokenUsage {
+        input_tokens: usage.input_tokens.max(0),
+        cached_tokens: usage.cache_read_input_tokens.max(0),
+        cache_write_tokens: usage.cache_creation_input_tokens.max(0),
+        output_tokens: usage.output_tokens.max(0),
+    }
+}
+
+async fn classify_status(
+    provider: &'static str,
+    status: reqwest::StatusCode,
+    response: reqwest::Response,
+) -> LlmError {
+    let detail = response.text().await.unwrap_or_default();
+    let message = format!("{status}: {}", detail.chars().take(500).collect::<String>());
+    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        LlmError::transient(provider, message)
     } else {
-        LlmError::Api(err.to_string())
+        LlmError::api(provider, message)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Client
-// ---------------------------------------------------------------------------
+fn classify_reqwest_error(provider: &'static str, error: reqwest::Error) -> LlmError {
+    if crate::http::is_retryable(&error) {
+        LlmError::transient(provider, error.to_string())
+    } else {
+        LlmError::api(provider, error.to_string())
+    }
+}
 
-/// Every LLM call in the project goes through this client (notes §5).
 #[derive(Debug, Clone)]
 pub struct LlmClient {
-    /// The taste profile, sent as the first (cacheable) system message (§3.6).
+    pub provider: &'static str,
     pub system_prompt: Arc<String>,
     pub model: String,
+    pub effort: Option<String>,
     pub meter: UsageMeter,
     backend: Arc<dyn ChatBackend>,
     retry: RetryPolicy,
 }
 
 impl LlmClient {
-    /// Build against the configured base URL; fails without an API key.
     pub fn new(
         cfg: &DeepseekConfig,
         system_prompt: String,
         meter: UsageMeter,
     ) -> Result<Self, LlmError> {
         let backend = DeepseekBackend::new(cfg)?;
-        tracing::debug!(
-            base_url = %cfg.base_url,
-            model = %cfg.model,
-            system_prompt_chars = system_prompt.len(),
-            "deepseek client ready"
-        );
-        Ok(Self::with_backend(
+        Ok(Self::with_backend_options(
+            "deepseek",
             &cfg.model,
             system_prompt,
+            None,
             meter,
             Arc::new(backend),
         ))
     }
 
-    /// Construct around an arbitrary backend — the seam used by tests (notes §6).
+    pub fn new_anthropic(
+        cfg: &AnthropicConfig,
+        system_prompt: String,
+        meter: UsageMeter,
+    ) -> Result<Self, LlmError> {
+        let backend = AnthropicBackend::new(cfg)?;
+        Ok(Self::with_backend_options(
+            "anthropic",
+            &cfg.model,
+            system_prompt,
+            Some(cfg.effort.clone()),
+            meter,
+            Arc::new(backend),
+        ))
+    }
+
     pub fn with_backend(
         model: &str,
         system_prompt: String,
         meter: UsageMeter,
         backend: Arc<dyn ChatBackend>,
     ) -> Self {
+        Self::with_backend_options("mock", model, system_prompt, None, meter, backend)
+    }
+
+    pub fn with_backend_options(
+        provider: &'static str,
+        model: &str,
+        system_prompt: String,
+        effort: Option<String>,
+        meter: UsageMeter,
+        backend: Arc<dyn ChatBackend>,
+    ) -> Self {
         Self {
+            provider,
             system_prompt: Arc::new(system_prompt),
             model: model.to_string(),
+            effort,
             meter,
             backend,
             retry: RetryPolicy::default(),
         }
     }
 
-    /// Raw completion: budget check → retry loop → usage accounting.
+    #[cfg(test)]
+    fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
+    }
+
     pub async fn complete(
         &self,
         user_prompt: &str,
@@ -421,25 +620,26 @@ impl LlmClient {
         json: bool,
     ) -> Result<String, LlmError> {
         self.meter.check_budget()?;
-        let req = ChatRequest {
+        let request = ChatRequest {
             model: self.model.clone(),
             system: Arc::clone(&self.system_prompt),
             user: user_prompt.to_string(),
             temperature,
             json,
+            effort: self.effort.clone(),
         };
         let completion = self
             .retry
-            .run("deepseek chat completion", LlmError::is_transient, || {
-                self.backend.complete(req.clone())
-            })
+            .run(
+                &format!("{} chat completion", self.provider),
+                LlmError::is_transient,
+                || self.backend.complete(request.clone()),
+            )
             .await?;
         self.meter.record(completion.usage);
         Ok(completion.content)
     }
 
-    /// One chat completion returning parsed JSON of type `T`, with the system
-    /// prompt first and `response_format: json_object` (§3.6).
     pub async fn complete_json<T: serde::de::DeserializeOwned>(
         &self,
         user_prompt: &str,
@@ -447,20 +647,20 @@ impl LlmClient {
     ) -> Result<T, LlmError> {
         let raw = self.complete(user_prompt, temperature, true).await?;
         let cleaned = strip_code_fence(&raw);
-        match serde_json::from_str::<T>(cleaned) {
-            Ok(v) => Ok(v),
-            Err(e) => {
+        match serde_json::from_str(cleaned) {
+            Ok(value) => Ok(value),
+            Err(error) => {
                 tracing::warn!(
-                    error = %e,
+                    provider = self.provider,
+                    %error,
                     preview = %cleaned.chars().take(400).collect::<String>(),
-                    "deepseek returned malformed JSON"
+                    "llm returned malformed JSON"
                 );
-                Err(LlmError::Json(e))
+                Err(LlmError::Json(error))
             }
         }
     }
 
-    /// One plain-text completion (used for the front page / intros) (§3.6).
     pub async fn complete_text(
         &self,
         user_prompt: &str,
@@ -470,7 +670,66 @@ impl LlmClient {
     }
 }
 
-/// Models occasionally wrap JSON in ```` ```json ```` fences despite `json_object`.
+/// The two provider clients the pipeline works with (§4.2).
+///
+/// Both share the exact same system prompt string (§8.4). Each has its own
+/// [`UsageMeter`] with its own price table and `max_daily_usd` (§5).
+#[derive(Debug, Clone, Default)]
+pub struct Llms {
+    /// DeepSeek — scoring, and the fallback for every editor call.
+    pub bulk: Option<LlmClient>,
+    /// Claude — selection, summaries, the brief, the profile rebuild.
+    pub editor: Option<LlmClient>,
+}
+
+impl Llms {
+    /// Build both clients from config with one shared system prompt.
+    ///
+    /// A missing key or `anthropic.enabled = false` leaves that slot `None` with
+    /// a log line; nothing here is fatal because the paper always publishes (§17).
+    pub fn from_config(
+        deepseek: &DeepseekConfig,
+        anthropic: &AnthropicConfig,
+        system_prompt: String,
+        bulk_meter: UsageMeter,
+        editor_meter: UsageMeter,
+    ) -> Self {
+        let bulk = match LlmClient::new(deepseek, system_prompt.clone(), bulk_meter) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                tracing::warn!(%error, "DeepSeek (bulk) is unavailable");
+                None
+            }
+        };
+        let editor = if anthropic.enabled {
+            match LlmClient::new_anthropic(anthropic, system_prompt, editor_meter) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    tracing::warn!(%error, "Anthropic (editor) is unavailable; editor work falls back to bulk");
+                    None
+                }
+            }
+        } else {
+            tracing::info!("anthropic.enabled = false; editor work runs on the bulk provider");
+            None
+        };
+        Self { bulk, editor }
+    }
+
+    /// The editor when configured and its meter is not tripped, else bulk.
+    pub fn editor_or_bulk(&self) -> Option<&LlmClient> {
+        self.editor
+            .as_ref()
+            .filter(|client| !client.meter.budget_exceeded())
+            .or(self.bulk.as_ref())
+    }
+
+    /// True when no provider at all is available (`--skip-llm` or no keys).
+    pub fn is_empty(&self) -> bool {
+        self.bulk.is_none() && self.editor.is_none()
+    }
+}
+
 pub fn strip_code_fence(raw: &str) -> &str {
     let trimmed = raw.trim();
     let Some(rest) = trimmed.strip_prefix("```") else {
@@ -483,15 +742,9 @@ pub fn strip_code_fence(raw: &str) -> &str {
         .trim()
 }
 
-// ---------------------------------------------------------------------------
-// Test backend
-// ---------------------------------------------------------------------------
-
-/// Canned-response backend for tests: pops scripted replies in order (notes §6).
 #[derive(Debug, Default)]
 pub struct MockBackend {
-    scripted: Mutex<std::collections::VecDeque<Result<ChatCompletion, String>>>,
-    /// Every prompt the code under test sent, in order.
+    scripted: Mutex<std::collections::VecDeque<Result<ChatCompletion, LlmError>>>,
     pub seen: Mutex<Vec<ChatRequest>>,
 }
 
@@ -500,44 +753,49 @@ impl MockBackend {
         Self::default()
     }
 
-    /// Queue a successful reply carrying `usage` tokens.
     pub fn push(&self, content: impl Into<String>, usage: TokenUsage) {
-        if let Ok(mut q) = self.scripted.lock() {
-            q.push_back(Ok(ChatCompletion {
+        if let Ok(mut queue) = self.scripted.lock() {
+            queue.push_back(Ok(ChatCompletion {
                 content: content.into(),
                 usage,
             }));
         }
     }
 
-    /// Queue a permanent (non-retryable) failure.
     pub fn push_error(&self, message: impl Into<String>) {
-        if let Ok(mut q) = self.scripted.lock() {
-            q.push_back(Err(message.into()));
+        self.push_llm_error(LlmError::api("mock", message));
+    }
+
+    pub fn push_llm_error(&self, error: LlmError) {
+        if let Ok(mut queue) = self.scripted.lock() {
+            queue.push_back(Err(error));
         }
     }
 
     pub fn calls(&self) -> usize {
-        self.seen.lock().map(|s| s.len()).unwrap_or(0)
+        self.seen.lock().map(|seen| seen.len()).unwrap_or(0)
     }
 
     pub fn prompts(&self) -> Vec<ChatRequest> {
-        self.seen.lock().map(|s| s.clone()).unwrap_or_default()
+        self.seen
+            .lock()
+            .map(|seen| seen.clone())
+            .unwrap_or_default()
     }
 }
 
 impl ChatBackend for MockBackend {
     fn complete<'a>(&'a self, req: ChatRequest) -> BoxFuture<'a, Result<ChatCompletion, LlmError>> {
         Box::pin(async move {
-            let next = self.scripted.lock().ok().and_then(|mut q| q.pop_front());
+            let next = self
+                .scripted
+                .lock()
+                .ok()
+                .and_then(|mut queue| queue.pop_front());
             if let Ok(mut seen) = self.seen.lock() {
                 seen.push(req);
             }
-            match next {
-                Some(Ok(c)) => Ok(c),
-                Some(Err(msg)) => Err(LlmError::Api(msg)),
-                None => Err(LlmError::Api("mock backend ran out of responses".into())),
-            }
+            next.unwrap_or_else(|| Err(LlmError::api("mock", "mock backend ran out of responses")))
         })
     }
 }
@@ -545,6 +803,13 @@ impl ChatBackend for MockBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::post;
+    use axum::{Json, Router};
 
     fn cfg() -> DeepseekConfig {
         DeepseekConfig::default()
@@ -554,9 +819,14 @@ mod tests {
         TokenUsage {
             input_tokens: input,
             cached_tokens: cached,
+            cache_write_tokens: 0,
             output_tokens: output,
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Meter and pricing
+    // -----------------------------------------------------------------------
 
     #[test]
     fn meter_accumulates_and_prices() {
@@ -567,9 +837,24 @@ mod tests {
         assert_eq!(total.input_tokens, 1_000_000);
         assert_eq!(total.cached_tokens, 1_000_000);
         assert_eq!(total.output_tokens, 1_000_000);
+        // The DeepSeek path prices exactly as before the cache-write counter.
         assert!((meter.cost_usd() - 0.4228).abs() < 1e-9);
         assert!(!meter.budget_exceeded());
         assert!(meter.check_budget().is_ok());
+    }
+
+    #[test]
+    fn anthropic_price_table_charges_cache_reads_and_writes() {
+        let meter =
+            UsageMeter::with_prices(PriceTable::anthropic(&AnthropicConfig::default()), 100.0);
+        meter.record(TokenUsage {
+            input_tokens: 1_000_000,
+            cached_tokens: 1_000_000,
+            cache_write_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+        });
+        // 5 + 0.5 + 6.25 + 25
+        assert!((meter.cost_usd() - 36.75).abs() < 1e-9);
     }
 
     #[test]
@@ -591,31 +876,50 @@ mod tests {
         let meter = UsageMeter::new(&cfg(), 1.0);
         meter.preload_cost(0.5);
         assert!(!meter.budget_exceeded());
+        assert!((meter.spent_usd() - 0.5).abs() < 1e-9);
         meter.preload_cost(1.5);
         assert!(meter.budget_exceeded());
     }
 
     #[test]
-    fn usage_split_uses_prompt_token_details() {
-        let u: ApiUsage = serde_json::from_str(
+    fn deepseek_usage_split_uses_prompt_token_details() {
+        let u: DeepseekUsage = serde_json::from_str(
             r#"{"prompt_tokens": 1000, "completion_tokens": 120, "total_tokens": 1120,
                 "prompt_tokens_details": {"cached_tokens": 800}}"#,
         )
         .expect("fixture usage");
-        assert_eq!(usage_from_api(u), tokens(200, 800, 120));
+        assert_eq!(deepseek_usage(u), tokens(200, 800, 120));
     }
 
     #[test]
-    fn usage_falls_back_to_deepseek_native_cache_fields() {
-        let u: ApiUsage = serde_json::from_str(
+    fn deepseek_usage_falls_back_to_native_cache_fields() {
+        let u: DeepseekUsage = serde_json::from_str(
             r#"{"prompt_tokens": 500, "completion_tokens": 40,
                 "prompt_cache_hit_tokens": 448, "prompt_cache_miss_tokens": 52}"#,
         )
         .expect("fixture usage");
-        assert_eq!(usage_from_api(u), tokens(52, 448, 40));
+        assert_eq!(deepseek_usage(u), tokens(52, 448, 40));
         // Missing usage is not an error, just zero.
-        let empty: ApiUsage = serde_json::from_str("{}").expect("empty usage");
-        assert_eq!(usage_from_api(empty), TokenUsage::default());
+        let empty: DeepseekUsage = serde_json::from_str("{}").expect("empty usage");
+        assert_eq!(deepseek_usage(empty), TokenUsage::default());
+    }
+
+    #[test]
+    fn anthropic_usage_maps_cache_fields() {
+        let u: AnthropicUsage = serde_json::from_str(
+            r#"{"input_tokens": 120, "cache_creation_input_tokens": 3000,
+                "cache_read_input_tokens": 0, "output_tokens": 800}"#,
+        )
+        .expect("fixture usage");
+        assert_eq!(
+            anthropic_usage(u),
+            TokenUsage {
+                input_tokens: 120,
+                cached_tokens: 0,
+                cache_write_tokens: 3000,
+                output_tokens: 800,
+            }
+        );
     }
 
     #[test]
@@ -624,6 +928,10 @@ mod tests {
         assert_eq!(strip_code_fence("```json\n{\"a\":1}\n```"), "{\"a\":1}");
         assert_eq!(strip_code_fence("```\n{\"a\":1}\n```"), "{\"a\":1}");
     }
+
+    // -----------------------------------------------------------------------
+    // LlmClient over the mock backend
+    // -----------------------------------------------------------------------
 
     fn client(backend: Arc<MockBackend>, limit: f64) -> LlmClient {
         LlmClient::with_backend(
@@ -694,15 +1002,381 @@ mod tests {
         assert!(matches!(out, Err(LlmError::Json(_))));
     }
 
+    #[tokio::test]
+    async fn refusals_are_not_retried_and_keep_their_variant() {
+        let backend = Arc::new(MockBackend::new());
+        backend.push_llm_error(LlmError::Refusal {
+            provider: "anthropic",
+        });
+        backend.push("{}", TokenUsage::default());
+        let llm = client(Arc::clone(&backend), 2.0).with_retry(RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+        });
+        let err = llm.complete_text("x", 0.3).await.expect_err("refusal");
+        assert!(matches!(
+            err,
+            LlmError::Refusal {
+                provider: "anthropic"
+            }
+        ));
+        assert_eq!(backend.calls(), 1, "a refusal is terminal for that client");
+    }
+
     #[test]
-    fn missing_api_key_is_reported() {
-        let cfg = DeepseekConfig {
+    fn missing_api_keys_name_their_provider() {
+        let deepseek = DeepseekConfig {
             api_key: Some("   ".into()),
             ..DeepseekConfig::default()
         };
+        let err = DeepseekBackend::new(&deepseek).expect_err("blank key");
         assert!(matches!(
-            DeepseekBackend::new(&cfg),
-            Err(LlmError::MissingApiKey)
+            err,
+            LlmError::MissingApiKey {
+                provider: "deepseek",
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("DAILY_EPUB_DEEPSEEK__API_KEY"));
+
+        let anthropic = AnthropicConfig::default();
+        let err = AnthropicBackend::new(&anthropic).expect_err("no key");
+        assert!(matches!(
+            err,
+            LlmError::MissingApiKey {
+                provider: "anthropic",
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("DAILY_EPUB_ANTHROPIC__API_KEY"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Llms
+    // -----------------------------------------------------------------------
+
+    fn mock_client(provider: &'static str, limit: f64) -> (LlmClient, Arc<MockBackend>) {
+        let backend = Arc::new(MockBackend::new());
+        let prices = if provider == "anthropic" {
+            PriceTable::anthropic(&AnthropicConfig::default())
+        } else {
+            PriceTable::deepseek(&cfg())
+        };
+        let client = LlmClient::with_backend_options(
+            provider,
+            "model",
+            "SYSTEM".into(),
+            None,
+            UsageMeter::with_prices(prices, limit),
+            Arc::clone(&backend) as Arc<dyn ChatBackend>,
+        );
+        (client, backend)
+    }
+
+    #[test]
+    fn editor_or_bulk_prefers_an_untripped_editor() {
+        let (bulk, _) = mock_client("deepseek", 2.0);
+        let (editor, _) = mock_client("anthropic", 3.0);
+        let llms = Llms {
+            bulk: Some(bulk),
+            editor: Some(editor),
+        };
+        assert_eq!(llms.editor_or_bulk().map(|c| c.provider), Some("anthropic"));
+        // Trip the editor's meter: bulk takes over.
+        llms.editor
+            .as_ref()
+            .expect("editor")
+            .meter
+            .preload_cost(10.0);
+        assert_eq!(llms.editor_or_bulk().map(|c| c.provider), Some("deepseek"));
+        // No bulk and a tripped editor means no client at all.
+        let only_editor = Llms {
+            bulk: None,
+            editor: llms.editor.clone(),
+        };
+        assert!(only_editor.editor_or_bulk().is_none());
+        assert!(Llms::default().is_empty());
+        assert!(Llms::default().editor_or_bulk().is_none());
+    }
+
+    #[test]
+    fn from_config_without_keys_yields_no_clients() {
+        let llms = Llms::from_config(
+            &cfg(),
+            &AnthropicConfig::default(),
+            "SYSTEM".into(),
+            UsageMeter::new(&cfg(), 1.0),
+            UsageMeter::with_prices(PriceTable::anthropic(&AnthropicConfig::default()), 1.0),
+        );
+        assert!(llms.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // AnthropicBackend against a loopback listener (§4.2, §20)
+    // -----------------------------------------------------------------------
+
+    #[derive(Clone, Default)]
+    struct FakeAnthropic {
+        seen: Arc<Mutex<Vec<(HeaderMap, serde_json::Value)>>>,
+        scripted: Arc<Mutex<VecDeque<(StatusCode, serde_json::Value)>>>,
+    }
+
+    impl FakeAnthropic {
+        fn push(&self, status: StatusCode, body: serde_json::Value) {
+            self.scripted
+                .lock()
+                .expect("script lock")
+                .push_back((status, body));
+        }
+
+        fn requests(&self) -> Vec<(HeaderMap, serde_json::Value)> {
+            self.seen.lock().expect("seen lock").clone()
+        }
+    }
+
+    async fn handle(
+        State(fake): State<FakeAnthropic>,
+        headers: HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        fake.seen.lock().expect("seen lock").push((headers, body));
+        let (status, body) = fake
+            .scripted
+            .lock()
+            .expect("script lock")
+            .pop_front()
+            .unwrap_or((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": "unscripted"}),
+            ));
+        (status, Json(body))
+    }
+
+    async fn serve(fake: FakeAnthropic) -> String {
+        let app = Router::new()
+            .route("/v1/messages", post(handle))
+            .with_state(fake);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    async fn anthropic_client(fake: FakeAnthropic, limit: f64) -> LlmClient {
+        let base_url = serve(fake).await;
+        let config = AnthropicConfig {
+            base_url,
+            api_key: Some("test-key-never-logged".into()),
+            effort: "medium".into(),
+            ..AnthropicConfig::default()
+        };
+        LlmClient::new_anthropic(
+            &config,
+            "PROFILE SYSTEM PROMPT".into(),
+            UsageMeter::with_prices(PriceTable::anthropic(&config), limit),
+        )
+        .expect("client")
+        .with_retry(RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+        })
+    }
+
+    fn ok_message(text: &str, stop_reason: &str) -> serde_json::Value {
+        json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [
+                {"type": "thinking", "thinking": ""},
+                {"type": "text", "text": text}
+            ],
+            "stop_reason": stop_reason,
+            "usage": {
+                "input_tokens": 1_000_000,
+                "cache_creation_input_tokens": 1_000_000,
+                "cache_read_input_tokens": 1_000_000,
+                "output_tokens": 1_000_000
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn anthropic_request_has_the_documented_shape() {
+        let fake = FakeAnthropic::default();
+        fake.push(
+            StatusCode::OK,
+            ok_message("```json\n{\"ok\": true}\n```", "end_turn"),
+        );
+        let llm = anthropic_client(fake.clone(), 100.0).await;
+
+        let out: serde_json::Value = llm
+            .complete_json("the task", 0.7)
+            .await
+            .expect("completion");
+        assert_eq!(out, json!({"ok": true}));
+
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 1);
+        let (headers, body) = &requests[0];
+        assert_eq!(
+            headers.get("x-api-key").and_then(|v| v.to_str().ok()),
+            Some("test-key-never-logged")
+        );
+        assert_eq!(
+            headers
+                .get("anthropic-version")
+                .and_then(|v| v.to_str().ok()),
+            Some("2023-06-01")
+        );
+        assert_eq!(
+            headers.get("anthropic-beta").and_then(|v| v.to_str().ok()),
+            Some("server-side-fallback-2026-07-01")
+        );
+        assert!(
+            headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.starts_with("application/json"))
+        );
+
+        assert_eq!(body["model"], "claude-opus-5");
+        assert_eq!(body["max_tokens"], 16_000);
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "PROFILE SYSTEM PROMPT");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "the task");
+        assert_eq!(body["output_config"]["effort"], "medium");
+        assert_eq!(body["fallbacks"], "default");
+        for forbidden in [
+            "temperature",
+            "top_p",
+            "top_k",
+            "thinking",
+            "response_format",
+        ] {
+            assert!(
+                body.get(forbidden).is_none(),
+                "{forbidden} must not be sent"
+            );
+        }
+        assert_eq!(
+            body["messages"].as_array().map(Vec::len),
+            Some(1),
+            "no prefill"
+        );
+
+        // Usage was priced with the cache read/write rates: 5 + 6.25 + 0.5 + 25.
+        assert_eq!(
+            llm.meter.total(),
+            TokenUsage {
+                input_tokens: 1_000_000,
+                cached_tokens: 1_000_000,
+                cache_write_tokens: 1_000_000,
+                output_tokens: 1_000_000,
+            }
+        );
+        assert!((llm.meter.cost_usd() - 36.75).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn anthropic_refusal_surfaces_as_the_fallback_error() {
+        let fake = FakeAnthropic::default();
+        fake.push(
+            StatusCode::OK,
+            json!({
+                "content": [],
+                "stop_reason": "refusal",
+                "stop_details": {"type": "refusal", "category": "cyber"},
+                "usage": {"input_tokens": 0, "output_tokens": 0}
+            }),
+        );
+        let llm = anthropic_client(fake.clone(), 100.0).await;
+        let err = llm.complete_text("x", 0.3).await.expect_err("refusal");
+        assert!(matches!(
+            err,
+            LlmError::Refusal {
+                provider: "anthropic"
+            }
+        ));
+        assert!(!err.is_transient());
+        assert_eq!(fake.requests().len(), 1, "a refusal is never retried");
+    }
+
+    #[tokio::test]
+    async fn anthropic_429_is_retried_but_400_is_not() {
+        let fake = FakeAnthropic::default();
+        fake.push(
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"type": "error", "error": {"type": "rate_limit_error"}}),
+        );
+        fake.push(
+            StatusCode::OK,
+            ok_message("{\"after\": \"retry\"}", "end_turn"),
+        );
+        let llm = anthropic_client(fake.clone(), 100.0).await;
+        let text = llm.complete_text("x", 0.3).await.expect("second attempt");
+        assert_eq!(text, "{\"after\": \"retry\"}");
+        assert_eq!(fake.requests().len(), 2);
+
+        let fake = FakeAnthropic::default();
+        fake.push(
+            StatusCode::BAD_REQUEST,
+            json!({"type": "error", "error": {"type": "invalid_request_error", "message": "nope"}}),
+        );
+        let llm = anthropic_client(fake.clone(), 100.0).await;
+        let err = llm.complete_text("x", 0.3).await.expect_err("400");
+        assert!(matches!(
+            err,
+            LlmError::Api {
+                provider: "anthropic",
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("400"));
+        assert_eq!(fake.requests().len(), 1, "400 is never retried");
+    }
+
+    #[tokio::test]
+    async fn anthropic_concatenates_text_blocks_and_rejects_empty_output() {
+        let fake = FakeAnthropic::default();
+        fake.push(
+            StatusCode::OK,
+            json!({
+                "content": [
+                    {"type": "text", "text": "{\"a\": "},
+                    {"type": "thinking", "thinking": "..."},
+                    {"type": "text", "text": "1}"}
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+        );
+        fake.push(
+            StatusCode::OK,
+            json!({
+                "content": [{"type": "thinking", "thinking": ""}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 0}
+            }),
+        );
+        let llm = anthropic_client(fake.clone(), 100.0).await;
+        let out: serde_json::Value = llm.complete_json("x", 0.3).await.expect("joined");
+        assert_eq!(out, json!({"a": 1}));
+        let err = llm.complete_text("y", 0.3).await.expect_err("empty");
+        assert!(matches!(
+            err,
+            LlmError::EmptyResponse {
+                provider: "anthropic"
+            }
         ));
     }
 }

@@ -1,10 +1,10 @@
 {
   "picks": [
-    { "id": 101, "section": "Top Stories", "position": 1, "lead_story": true },
-    { "id": 102, "section": "Tech & Engineering", "position": 1, "lead_story": false },
-    { "id": 103, "section": "Tech & Engineering", "position": 2, "lead_story": false },
-    { "id": 104, "section": "AI & Machine Learning", "position": 1, "lead_story": false },
-    { "id": 105, "section": "Boston & Local", "position": 1, "lead_story": false },
+    { "id": 101, "section": "Top Stories", "position": 1, "lead_story": true, "why": "The migration post-mortem with the invoices still attached" },
+    { "id": 102, "section": "Tech & Engineering", "position": 1, "lead_story": false, "why": "A failover story you'd argue with over coffee" },
+    { "id": 103, "section": "Tech & Engineering", "position": 2, "lead_story": false, "why": "Rare first-hand detail on a tool you use daily" },
+    { "id": 104, "section": "AI & Machine Learning", "position": 1, "lead_story": false, "why": "The one benchmark piece this week that shows its work" },
+    { "id": 105, "section": "Boston & Local", "position": 1, "lead_story": false, "why": "MBTA slow zones charted by a rider, not a press office" },
     { "id": 106, "section": "Culture & Essays", "position": 1 },
     { "section": "Niche Corner", "position": 2, "lead_story": false },
     "the model sometimes trails off like this"

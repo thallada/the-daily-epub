@@ -13,6 +13,9 @@
 {% if !entry.summary.is_empty() %}
           <p class="index-summary">{{ entry.summary }}</p>
 {% endif %}
+{% if let Some(text) = entry.why %}
+          <p class="index-why"><em>Why it&#39;s here: {{ text }}</em></p>
+{% endif %}
         </li>
 {% endfor %}
       </ul>

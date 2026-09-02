@@ -71,6 +71,8 @@ pub struct StageCounts {
     pub candidates: i64,
     /// Articles scored by the LLM (§3.6 stage A).
     pub llm_scored: i64,
+    /// Candidates left unscored after failures or a bulk-provider budget trip (§5).
+    pub llm_unscored: i64,
     /// Articles in the final lineup (§3.6 stage B).
     pub selected: i64,
     /// Discussion chapters rendered (§3.7).
@@ -93,6 +95,14 @@ impl StageTimings {
     }
 }
 
+/// Usage and computed cost for one provider in this run (§5).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderUsage {
+    #[serde(flatten)]
+    pub usage: TokenUsage,
+    pub cost_usd: f64,
+}
+
 /// The full summary of one `generate` invocation (§3.13).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunReport {
@@ -101,7 +111,12 @@ pub struct RunReport {
     pub finished_at: Option<Timestamp>,
     pub status: RunStatus,
     pub counts: StageCounts,
+    /// Aggregate usage retained for the legacy `runs` columns.
     pub usage: TokenUsage,
+    /// Provider-keyed usage and cost written to `runs.provider_costs_json`.
+    pub provider_costs: BTreeMap<String, ProviderUsage>,
+    /// Resolved curation/editorial/model settings for this run.
+    pub config_json: serde_json::Value,
     pub cost_usd: f64,
     pub timings: StageTimings,
     /// Ingest window actually used, RFC3339 (§3.1).
@@ -124,6 +139,8 @@ impl RunReport {
             status: RunStatus::Running,
             counts: StageCounts::default(),
             usage: TokenUsage::default(),
+            provider_costs: BTreeMap::new(),
+            config_json: serde_json::Value::Null,
             cost_usd: 0.0,
             timings: StageTimings::default(),
             window_start: None,
@@ -146,16 +163,15 @@ impl RunReport {
         self.error = Some(err.to_string());
     }
 
-    /// Stamp the end time, compute cost from [`TokenUsage`] and settle the status.
-    pub fn finish(
-        &mut self,
-        finished_at: Timestamp,
-        price_input: f64,
-        price_cached: f64,
-        price_output: f64,
-    ) {
+    /// Stamp the end time, total provider costs and settle the status.
+    pub fn finish(&mut self, finished_at: Timestamp) {
         self.finished_at = Some(finished_at);
-        self.cost_usd = self.usage.cost_usd(price_input, price_cached, price_output);
+        self.usage = TokenUsage::default();
+        self.cost_usd = 0.0;
+        for provider in self.provider_costs.values() {
+            self.usage.add(provider.usage);
+            self.cost_usd += provider.cost_usd;
+        }
         if self.status == RunStatus::Running {
             self.status = if self.warnings.is_empty() {
                 RunStatus::Ok
@@ -215,17 +231,37 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn usage(input: i64, cached: i64, cache_write: i64, output: i64) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            cached_tokens: cached,
+            cache_write_tokens: cache_write,
+            output_tokens: output,
+        }
+    }
+
     #[test]
-    fn finish_computes_cost_and_status() {
+    fn finish_totals_provider_costs_and_settles_status() {
         let mut r = RunReport::new("2026-08-15".parse().unwrap(), ts("2026-08-15T05:30:00Z"));
-        r.usage.add(TokenUsage {
-            input_tokens: 1_000_000,
-            cached_tokens: 1_000_000,
-            output_tokens: 1_000_000,
-        });
-        r.finish(ts("2026-08-15T05:36:00Z"), 0.14, 0.0028, 0.28);
+        r.provider_costs.insert(
+            "deepseek".into(),
+            ProviderUsage {
+                usage: usage(1_000_000, 1_000_000, 0, 1_000_000),
+                cost_usd: 0.4228,
+            },
+        );
+        r.provider_costs.insert(
+            "anthropic".into(),
+            ProviderUsage {
+                usage: usage(100, 3_000, 2_000, 800),
+                cost_usd: 0.05,
+            },
+        );
+        r.finish(ts("2026-08-15T05:36:00Z"));
         assert_eq!(r.status, RunStatus::Ok);
-        assert!((r.cost_usd - 0.4228).abs() < 1e-9);
+        assert!((r.cost_usd - 0.4728).abs() < 1e-9);
+        // The legacy aggregate columns are the sum across providers.
+        assert_eq!(r.usage, usage(1_000_100, 1_003_000, 2_000, 1_000_800));
         assert_eq!(r.duration_secs(), Some(360));
     }
 
@@ -233,7 +269,7 @@ mod tests {
     fn warnings_degrade_the_run() {
         let mut r = RunReport::new("2026-08-15".parse().unwrap(), ts("2026-08-15T05:30:00Z"));
         r.warn("xtc converter missing");
-        r.finish(ts("2026-08-15T05:31:00Z"), 0.14, 0.0028, 0.28);
+        r.finish(ts("2026-08-15T05:31:00Z"));
         assert_eq!(r.status, RunStatus::Degraded);
         assert_eq!(r.warnings.len(), 1);
     }
@@ -242,15 +278,31 @@ mod tests {
     fn serializes_round_trip() {
         let mut r = RunReport::new("2026-08-15".parse().unwrap(), ts("2026-08-15T05:30:00Z"));
         r.counts.entries_fetched = 412;
+        r.counts.llm_unscored = 3;
         r.per_feed_counts.insert("Hacker News".into(), 30);
         r.per_feed_counts.insert("Lobsters".into(), 12);
         r.timings.record("ingest", 1500);
-        r.finish(ts("2026-08-15T05:31:00Z"), 0.14, 0.0028, 0.28);
+        r.config_json = serde_json::json!({"models": {"editor": "claude-opus-5"}});
+        r.provider_costs.insert(
+            "anthropic".into(),
+            ProviderUsage {
+                usage: usage(1, 2, 3, 4),
+                cost_usd: 0.01,
+            },
+        );
+        r.finish(ts("2026-08-15T05:31:00Z"));
         let json = r.to_json();
         let back: RunReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back, r);
         assert_eq!(back.top_feeds(1), vec![("Hacker News", 30)]);
         assert_eq!(back.timings.total_ms(), 1500);
         assert!(back.summary_line().contains("412 entries"));
+        // `ProviderUsage` flattens the token counts next to the cost.
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["provider_costs"]["anthropic"]["cache_write_tokens"],
+            3
+        );
+        assert_eq!(value["provider_costs"]["anthropic"]["cost_usd"], 0.01);
     }
 }

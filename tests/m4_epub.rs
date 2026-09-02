@@ -320,7 +320,14 @@ fn colophon_facts_are_x4_safe_distinct_paragraphs() {
     for edition in [Edition::Standard, Edition::X4] {
         let (_dir, _, zip) = build_edition_to_bytes(&issue, edition);
         let colophon = read_entry(&zip, "OEBPS/colophon.xhtml");
-        assert_eq!(colophon.matches("<p class=\"fact-line\">").count(), 9);
+        // Issue, generated, three model lines, entries, candidates, articles,
+        // words, two per-provider cost lines, the total, generator (§15.1).
+        assert_eq!(colophon.matches("<p class=\"fact-line\">").count(), 13);
+        assert!(colophon.contains("<strong>Editor model:</strong> claude-opus-5"));
+        assert!(colophon.contains("<strong>Bulk model:</strong> deepseek-v4-flash"));
+        assert!(colophon.contains("<strong>anthropic cost:</strong> $0.0500"));
+        assert!(colophon.contains("<strong>deepseek cost:</strong> $0.0231"));
+        assert!(colophon.contains("<strong>Total token cost:</strong>"));
         assert!(!colophon.contains("<dl"));
         assert!(!colophon.contains("<dt"));
         assert!(!colophon.contains("<dd"));
