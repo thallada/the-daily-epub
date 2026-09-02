@@ -367,12 +367,8 @@ async fn run_stages(
     report.counts.social_hits = enricher.enrich_all(&mut articles).await as i64;
     report.timings.record("social", elapsed_ms(stage));
 
-    // --- Stage 6: feed priors, then the heuristic pre-filter (§3.5, §3.9) ---
+    // --- Stage 6: heuristic pre-filter (§3.5) ---
     let stage = Timestamp::now();
-    if let Err(e) = profile::rebuild_feed_priors(db).await {
-        report.warn(format!("could not rebuild feed priors: {e:#}"));
-    }
-
     let meter = UsageMeter::new(&config.deepseek, config.max_daily_usd);
     // `max_daily_usd` is a ceiling for the *day*, not for one invocation, so a
     // re-run inherits what earlier runs for this date already spent (§3.6).
@@ -591,11 +587,14 @@ async fn build_llm(
     meter: &UsageMeter,
     report: &mut RunReport,
 ) -> Option<LlmClient> {
-    if ctx.skip_llm {
-        tracing::info!("--skip-llm: no DeepSeek call will be made");
-        return None;
-    }
-    let profile = match profile::load_or_build(ctx.db, &ctx.config.interests_opml).await {
+    let profile = match profile::load_or_build(
+        ctx.db,
+        &ctx.config.interests_opml,
+        &ctx.config.profile_path,
+        ctx.config.curation.feedback.verdicts_in_prompt,
+    )
+    .await
+    {
         Ok(profile) => profile,
         Err(e) => {
             report.warn(format!(
@@ -604,6 +603,10 @@ async fn build_llm(
             return None;
         }
     };
+    if ctx.skip_llm {
+        tracing::info!("--skip-llm: profile rebuilt; no DeepSeek call will be made");
+        return None;
+    }
     let client = match LlmClient::new(&ctx.config.deepseek, profile.text, meter.clone()) {
         Ok(client) => client,
         Err(e) => {
@@ -616,7 +619,15 @@ async fn build_llm(
 
     // Weekly rewrite of the "learned adjustments" section (§3.6c). It changes the
     // system prompt, so the client is rebuilt around the new profile.
-    match profile::weekly_rebuild_if_due(ctx.db, &client, &ctx.config.interests_opml).await {
+    match profile::weekly_rebuild_if_due(
+        ctx.db,
+        &client,
+        &ctx.config.interests_opml,
+        &ctx.config.profile_path,
+        ctx.config.curation.feedback.verdicts_in_prompt,
+    )
+    .await
+    {
         Ok(Some(rebuilt)) => {
             tracing::info!(version = rebuilt.version, "taste profile rebuilt");
             match LlmClient::new(&ctx.config.deepseek, rebuilt.text, meter.clone()) {

@@ -425,7 +425,6 @@ mod tests {
             article: article(id, title, words),
             prefilter_score: 50.0,
             social_score: 0.0,
-            feed_prior: 0.5,
             llm: None,
             auto_include: false,
         }

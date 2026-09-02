@@ -5,14 +5,14 @@
 //! both sides. It lives here and nowhere else:
 //!
 //! ```text
-//! message = "{issue_date}/{article_id}/{up|down}"
+//! message = "{issue_date}/{article_id}/{loved|good|down}"
 //! token   = hex(hmac_sha256(secret, message))[..16]
 //! link    = {public_url}/r/{issue_date}/{article_id}/{vote}?t={token}
 //! ```
 //!
 //! Pinned test vector, asserted from three places (here, `epub::build`,
 //! `tests/m7_server.rs`): `secret = "test-secret"`, date `2026-08-15`,
-//! article `42`, `up` → `3b314cf7e6d8f50f`.
+//! article `42`, `loved` (with legacy `up` verification).
 
 use hmac::{Hmac, KeyInit, Mac};
 use jiff::civil::Date;
@@ -23,17 +23,26 @@ use crate::types::{ArticleId, Vote};
 /// Characters of the hex HMAC kept in rating links (§3.9).
 pub const TOKEN_LEN: usize = 16;
 
-/// The exact signed string: `{issue_date}/{article_id}/{up|down}` (§3.9).
+/// The exact signed string: `{issue_date}/{article_id}/{loved|good|down}` (§3.9).
 pub fn rating_message(issue_date: Date, article_id: ArticleId, vote: Vote) -> String {
     format!("{issue_date}/{article_id}/{}", vote.as_str())
 }
 
 /// `hex(hmac_sha256(secret, "{issue_date}/{article_id}/{vote}"))[..16]` (§3.9).
 pub fn rating_token(secret: &str, issue_date: Date, article_id: ArticleId, vote: Vote) -> String {
+    rating_token_for_segment(secret, issue_date, article_id, vote.as_str())
+}
+
+fn rating_token_for_segment(
+    secret: &str,
+    issue_date: Date,
+    article_id: ArticleId,
+    segment: &str,
+) -> String {
     // `Hmac` derives a fixed-size key from any input length, so this never fails.
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(secret.as_bytes())
         .expect("HMAC accepts keys of any length");
-    mac.update(rating_message(issue_date, article_id, vote).as_bytes());
+    mac.update(format!("{issue_date}/{article_id}/{segment}").as_bytes());
     let digest = hex::encode(mac.finalize().into_bytes());
     digest[..TOKEN_LEN].to_string()
 }
@@ -46,10 +55,16 @@ pub fn verify_token(
     vote: Vote,
     token: &str,
 ) -> bool {
-    constant_time_eq(
-        rating_token(secret, issue_date, article_id, vote).as_bytes(),
-        token.as_bytes(),
-    )
+    let current = rating_token(secret, issue_date, article_id, vote);
+    if constant_time_eq(current.as_bytes(), token.as_bytes()) {
+        return true;
+    }
+    // Already-published `up` links were signed over the literal legacy segment.
+    vote == Vote::Loved
+        && constant_time_eq(
+            rating_token_for_segment(secret, issue_date, article_id, "up").as_bytes(),
+            token.as_bytes(),
+        )
 }
 
 /// Length-independent, data-independent byte comparison.
@@ -67,7 +82,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Full rating URL embedded in an article footer:
-/// `{public_url}/r/{date}/{article_id}/{up|down}?t={token}` (§3.9).
+/// `{public_url}/r/{date}/{article_id}/{loved|good|down}?t={token}` (§3.9).
 pub fn rating_url(
     public_url: &str,
     secret: &str,
@@ -92,50 +107,55 @@ mod tests {
     }
 
     #[test]
-    fn token_matches_the_shared_vector() {
-        assert_eq!(rating_message(date(), 42, Vote::Up), "2026-08-15/42/up");
-        assert_eq!(
-            rating_token("test-secret", date(), 42, Vote::Up),
-            "3b314cf7e6d8f50f"
-        );
-        assert_eq!(rating_token("test-secret", date(), 42, Vote::Up).len(), 16);
+    fn all_three_tokens_verify_and_are_distinct() {
+        let votes = [Vote::Loved, Vote::Good, Vote::NotForMe];
+        let tokens: Vec<String> = votes
+            .iter()
+            .map(|vote| rating_token("test-secret", date(), 42, *vote))
+            .collect();
+        assert_eq!(tokens.len(), 3);
+        assert!(tokens.iter().all(|token| token.len() == TOKEN_LEN));
+        assert_ne!(tokens[0], tokens[1]);
+        assert_ne!(tokens[1], tokens[2]);
+        for (vote, token) in votes.into_iter().zip(tokens) {
+            assert!(verify_token("test-secret", date(), 42, vote, &token));
+        }
     }
 
     #[test]
-    fn tokens_are_per_article_and_per_vote() {
-        let up = rating_token("s", date(), 42, Vote::Up);
-        assert_ne!(up, rating_token("s", date(), 42, Vote::Down));
-        assert_ne!(up, rating_token("s", date(), 43, Vote::Up));
-        assert_ne!(up, rating_token("other", date(), 42, Vote::Up));
-        let tomorrow: Date = "2026-08-16".parse().unwrap();
-        assert_ne!(up, rating_token("s", tomorrow, 42, Vote::Up));
-    }
-
-    #[test]
-    fn verification_is_exact() {
+    fn legacy_up_token_still_verifies_as_loved() {
+        let legacy = rating_token_for_segment("test-secret", date(), 42, "up");
+        assert_eq!(legacy, "3b314cf7e6d8f50f");
         assert!(verify_token(
-            "s",
+            "test-secret",
             date(),
             42,
-            Vote::Up,
-            &rating_token("s", date(), 42, Vote::Up)
+            Vote::Loved,
+            &legacy
         ));
-        assert!(!verify_token("s", date(), 42, Vote::Up, "deadbeefdeadbeef"));
-        assert!(!verify_token("s", date(), 42, Vote::Up, ""));
-        assert!(!verify_token("s", date(), 42, Vote::Up, "short"));
+    }
+
+    #[test]
+    fn verification_rejects_tampering() {
+        let token = rating_token("s", date(), 42, Vote::Loved);
+        assert!(!verify_token("s", date(), 42, Vote::Good, &token));
+        assert!(!verify_token("s", date(), 43, Vote::Loved, &token));
+        assert!(!verify_token("other", date(), 42, Vote::Loved, &token));
+        assert!(!verify_token("s", date(), 42, Vote::Loved, "short"));
     }
 
     #[test]
     fn url_shape_matches_the_spec() {
+        let token = rating_token("test-secret", date(), 42, Vote::Good);
         assert_eq!(
             rating_url(
                 "https://daily.hallada.net/",
                 "test-secret",
                 date(),
                 42,
-                Vote::Up
+                Vote::Good
             ),
-            "https://daily.hallada.net/r/2026-08-15/42/up?t=3b314cf7e6d8f50f"
+            format!("https://daily.hallada.net/r/2026-08-15/42/good?t={token}")
         );
     }
 }

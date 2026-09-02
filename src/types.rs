@@ -269,8 +269,6 @@ pub struct ScoredArticle {
     pub prefilter_score: f64,
     /// Cached [`composite_social_score`] for the article.
     pub social_score: f64,
-    /// Beta-smoothed per-feed upvote rate applied by the pre-filter (§3.9).
-    pub feed_prior: f64,
     /// `None` until stage A has run (or when `--skip-llm`).
     pub llm: Option<LlmScore>,
     /// From `curation.always_include_feeds`: may be scored but never dropped (§3.5).
@@ -278,10 +276,10 @@ pub struct ScoredArticle {
 }
 
 impl ScoredArticle {
-    /// Ranking key for stage B: LLM score weighted with social proof and priors (§3.6).
+    /// Ranking key for stage B: LLM score weighted with social proof (§3.6).
     pub fn combined_score(&self) -> f64 {
         let llm = self.llm.as_ref().map(|l| l.score).unwrap_or(0.0);
-        llm * 10.0 + self.social_score * 4.0 + self.feed_prior * 10.0 + self.prefilter_score * 0.1
+        llm * 10.0 + self.social_score * 4.0 + self.prefilter_score * 0.1
     }
 }
 
@@ -565,62 +563,85 @@ pub struct Artifact {
 // Feedback (§3.9)
 // ---------------------------------------------------------------------------
 
-/// 👍 / 👎 stored as `+1` / `-1` in `ratings.vote` (§3.9).
+/// Explicit reader verdict embedded in rating-link URLs (§6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum Vote {
-    Up,
-    Down,
+    #[serde(rename = "loved", alias = "up")]
+    Loved,
+    #[serde(rename = "good")]
+    Good,
+    #[serde(rename = "down")]
+    NotForMe,
 }
 
 impl Vote {
-    pub fn as_i64(self) -> i64 {
-        match self {
-            Vote::Up => 1,
-            Vote::Down => -1,
-        }
-    }
-
-    /// Path segment used in rating links: `up` / `down` (§3.9).
+    /// Stable path segment used in rating links (§6.1).
     pub fn as_str(self) -> &'static str {
         match self {
-            Vote::Up => "up",
-            Vote::Down => "down",
+            Vote::Loved => "loved",
+            Vote::Good => "good",
+            Vote::NotForMe => "down",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "up" => Some(Vote::Up),
-            "down" => Some(Vote::Down),
+            "loved" | "up" => Some(Vote::Loved),
+            "good" => Some(Vote::Good),
+            "down" => Some(Vote::NotForMe),
             _ => None,
+        }
+    }
+
+    pub fn value(self, cfg: &crate::config::FeedbackConfig) -> f64 {
+        match self {
+            Vote::Loved => cfg.loved_value,
+            Vote::Good => cfg.good_value,
+            Vote::NotForMe => cfg.not_for_me_value,
         }
     }
 }
 
-/// A recorded reader vote (`ratings` table, §3.9).
+/// One append-only feedback event (`rating_events`, §6.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Rating {
-    pub issue_date: Date,
+pub struct RatingEvent {
+    pub id: i64,
     pub article_id: ArticleId,
-    pub vote: Vote,
-    pub rated_at: Timestamp,
+    pub issue_date: Option<Date>,
+    pub kind: String,
+    pub source: String,
+    pub label: String,
+    pub value: f64,
+    pub note: Option<String>,
+    pub event_at: Timestamp,
 }
 
-/// Beta-smoothed per-feed upvote rate used by the pre-filter (`feed_priors`, §3.9).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-pub struct FeedPrior {
-    pub feed_id: FeedId,
-    pub upvotes: i64,
-    pub downvotes: i64,
-    pub included: i64,
+/// Descriptive deep-assessment facets (§12.1), populated beginning in step 5.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Facets {
+    pub format: Option<String>,
+    pub depth: Option<String>,
+    pub evidence: Option<String>,
+    pub commerciality: Option<String>,
+    pub topic_group: Option<String>,
+    pub technicality: Option<String>,
+    pub locality: Option<String>,
+    pub specific_topics: Option<Vec<String>>,
 }
 
-impl FeedPrior {
-    /// `(up + 1) / (up + down + 2)` — 0.5 with no evidence (§3.9).
-    pub fn rate(&self) -> f64 {
-        (self.upvotes + 1) as f64 / (self.upvotes + self.downvotes + 2) as f64
-    }
+/// The current explicit verdict for an article, enriched for prompts (§6.2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RatedArticle {
+    pub article_id: ArticleId,
+    pub issue_date: Option<Date>,
+    pub title: String,
+    pub feed_title: String,
+    pub summary: Option<String>,
+    pub facets: Option<Facets>,
+    pub note: Option<String>,
+    pub value: f64,
+    pub label: String,
+    pub event_at: Timestamp,
 }
 
 // ---------------------------------------------------------------------------
@@ -685,18 +706,6 @@ mod tests {
     }
 
     #[test]
-    fn feed_prior_is_beta_smoothed() {
-        assert_eq!(FeedPrior::default().rate(), 0.5);
-        let p = FeedPrior {
-            feed_id: 1,
-            upvotes: 3,
-            downvotes: 1,
-            included: 4,
-        };
-        assert!((p.rate() - 4.0 / 6.0).abs() < 1e-12);
-    }
-
-    #[test]
     fn stats_line_and_reading_time() {
         assert_eq!(reading_minutes(0), 1);
         assert_eq!(reading_minutes(440), 2);
@@ -730,8 +739,18 @@ mod tests {
 
     #[test]
     fn vote_and_social_source_round_trip() {
-        assert_eq!(Vote::parse("up"), Some(Vote::Up));
-        assert_eq!(Vote::Down.as_i64(), -1);
+        let feedback = crate::config::FeedbackConfig::default();
+        assert_eq!(Vote::parse("loved"), Some(Vote::Loved));
+        assert_eq!(Vote::parse("up"), Some(Vote::Loved));
+        assert_eq!(Vote::parse("good"), Some(Vote::Good));
+        assert_eq!(Vote::parse("down"), Some(Vote::NotForMe));
+        assert_eq!(Vote::Loved.as_str(), "loved");
+        assert_eq!(Vote::Good.as_str(), "good");
+        assert_eq!(Vote::NotForMe.as_str(), "down");
+        assert_eq!(Vote::Loved.value(&feedback), 1.0);
+        assert_eq!(Vote::Good.value(&feedback), 0.35);
+        assert_eq!(Vote::NotForMe.value(&feedback), -1.0);
+        assert_eq!(serde_json::to_string(&Vote::NotForMe).unwrap(), "\"down\"");
         assert_eq!(
             SocialSource::parse("lobsters"),
             Some(SocialSource::Lobsters)

@@ -1,13 +1,7 @@
-//! Taste profile construction (spec §3.6, §3.9).
+//! Reader-profile and system-prompt construction (personalized curation v2 §8).
 //!
-//! A ~600-word document assembled from (a) the interest names parsed out of
-//! `data/scour-interests.opml`, grouped into themes, (b) hard-coded stated
-//! preferences, and (c) a "learned adjustments" section regenerated weekly from
-//! recent 👍/👎 ratings. Stored and versioned in `kv`.
-//!
-//! This document is the **system prompt** for every DeepSeek call in the run, so
-//! it must be byte-identical between requests: DeepSeek's automatic prefix cache
-//! is what makes the whole pipeline cost cents rather than dollars (§3.6).
+//! Every run rebuilds one byte-stable prompt from the hand-maintained profile,
+//! standing interests, stored weekly adjustments, and current explicit verdicts.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -15,45 +9,26 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use jiff::Timestamp;
-use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
-use sqlx::Row as _;
 
 use super::llm::LlmClient;
 use crate::db::{Db, KV_PROFILE_VERSION, KV_TASTE_PROFILE};
-use crate::types::{TasteProfile, Vote};
+use crate::types::{Facets, RatedArticle, TasteProfile};
 
-/// Rebuild cadence for the learned-adjustments section (§3.6).
 pub const REBUILD_INTERVAL_DAYS: i64 = 7;
-/// Ratings lookback used when rewriting learned adjustments (§3.9).
-pub const RATINGS_LOOKBACK_DAYS: i64 = 90;
-/// `kv` key holding just the learned-adjustments block, so that re-parsing the
-/// OPML never loses what the ratings taught us (§3.6).
+pub const RATINGS_LOOKBACK_DAYS: i64 = 36_500;
 pub const KV_LEARNED_ADJUSTMENTS: &str = "taste_profile_learned";
-/// Ratings fed to one rebuild call.
-const MAX_RATINGS_IN_PROMPT: usize = 400;
+const MAX_RATINGS_IN_REBUILD: usize = 200;
 
-/// Hard-coded stated preferences from the reader profile (spec §1).
-pub const STATED_PREFERENCES: &str = "\
-Prefers long-form, high-effort, well-written articles on any topic. Uses social \
-proof (HN/Reddit/Lobsters upvotes and comment counts) as a quality proxy. Wants \
-tech news, light general/US world news (Wikipedia Current Events style, neutral), \
-Boston-area news, and ultra-niche community news.";
+pub const NO_LEARNED_ADJUSTMENTS: &str = "No reader ratings have been collected yet. Judge purely on the stated preferences and interests above.";
 
-/// Placeholder used until the first ratings arrive (§3.6c).
-pub const NO_LEARNED_ADJUSTMENTS: &str = "No reader ratings have been collected yet. Judge purely on the stated \
-     preferences and interests above.";
+/// The only reader-profile prose that remains in code (§8.2).
+const EDITOR_IN_CHIEF_FRAMING: &str = "You are the editor-in-chief of *The Daily EPUB*, a personal morning newspaper assembled every day for exactly one reader. Everything you are asked to do — score, select, place, summarize, introduce — serves his taste, not a general audience's. When a judgement call is close, re-read this profile and decide the way he would.";
 
 // ---------------------------------------------------------------------------
-// OPML parsing (§3.6a)
+// Interest and profile-file parsing
 // ---------------------------------------------------------------------------
 
-/// Parse interest names out of the Scour OPML (§3.6).
-///
-/// The file is one long line of `<outline type="rss" text="Rust" …/>` elements;
-/// we take every `text` attribute, XML-unescape it, trim it, and de-duplicate
-/// case-insensitively (the export contains both `Self-hosting` and
-/// `Self-Hosting`). Order follows the document so the result is deterministic.
 pub fn parse_interests(opml_path: &Path) -> anyhow::Result<Vec<String>> {
     let raw = std::fs::read_to_string(opml_path)
         .with_context(|| format!("reading the interests OPML at {}", opml_path.display()))?;
@@ -68,19 +43,15 @@ pub fn parse_interests(opml_path: &Path) -> anyhow::Result<Vec<String>> {
     Ok(interests)
 }
 
-/// [`parse_interests`] over an in-memory document (also the unit-test seam).
 pub fn parse_interests_str(raw: &str) -> Vec<String> {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for chunk in raw.split("text=\"").skip(1) {
         let Some((value, _)) = chunk.split_once('"') else {
             continue;
         };
         let name = xml_unescape(value).trim().to_string();
-        if name.is_empty() {
-            continue;
-        }
-        if seen.insert(name.to_lowercase()) {
+        if !name.is_empty() && seen.insert(name.to_lowercase()) {
             out.push(name);
         }
     }
@@ -99,102 +70,156 @@ fn xml_unescape(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
-pub mod themes;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileFile {
+    /// Original Markdown with every `## Interests` section removed.
+    pub body: String,
+    pub interests: Vec<String>,
+}
 
+/// Remove any `## Interests` section and parse its non-empty lines as interests.
+/// A leading `- ` is stripped; all other profile bytes pass through unchanged.
+pub fn parse_profile_str(raw: &str) -> ProfileFile {
+    let mut body = String::with_capacity(raw.len());
+    let mut interests = Vec::new();
+    let mut in_interests = false;
+
+    for line in raw.split_inclusive('\n') {
+        let heading = line.trim_end_matches(['\r', '\n']).trim();
+        if heading.eq_ignore_ascii_case("## Interests") {
+            in_interests = true;
+            continue;
+        }
+        if in_interests && heading.starts_with("## ") {
+            in_interests = false;
+        }
+        if in_interests {
+            let interest = heading.strip_prefix("- ").unwrap_or(heading).trim();
+            if !interest.is_empty()
+                && !interest.eq_ignore_ascii_case(
+                    "(optional: one per line; merged with data/scour-interests.opml)",
+                )
+            {
+                interests.push(interest.to_string());
+            }
+        } else {
+            body.push_str(line);
+        }
+    }
+    ProfileFile { body, interests }
+}
+
+pub fn load_profile(path: &Path) -> anyhow::Result<ProfileFile> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Ok(parse_profile_str(&raw)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(path = %path.display(), "profile file is missing; using OPML interests only");
+            Ok(ProfileFile {
+                body: String::new(),
+                interests: Vec::new(),
+            })
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("reading the reader profile at {}", path.display()))
+        }
+    }
+}
+
+fn union_interests(opml: Vec<String>, profile: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for interest in opml.into_iter().chain(profile) {
+        let interest = interest.trim();
+        if !interest.is_empty() && seen.insert(interest.to_lowercase()) {
+            out.push(interest.to_string());
+        }
+    }
+    out
+}
+
+pub mod themes;
 pub use themes::group_into_themes;
 
 // ---------------------------------------------------------------------------
-// Document assembly (§3.6)
+// Prompt assembly
 // ---------------------------------------------------------------------------
 
-/// The invariant part of the profile: who the reader is and how to judge for him.
-/// Kept as one constant so the prompt bytes never drift between calls (§3.6).
-const PROFILE_PREAMBLE: &str = "\
-You are the editor-in-chief of *The Daily EPUB*, a personal morning newspaper \
-assembled every day for exactly one reader. Everything you are asked to do — \
-score, select, place, summarize, introduce — serves his taste, not a general \
-audience's. When a judgement call is close, re-read this profile and decide the \
-way he would.
+fn verdict_label(label: &str) -> &str {
+    match label {
+        "loved" => "LOVED",
+        "good" => "GOOD",
+        "not_for_me" => "NOT FOR ME",
+        other => other,
+    }
+}
 
-## The reader
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
-A software engineer in the Boston area who reads on e-ink in the morning. He \
-would rather read six excellent long pieces than thirty adequate short ones. He \
-reads across an unusually wide range of subjects and does not need a topic to be \
-professionally useful to enjoy it.
+/// Assemble sections in the exact cache-friendly order required by §8.4.
+pub fn build(
+    profile_body: &str,
+    interests: &[String],
+    learned_adjustments: &str,
+    ratings: &[RatedArticle],
+    verdict_limit: usize,
+) -> String {
+    let mut doc = String::with_capacity(16 * 1024);
+    doc.push_str(EDITOR_IN_CHIEF_FRAMING);
+    doc.push_str("\n\n");
 
-## What he wants
+    if !profile_body.is_empty() {
+        doc.push_str(profile_body);
+        if !profile_body.ends_with('\n') {
+            doc.push('\n');
+        }
+        doc.push('\n');
+    }
 
-- **Long-form and high-effort above all.** Essays, deep dives, post-mortems, \
-field notes, annotated experiments, thorough explainers, personal narratives with \
-real specificity. Length is a proxy, not the goal: what he is buying is evident \
-effort and a point of view.
-- **Any topic, if the writing is excellent.** A brilliant piece on medieval \
-bookbinding beats a competent one on his favourite language. Do not reject \
-something merely because it sits outside the interest list below.
-- **Social proof as a quality signal, not a ranking.** Hundreds of HN or Reddit \
-points and a busy comment thread mean the piece survived contact with a critical \
-audience — treat it as evidence, then judge the writing yourself. A quiet post \
-from a good blog can outrank a viral one.
-- **Boston and New England local news** — city government, transit, universities, \
-neighbourhood and civic stories.
-- **Ultra-niche community news.** Small scenes with their own vocabulary — a \
-mailing-list argument, a hobby project's release story, a subculture's internal \
-debate — are a feature of this paper, not a distraction.
-- **World and US news kept light and neutral.** Wikipedia-Current-Events register: \
-what happened, who is involved, no outrage, no opinion columns. The World \
-Briefing section is compiled separately; do not fill the paper with wire copy.
-
-## What he does not want
-
-Press releases and funding announcements dressed as news; SEO listicles; \
-link-roundup and \"this week in X\" posts; changelogs and release notes without \
-analysis; sponsored content and thinly disguised marketing; crypto and \
-engagement-bait; rewrites of a story he can read at the source; culture-war \
-outrage; anything whose substance is one paragraph stretched to five.
-
-## How to judge
-
-Ask: *would he still be glad he read this an hour later?* Reward specificity, \
-first-hand experience, honest uncertainty, and prose with a human behind it. \
-Penalize padding, unsourced confidence, and summaries of other people's work. \
-Prefer the primary source over the aggregator when both are present.";
-
-/// Assemble the full profile document from interests, stated preferences and the
-/// current learned-adjustments block (§3.6).
-///
-/// Pure and deterministic: the same inputs always produce the same bytes.
-pub fn build(interests: &[String], learned_adjustments: &str) -> String {
-    let mut doc = String::with_capacity(8 * 1024);
-    doc.push_str("# The Daily EPUB — reader taste profile\n\n");
-    doc.push_str(PROFILE_PREAMBLE);
-    doc.push_str("\n\n## Stated preferences (verbatim)\n\n");
-    doc.push_str(STATED_PREFERENCES);
-    doc.push_str("\n\n## Standing interests\n\n");
-    doc.push_str(
-        "These are his ~220 subscribed interest topics, grouped. They raise the \
-         floor for a match, but never cap the paper: an outstanding article on \
-         none of these still belongs.\n\n",
-    );
+    doc.push_str("## Standing interests\n\n");
+    doc.push_str("These are his subscribed interest topics, grouped. They raise the floor for a match, but never cap the paper: an outstanding article on none of these still belongs.\n\n");
     for (theme, members) in group_into_themes(interests) {
         let _ = writeln!(doc, "- **{}**: {}", theme, members.join(", "));
     }
-    doc.push_str("\n## Learned adjustments (rebuilt weekly from 👍/👎 ratings)\n\n");
+
+    doc.push_str("\n## Learned adjustments (rebuilt weekly from ratings)\n\n");
     let learned = learned_adjustments.trim();
     doc.push_str(if learned.is_empty() {
         NO_LEARNED_ADJUSTMENTS
     } else {
         learned
     });
-    doc.push('\n');
+
+    doc.push_str("\n\n## Recent verdicts\n\n");
+    for rating in ratings.iter().take(verdict_limit) {
+        let summary = rating
+            .summary
+            .as_deref()
+            .map(one_line)
+            .filter(|summary| !summary.is_empty())
+            .unwrap_or_else(|| "no summary available".to_string());
+        let feed = if rating.feed_title.trim().is_empty() {
+            "unknown"
+        } else {
+            rating.feed_title.trim()
+        };
+        let _ = writeln!(
+            doc,
+            "{} | {} | {} | {}",
+            verdict_label(&rating.label),
+            one_line(&rating.title),
+            one_line(feed),
+            summary
+        );
+    }
     doc
 }
 
 // ---------------------------------------------------------------------------
-// Persistence (§3.6 `kv`)
+// Persistence and per-run loading
 // ---------------------------------------------------------------------------
 
-/// `kv[profile_version]` payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileVersion {
     version: i64,
@@ -206,59 +231,81 @@ async fn stored_version(db: &Db) -> anyhow::Result<Option<(i64, Timestamp)>> {
         return Ok(None);
     };
     match serde_json::from_str::<ProfileVersion>(&raw) {
-        Ok(v) => {
-            let built = v.built_at.parse::<Timestamp>().unwrap_or_else(|_| {
-                tracing::warn!(value = %v.built_at, "unparseable profile build time");
+        Ok(version) => {
+            let built_at = version.built_at.parse::<Timestamp>().unwrap_or_else(|_| {
+                tracing::warn!(value = %version.built_at, "unparseable profile build time");
                 Timestamp::UNIX_EPOCH
             });
-            Ok(Some((v.version, built)))
+            Ok(Some((version.version, built_at)))
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "unparseable kv[profile_version]; treating as absent");
+        Err(error) => {
+            tracing::warn!(%error, "unparseable kv[profile_version]; treating as absent");
             Ok(None)
         }
     }
 }
 
-async fn store(db: &Db, profile: &TasteProfile, learned: &str) -> anyhow::Result<()> {
-    db.kv_set(KV_TASTE_PROFILE, &profile.text).await?;
-    db.kv_set(KV_LEARNED_ADJUSTMENTS, learned).await?;
-    let version = serde_json::to_string(&ProfileVersion {
-        version: profile.version,
-        built_at: profile.built_at.to_string(),
+async fn store_version(db: &Db, version: i64, built_at: Timestamp) -> anyhow::Result<()> {
+    let json = serde_json::to_string(&ProfileVersion {
+        version,
+        built_at: built_at.to_string(),
     })?;
-    db.kv_set(KV_PROFILE_VERSION, &version).await?;
+    db.kv_set(KV_PROFILE_VERSION, &json).await?;
     Ok(())
 }
 
-/// Load the stored profile, building a default one on first run (§3.6).
-pub async fn load_or_build(db: &Db, opml_path: &Path) -> anyhow::Result<TasteProfile> {
-    if let Some(text) = db.kv_get(KV_TASTE_PROFILE).await?.filter(|t| !t.is_empty()) {
-        let (version, built_at) = stored_version(db).await?.unwrap_or((1, Timestamp::now()));
-        tracing::debug!(version, chars = text.len(), "loaded stored taste profile");
-        return Ok(TasteProfile {
-            text,
-            version,
-            built_at,
-        });
-    }
-    let interests = parse_interests(opml_path)?;
+async fn prompt_inputs(
+    db: &Db,
+    opml_path: &Path,
+    profile_path: &Path,
+) -> anyhow::Result<(ProfileFile, Vec<String>, Vec<RatedArticle>, String)> {
+    let opml = parse_interests(opml_path)?;
+    let profile = load_profile(profile_path)?;
+    let interests = union_interests(opml, profile.interests.clone());
+    let ratings = db.current_ratings(RATINGS_LOOKBACK_DAYS).await?;
     let learned = db.kv_get(KV_LEARNED_ADJUSTMENTS).await?.unwrap_or_default();
-    let profile = TasteProfile {
-        text: build(&interests, &learned),
-        version: 1,
-        built_at: Timestamp::now(),
+    Ok((profile, interests, ratings, learned))
+}
+
+/// Rebuild the complete system prompt from its live inputs on every run.
+pub async fn load_or_build(
+    db: &Db,
+    opml_path: &Path,
+    profile_path: &Path,
+    verdict_limit: usize,
+) -> anyhow::Result<TasteProfile> {
+    let (profile_file, interests, ratings, learned) =
+        prompt_inputs(db, opml_path, profile_path).await?;
+    let (version, built_at) = match stored_version(db).await? {
+        Some(stored) => stored,
+        None => {
+            let built_at = Timestamp::now();
+            store_version(db, 1, built_at).await?;
+            (1, built_at)
+        }
     };
-    store(db, &profile, &learned).await?;
-    tracing::info!(
+    let profile = TasteProfile {
+        text: build(
+            &profile_file.body,
+            &interests,
+            &learned,
+            &ratings,
+            verdict_limit,
+        ),
+        version,
+        built_at,
+    };
+    db.kv_set(KV_TASTE_PROFILE, &profile.text).await?;
+    tracing::debug!(
+        version,
         interests = interests.len(),
+        verdicts = ratings.len().min(verdict_limit),
         chars = profile.text.len(),
-        "built the initial taste profile"
+        "rebuilt the taste profile prompt"
     );
     Ok(profile)
 }
 
-/// True when the stored profile is older than [`REBUILD_INTERVAL_DAYS`] (§3.6).
 pub async fn is_stale(db: &Db) -> anyhow::Result<bool> {
     let Some((_, built_at)) = stored_version(db).await? else {
         return Ok(true);
@@ -267,169 +314,112 @@ pub async fn is_stale(db: &Db) -> anyhow::Result<bool> {
     Ok(age_days >= REBUILD_INTERVAL_DAYS)
 }
 
-/// The automatic weekly rebuild the pipeline calls before curating (§3.6).
-///
-/// Rebuilds only when the stored profile is at least a week old *and* there are
-/// ratings to learn from; otherwise returns the profile unchanged. Failures are
-/// non-fatal — a stale profile still curates fine.
 pub async fn weekly_rebuild_if_due(
     db: &Db,
     llm: &LlmClient,
     opml_path: &Path,
+    profile_path: &Path,
+    verdict_limit: usize,
 ) -> anyhow::Result<Option<TasteProfile>> {
     if !is_stale(db).await? {
         return Ok(None);
     }
-    if recent_ratings(db).await?.is_empty() {
+    if db.current_ratings(RATINGS_LOOKBACK_DAYS).await?.is_empty() {
         tracing::debug!("profile is stale but there are no ratings to learn from");
         return Ok(None);
     }
     tracing::info!("taste profile is over a week old; rebuilding learned adjustments");
-    Ok(Some(rebuild(db, llm, opml_path).await?))
+    Ok(Some(
+        rebuild(db, llm, opml_path, profile_path, verdict_limit).await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
-// Rebuild (§3.6c, §3.9)
+// Weekly learned-adjustments rebuild
 // ---------------------------------------------------------------------------
 
-/// A rated article as fed to the learned-adjustments prompt (§3.6c).
-#[derive(Debug, Clone, PartialEq)]
-pub struct RatedArticle {
-    pub vote: Vote,
-    pub title: String,
-    pub feed_title: String,
-    pub category: String,
-    /// The stage-A category the model itself assigned, when we have one.
-    pub llm_category: String,
-}
+pub const LEARNED_ADJUSTMENTS_PROMPT: &str = r#"TASK: rewrite the "Learned adjustments" section of the reader profile in your system prompt, using only the rating history below.
 
-/// Recent ratings joined to article titles, feeds and categories (§3.6c).
-///
-/// `db.rs` exposes `recent_ratings_detailed`, but it returns titles only; the
-/// prompt is much more useful with the feed and category attached.
-pub async fn recent_ratings(db: &Db) -> anyhow::Result<Vec<RatedArticle>> {
-    // Timestamp arithmetic only accepts uniform units, so days become hours.
-    let since = Timestamp::now()
-        .checked_sub(jiff::Span::new().hours(RATINGS_LOOKBACK_DAYS * 24))
-        .unwrap_or(Timestamp::UNIX_EPOCH);
-    let since_date = since.to_zoned(jiff::tz::TimeZone::UTC).date();
-    let rows = sqlx::query(
-        "SELECT r.vote AS vote,
-                COALESCE(a.title, '') AS title,
-                COALESCE(e.feed_title, '') AS feed_title,
-                COALESCE(e.category, '') AS category,
-                COALESCE((SELECT s.llm_category FROM scores s
-                           WHERE s.article_id = a.id AND s.llm_category IS NOT NULL
-                           ORDER BY s.run_date DESC LIMIT 1), '') AS llm_category
-           FROM ratings r
-           JOIN articles a ON a.id = r.article_id
-           LEFT JOIN entries e ON e.id = a.best_entry_id
-          WHERE r.issue_date >= ?
-          ORDER BY r.rated_at DESC
-          LIMIT ?",
-    )
-    .bind(since_date.to_string())
-    .bind(MAX_RATINGS_IN_PROMPT as i64)
-    .fetch_all(db.pool())
-    .await
-    .context("loading recent ratings for the profile rebuild")?;
+Each line is an explicit verdict with the article title, feed, summary, any deep-assessment facets, and the operator's note.
 
-    Ok(rows
-        .iter()
-        .map(|r| RatedArticle {
-            vote: if r.get::<i64, _>("vote") >= 0 {
-                Vote::Up
-            } else {
-                Vote::Down
-            },
-            title: r.get("title"),
-            feed_title: r.get("feed_title"),
-            category: r.get("category"),
-            llm_category: r.get("llm_category"),
-        })
-        .collect())
-}
+Look for patterns, not one-offs. Treat the stated preferences as a strong prior, not a rule. When repeated, recent behaviour clearly conflicts with an older stated preference, say so. Do not override a stated preference on one or two ratings.
 
-/// Instruction block for the weekly learned-adjustments rewrite (§3.6c).
-pub const LEARNED_ADJUSTMENTS_PROMPT: &str = "\
-TASK: rewrite the \"Learned adjustments\" section of the reader profile in your \
-system prompt, using only the rating history below.
+Write 120–200 words as 4–8 bullet points, each one imperative and usable while scoring. One bullet is required and must begin "Diversity check:": name any subject or format that is starting to dominate the loved list and should not crowd out the rest of the paper. Do not mention specific article titles, rating counts, or this instruction. If the history is too thin to support any pattern, say so in one sentence instead of inventing one, while still including the Diversity check bullet.
 
-Each line is a thumbs-up or thumbs-down the reader gave an article that appeared \
-in a past issue, with the article's title, the feed it came from, and its \
-category.
-
-Look for patterns, not one-offs. Good adjustments name a *kind* of article and a \
-*reason*: \"consistently downvotes vendor engineering-blog posts that are really \
-product announcements\"; \"consistently upvotes database-internals deep dives, \
-even very long ones\"; \"lukewarm on AI-industry news, warm on hands-on LLM \
-tinkering\". Ignore patterns supported by fewer than two ratings, and never \
-contradict the stated preferences — refine them.
-
-Write 120–200 words as 4–8 bullet points, each one imperative and usable while \
-scoring (\"Rank X higher\", \"Be sceptical of Y\"). Do not mention specific \
-article titles, the rating counts, or this instruction. If the history is too \
-thin to support any pattern, say so in one sentence instead of inventing one.
-
-Return JSON exactly: {\"learned_adjustments\": \"<the bullet points, as markdown>\"}
+Return JSON exactly: {"learned_adjustments": "<the bullet points, as markdown>"}
 
 RATING HISTORY (newest first):
-";
+"#;
 
-/// The weekly rewrite's JSON envelope.
 #[derive(Debug, Clone, Deserialize)]
 struct LearnedAdjustmentsResponse {
     #[serde(default)]
     learned_adjustments: String,
 }
 
-/// Render the rating history block of the rebuild prompt (§3.6c).
+fn facets_line(facets: Option<&Facets>) -> Option<String> {
+    let facets = facets?;
+    let values = [
+        facets.format.as_deref(),
+        facets.depth.as_deref(),
+        facets.evidence.as_deref(),
+        facets.technicality.as_deref(),
+        facets.topic_group.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|value| !value.trim().is_empty())
+    .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join("/"))
+}
+
 pub fn build_rebuild_prompt(ratings: &[RatedArticle]) -> String {
     let mut prompt = String::from(LEARNED_ADJUSTMENTS_PROMPT);
-    let (mut up, mut down) = (0usize, 0usize);
-    for r in ratings {
-        match r.vote {
-            Vote::Up => up += 1,
-            Vote::Down => down += 1,
+    for rating in ratings.iter().take(MAX_RATINGS_IN_REBUILD) {
+        let mut parts = vec![
+            verdict_label(&rating.label).to_string(),
+            one_line(&rating.title),
+            if rating.feed_title.trim().is_empty() {
+                "unknown".to_string()
+            } else {
+                one_line(&rating.feed_title)
+            },
+        ];
+        if let Some(summary) = rating
+            .summary
+            .as_deref()
+            .map(one_line)
+            .filter(|s| !s.is_empty())
+        {
+            parts.push(summary);
         }
-        let category = if r.llm_category.is_empty() {
-            r.category.as_str()
-        } else {
-            r.llm_category.as_str()
-        };
-        let _ = writeln!(
-            prompt,
-            "{} | {} | feed: {} | category: {}",
-            match r.vote {
-                Vote::Up => "UP  ",
-                Vote::Down => "DOWN",
-            },
-            r.title.trim(),
-            if r.feed_title.is_empty() {
-                "unknown"
-            } else {
-                r.feed_title.trim()
-            },
-            if category.is_empty() {
-                "unknown"
-            } else {
-                category.trim()
-            },
-        );
+        if let Some(facets) = facets_line(rating.facets.as_ref()) {
+            parts.push(format!("facets: {facets}"));
+        }
+        if let Some(note) = rating
+            .note
+            .as_deref()
+            .map(one_line)
+            .filter(|s| !s.is_empty())
+        {
+            parts.push(format!("note: {note}"));
+        }
+        let _ = writeln!(prompt, "{}", parts.join(" | "));
     }
-    let _ = write!(prompt, "\n({up} up, {down} down)\n");
     prompt
 }
 
-/// `daily-epub profile rebuild` — summarize recent ratings into a new learned
-/// adjustments section and store a new profile version (§3.6, §3.9).
-pub async fn rebuild(db: &Db, llm: &LlmClient, opml_path: &Path) -> anyhow::Result<TasteProfile> {
-    let interests = parse_interests(opml_path)?;
-    let ratings = recent_ratings(db).await?;
+pub async fn rebuild(
+    db: &Db,
+    llm: &LlmClient,
+    opml_path: &Path,
+    profile_path: &Path,
+    verdict_limit: usize,
+) -> anyhow::Result<TasteProfile> {
+    let ratings = db.current_ratings(RATINGS_LOOKBACK_DAYS).await?;
     let previous = db.kv_get(KV_LEARNED_ADJUSTMENTS).await?.unwrap_or_default();
-
     let learned = if ratings.is_empty() {
-        tracing::info!("no ratings in the lookback window; keeping the existing adjustments");
+        tracing::info!("no ratings available; keeping the existing adjustments");
         previous
     } else {
         let prompt = build_rebuild_prompt(&ratings);
@@ -437,365 +427,243 @@ pub async fn rebuild(db: &Db, llm: &LlmClient, opml_path: &Path) -> anyhow::Resu
             .complete_json::<LearnedAdjustmentsResponse>(&prompt, 0.4)
             .await
         {
-            Ok(resp) if !resp.learned_adjustments.trim().is_empty() => {
-                tracing::info!(
-                    ratings = ratings.len(),
-                    chars = resp.learned_adjustments.len(),
-                    "rewrote the learned-adjustments section"
-                );
-                resp.learned_adjustments.trim().to_string()
+            Ok(response) if !response.learned_adjustments.trim().is_empty() => {
+                response.learned_adjustments.trim().to_string()
             }
             Ok(_) => {
                 tracing::warn!("the model returned empty adjustments; keeping the previous ones");
                 previous
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "learned-adjustments rewrite failed; keeping the previous ones");
+            Err(error) => {
+                tracing::warn!(%error, "learned-adjustments rewrite failed; keeping the previous ones");
                 previous
             }
         }
     };
 
-    let next_version = stored_version(db).await?.map_or(1, |(v, _)| v + 1);
+    db.kv_set(KV_LEARNED_ADJUSTMENTS, &learned).await?;
+    let next_version = stored_version(db)
+        .await?
+        .map_or(1, |(version, _)| version + 1);
+    let built_at = Timestamp::now();
+    store_version(db, next_version, built_at).await?;
+
+    let opml = parse_interests(opml_path)?;
+    let profile_file = load_profile(profile_path)?;
+    let interests = union_interests(opml, profile_file.interests.clone());
+    let current = db.current_ratings(RATINGS_LOOKBACK_DAYS).await?;
     let profile = TasteProfile {
-        text: build(&interests, &learned),
+        text: build(
+            &profile_file.body,
+            &interests,
+            &learned,
+            &current,
+            verdict_limit,
+        ),
         version: next_version,
-        built_at: Timestamp::now(),
+        built_at,
     };
-    store(db, &profile, &learned).await?;
+    db.kv_set(KV_TASTE_PROFILE, &profile.text).await?;
     tracing::info!(
-        version = profile.version,
+        version = next_version,
         chars = profile.text.len(),
         "stored a new taste profile"
     );
     Ok(profile)
 }
 
-// ---------------------------------------------------------------------------
-// Feed priors (§3.9a)
-// ---------------------------------------------------------------------------
-
-/// Recompute per-feed beta-smoothed priors from the ratings table (§3.9).
-///
-/// Returns the number of feeds written. `FeedPrior::rate()` does the smoothing;
-/// this only maintains the raw counts plus how often the feed has been included.
-pub async fn rebuild_feed_priors(db: &Db) -> anyhow::Result<usize> {
-    use std::collections::HashMap;
-
-    use crate::types::{FeedId, FeedPrior};
-
-    let mut priors: HashMap<FeedId, FeedPrior> = HashMap::new();
-    for (feed_id, vote) in db.ratings_with_feed().await? {
-        let entry = priors.entry(feed_id).or_insert(FeedPrior {
-            feed_id,
-            ..FeedPrior::default()
-        });
-        match vote {
-            Vote::Up => entry.upvotes += 1,
-            Vote::Down => entry.downvotes += 1,
-        }
-    }
-
-    let rows = sqlx::query(
-        "SELECT e.feed_id AS feed_id, COUNT(*) AS included
-           FROM issue_articles ia
-           JOIN articles a ON a.id = ia.article_id
-           JOIN entries e ON e.id = a.best_entry_id
-          GROUP BY e.feed_id",
-    )
-    .fetch_all(db.pool())
-    .await
-    .context("counting per-feed inclusions")?;
-    for row in &rows {
-        let feed_id: FeedId = row.get("feed_id");
-        let included: i64 = row.get("included");
-        priors
-            .entry(feed_id)
-            .or_insert(FeedPrior {
-                feed_id,
-                ..FeedPrior::default()
-            })
-            .included = included;
-    }
-
-    for prior in priors.values() {
-        db.upsert_feed_prior(prior).await?;
-    }
-    tracing::info!(feeds = priors.len(), "rebuilt feed priors");
-    Ok(priors.len())
-}
-
-/// Convenience for callers that only have a [`Date`]: the ratings lookback start.
-pub fn ratings_since(today: Date) -> Date {
-    today
-        .checked_sub(jiff::Span::new().days(RATINGS_LOOKBACK_DAYS))
-        .unwrap_or(today)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Rating;
 
     const OPML_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/data/scour-interests.opml");
+    const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/data/profile.md");
 
-    fn interests() -> Vec<String> {
-        parse_interests(Path::new(OPML_PATH)).expect("the shipped OPML parses")
+    #[test]
+    fn profile_interests_are_removed_and_union_case_insensitively() {
+        let parsed = parse_profile_str(
+            "# P\n\n## Interests\n- Rust\nBoston Tech\n- rust\n\n## Notes\nKeep this.\n",
+        );
+        assert_eq!(parsed.body, "# P\n\n## Notes\nKeep this.\n");
+        assert_eq!(parsed.interests, ["Rust", "Boston Tech", "rust"]);
+        let union = union_interests(vec!["rust".into(), "E-Ink".into()], parsed.interests);
+        assert_eq!(union, ["rust", "E-Ink", "Boston Tech"]);
     }
 
     #[test]
-    fn parses_the_shipped_opml() {
-        let list = interests();
+    fn prompt_sections_are_ordered_and_verdicts_have_required_labels() {
+        let rating = RatedArticle {
+            article_id: 1,
+            issue_date: None,
+            title: "A title".into(),
+            feed_title: "A feed".into(),
+            summary: Some("A summary\nwith whitespace.".into()),
+            facets: None,
+            note: None,
+            value: -1.0,
+            label: "not_for_me".into(),
+            event_at: "2026-08-15T12:00:00Z".parse().unwrap(),
+        };
+        let prompt = build(
+            "# Reader profile\n\nProfile prose.",
+            &["Rust".into()],
+            "- Adjust.",
+            &[rating],
+            60,
+        );
+        let framing = prompt.find("editor-in-chief").unwrap();
+        let profile = prompt.find("# Reader profile").unwrap();
+        let interests = prompt.find("## Standing interests").unwrap();
+        let learned = prompt.find("## Learned adjustments").unwrap();
+        let verdicts = prompt.find("## Recent verdicts").unwrap();
         assert!(
-            list.len() > 180,
-            "expected ~220 interests, got {}",
-            list.len()
+            framing < profile && profile < interests && interests < learned && learned < verdicts
         );
-        assert!(list.iter().any(|i| i == "Rust"));
-        assert!(list.iter().any(|i| i == "Boston Tech"));
-        assert!(list.iter().any(|i| i == "E-Ink Displays"));
-        // Trailing whitespace is trimmed and case-duplicates collapse.
-        assert!(list.iter().any(|i| i == "photography"));
-        let lowered: Vec<String> = list.iter().map(|i| i.to_lowercase()).collect();
-        let unique: BTreeSet<&String> = lowered.iter().collect();
-        assert_eq!(unique.len(), lowered.len(), "duplicates survived");
-        assert!(!list.iter().any(|i| i.contains("scour.ing")));
+        assert!(prompt.contains("NOT FOR ME | A title | A feed | A summary with whitespace."));
     }
 
     #[test]
-    fn parsing_handles_entities_and_empties() {
-        let raw = r#"<opml><body>
-            <outline text="Tea &amp; Coffee" xmlUrl="x?a=1&amp;b=2"/>
-            <outline text="  Rust  "/>
-            <outline text="rust"/>
-            <outline text=""/>
-        </body></opml>"#;
-        assert_eq!(
-            parse_interests_str(raw),
-            vec!["Tea & Coffee".to_string(), "Rust".to_string()]
-        );
+    fn shipped_profile_and_opml_parse() {
+        let profile = load_profile(Path::new(PROFILE_PATH)).unwrap();
+        assert!(profile.body.contains("## Who he is"));
+        assert!(!profile.body.contains("## Interests"));
+        assert!(profile.interests.is_empty());
+        let interests = parse_interests(Path::new(OPML_PATH)).unwrap();
+        assert!(interests.iter().any(|interest| interest == "Rust"));
     }
 
     #[test]
-    fn profile_document_is_deterministic_and_complete() {
-        let list = interests();
-        let one = build(&list, "");
-        let two = build(&list, "");
-        assert_eq!(one, two, "profile assembly must be byte-stable");
-        assert_eq!(one.as_bytes(), two.as_bytes());
-
-        assert!(one.contains(STATED_PREFERENCES));
-        assert!(one.contains(NO_LEARNED_ADJUSTMENTS));
-        assert!(one.contains("Boston"));
-        assert!(one.contains("Wikipedia-Current-Events"));
-        assert!(one.contains("Rust"));
-        assert!(one.contains("ultra-niche") || one.contains("Ultra-niche"));
-        // A real document, not a stub, but not a novel either.
-        let words = one.split_whitespace().count();
-        assert!((500..3000).contains(&words), "profile is {words} words");
-
-        let learned = build(&list, "- Rank database internals higher.");
-        assert!(learned.contains("- Rank database internals higher."));
-        assert!(!learned.contains(NO_LEARNED_ADJUSTMENTS));
+    fn rebuild_prompt_carries_summary_facets_note_and_diversity_instruction() {
+        let rating = RatedArticle {
+            article_id: 1,
+            issue_date: Some("2026-08-15".parse().unwrap()),
+            title: "Postgres failover".into(),
+            feed_title: "Engineering Notes".into(),
+            summary: Some("A detailed incident report.".into()),
+            facets: Some(Facets {
+                format: Some("first_hand_account".into()),
+                depth: Some("deep".into()),
+                evidence: Some("first_hand".into()),
+                technicality: Some("advanced".into()),
+                topic_group: Some("software_engineering".into()),
+                ..Facets::default()
+            }),
+            note: Some("Great operational detail".into()),
+            value: 1.0,
+            label: "loved".into(),
+            event_at: "2026-08-15T12:00:00Z".parse().unwrap(),
+        };
+        let prompt = build_rebuild_prompt(&[rating]);
+        assert!(prompt.contains("strong prior, not a rule"));
+        assert!(prompt.contains("Diversity check:"));
+        assert!(prompt.contains(
+            "LOVED | Postgres failover | Engineering Notes | A detailed incident report."
+        ));
+        assert!(
+            prompt.contains(
+                "facets: first_hand_account/deep/first_hand/advanced/software_engineering"
+            )
+        );
+        assert!(prompt.contains("note: Great operational detail"));
     }
 
-    async fn temp_db() -> (tempfile::TempDir, Db) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    #[tokio::test]
+    async fn per_run_profile_reload_changes_prompt_without_bumping_version() {
+        let dir = tempfile::tempdir().unwrap();
         let db = Db::open_and_migrate(&dir.path().join("profile.db"))
             .await
-            .expect("db");
-        (dir, db)
-    }
-
-    #[tokio::test]
-    async fn load_or_build_persists_and_reuses() {
-        let (_dir, db) = temp_db().await;
-        let first = load_or_build(&db, Path::new(OPML_PATH))
-            .await
-            .expect("first build");
-        assert_eq!(first.version, 1);
-        assert!(!is_stale(&db).await.expect("staleness"));
-
-        let second = load_or_build(&db, Path::new(OPML_PATH))
-            .await
-            .expect("second load");
-        assert_eq!(first.text, second.text);
-        assert_eq!(second.version, 1);
-        assert_eq!(
-            db.kv_get(KV_TASTE_PROFILE).await.expect("kv").as_deref(),
-            Some(first.text.as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_version_row_means_stale() {
-        let (_dir, db) = temp_db().await;
-        assert!(is_stale(&db).await.expect("staleness"));
-        db.kv_set(KV_PROFILE_VERSION, "not json")
-            .await
-            .expect("kv set");
-        assert!(is_stale(&db).await.expect("staleness"));
-        db.kv_set(
-            KV_PROFILE_VERSION,
-            r#"{"version":3,"built_at":"2000-01-01T00:00:00Z"}"#,
+            .unwrap();
+        let opml = dir.path().join("interests.opml");
+        let profile_path = dir.path().join("profile.md");
+        std::fs::write(&opml, r#"<outline text="Rust"/>"#).unwrap();
+        std::fs::write(
+            &profile_path,
+            "# Reader profile\n\nOriginal prose.\n\n## Interests\n- Custom Topic\n",
         )
-        .await
-        .expect("kv set");
-        assert!(is_stale(&db).await.expect("staleness"));
+        .unwrap();
+
+        let first = load_or_build(&db, &opml, &profile_path, 60).await.unwrap();
+        assert_eq!(first.version, 1);
+        assert!(first.text.contains("Original prose."));
+        assert!(first.text.contains("Custom Topic"));
+        assert!(!first.text.contains("## Interests"));
+
+        std::fs::write(
+            &profile_path,
+            "# Reader profile\n\nChanged prose.\n\n## Interests\n- Another Topic\n",
+        )
+        .unwrap();
+        let second = load_or_build(&db, &opml, &profile_path, 60).await.unwrap();
+        assert_eq!(second.version, first.version);
+        assert_eq!(second.built_at, first.built_at);
+        assert!(second.text.contains("Changed prose."));
+        assert!(second.text.contains("Another Topic"));
+        assert!(!second.text.contains("Original prose."));
+
+        let missing = load_profile(&dir.path().join("missing.md")).unwrap();
+        assert!(missing.body.is_empty() && missing.interests.is_empty());
     }
 
     #[tokio::test]
-    async fn rebuild_uses_the_model_and_bumps_the_version() {
-        use super::super::llm::{MockBackend, UsageMeter};
-        use crate::config::DeepseekConfig;
+    async fn weekly_rebuild_uses_mock_backend_and_bumps_profile_version() {
         use std::sync::Arc;
 
-        let (_dir, db) = temp_db().await;
-        load_or_build(&db, Path::new(OPML_PATH))
+        use super::super::llm::{MockBackend, UsageMeter};
+        use crate::config::DeepseekConfig;
+        use crate::types::{RatingEvent, TokenUsage};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("profile.db"))
             .await
-            .expect("initial");
-        seed_rating(&db, 1, "Postgres index internals", Vote::Up).await;
-        seed_rating(&db, 2, "Series B funding announced", Vote::Down).await;
+            .unwrap();
+        let opml = dir.path().join("interests.opml");
+        let profile_path = dir.path().join("profile.md");
+        std::fs::write(&opml, r#"<outline text="Rust"/>"#).unwrap();
+        std::fs::write(&profile_path, "# Reader profile\n\nLikes depth.\n").unwrap();
+        let initial = load_or_build(&db, &opml, &profile_path, 60).await.unwrap();
+        assert_eq!(initial.version, 1);
+
+        sqlx::query(
+            "INSERT INTO articles (id, canonical_url, title, first_seen) VALUES
+             (1, 'https://example.com/deep', 'A deep report', '2026-08-15T00:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        db.append_rating_event(&RatingEvent {
+            id: 0,
+            article_id: 1,
+            issue_date: None,
+            kind: "explicit".into(),
+            source: "cli".into(),
+            label: "loved".into(),
+            value: 1.0,
+            note: Some("specific evidence".into()),
+            event_at: Timestamp::now(),
+        })
+        .await
+        .unwrap();
 
         let backend = Arc::new(MockBackend::new());
         backend.push(
-            r#"{"learned_adjustments": "- Rank database internals deep dives higher.\n- Be sceptical of funding announcements."}"#,
-            crate::types::TokenUsage::default(),
+            r#"{"learned_adjustments":"- Rank first-hand reports higher.\n- Diversity check: keep formats balanced."}"#,
+            TokenUsage::default(),
         );
         let llm = LlmClient::with_backend(
             "deepseek-v4-flash",
-            "SYSTEM".into(),
+            initial.text,
             UsageMeter::new(&DeepseekConfig::default(), 2.0),
             backend.clone(),
         );
-
-        let rebuilt = rebuild(&db, &llm, Path::new(OPML_PATH))
-            .await
-            .expect("rebuild");
+        let rebuilt = rebuild(&db, &llm, &opml, &profile_path, 60).await.unwrap();
         assert_eq!(rebuilt.version, 2);
+        assert!(rebuilt.text.contains("Rank first-hand reports higher."));
         assert!(
             rebuilt
                 .text
-                .contains("Rank database internals deep dives higher.")
+                .contains("Diversity check: keep formats balanced.")
         );
-        assert!(
-            rebuilt
-                .text
-                .contains("Be sceptical of funding announcements.")
-        );
-
-        // The rating history reached the prompt, with feed + category context.
-        let prompts = backend.prompts();
-        assert_eq!(prompts.len(), 1);
-        assert!(prompts[0].user.contains("Postgres index internals"));
-        assert!(
-            prompts[0]
-                .user
-                .contains("DOWN | Series B funding announced")
-        );
-        assert!(prompts[0].user.contains("(1 up, 1 down)"));
-
-        // A later reload sees the new document.
-        let loaded = load_or_build(&db, Path::new(OPML_PATH))
-            .await
-            .expect("reload");
-        assert_eq!(loaded.text, rebuilt.text);
-        assert_eq!(loaded.version, 2);
-    }
-
-    #[tokio::test]
-    async fn rebuild_without_ratings_skips_the_model() {
-        use super::super::llm::{MockBackend, UsageMeter};
-        use crate::config::DeepseekConfig;
-        use std::sync::Arc;
-
-        let (_dir, db) = temp_db().await;
-        let backend = Arc::new(MockBackend::new());
-        let llm = LlmClient::with_backend(
-            "deepseek-v4-flash",
-            "SYSTEM".into(),
-            UsageMeter::new(&DeepseekConfig::default(), 2.0),
-            backend.clone(),
-        );
-        let profile = rebuild(&db, &llm, Path::new(OPML_PATH))
-            .await
-            .expect("rebuild");
-        assert_eq!(backend.calls(), 0, "no ratings ⇒ no LLM call");
-        assert!(profile.text.contains(NO_LEARNED_ADJUSTMENTS));
-        assert!(
-            weekly_rebuild_if_due(&db, &llm, Path::new(OPML_PATH))
-                .await
-                .expect("weekly")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn feed_priors_are_recomputed_from_ratings() {
-        let (_dir, db) = temp_db().await;
-        seed_rating(&db, 1, "Good one", Vote::Up).await;
-        seed_rating(&db, 2, "Bad one", Vote::Down).await;
-        let feeds = rebuild_feed_priors(&db).await.expect("priors");
-        assert_eq!(feeds, 1);
-        let priors = db.feed_priors().await.expect("load");
-        assert_eq!(priors.len(), 1);
-        assert_eq!(priors[0].upvotes, 1);
-        assert_eq!(priors[0].downvotes, 1);
-        assert!((priors[0].rate() - 0.5).abs() < 1e-12);
-    }
-
-    /// Insert an entry + article + rating triple that the joins can see.
-    async fn seed_rating(db: &Db, id: i64, title: &str, vote: Vote) {
-        use crate::types::{Entry, ExtractMethod, SourceRef};
-        let ts: Timestamp = "2026-08-15T05:30:00Z".parse().expect("ts");
-        db.upsert_entry(&Entry {
-            id,
-            feed_id: 7,
-            feed_title: Some("A Feed".into()),
-            category: Some("Tech".into()),
-            title: title.into(),
-            url: format!("https://example.com/{id}"),
-            canonical_url: Some(format!("https://example.com/{id}")),
-            author: None,
-            published_at: Some(ts),
-            comments_url: None,
-            raw_content: String::new(),
-            fetched_at: ts,
-        })
-        .await
-        .expect("entry");
-        let article_id = db
-            .upsert_article(&crate::types::Article {
-                id: 0,
-                canonical_url: format!("https://example.com/{id}"),
-                title: title.into(),
-                best_entry_id: id,
-                content_html: String::new(),
-                word_count: 900,
-                excerpt_only: false,
-                image_count: 0,
-                sources: Vec::<SourceRef>::new(),
-                first_seen: ts,
-                url: format!("https://example.com/{id}"),
-                author: None,
-                feed_id: 7,
-                feed_title: "A Feed".into(),
-                category: Some("Tech".into()),
-                published_at: Some(ts),
-                comments_url: None,
-                image_urls: vec![],
-                social: vec![],
-                extract_method: ExtractMethod::Miniflux,
-            })
-            .await
-            .expect("article");
-        db.upsert_rating(&Rating {
-            issue_date: Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date(),
-            article_id,
-            vote,
-            rated_at: Timestamp::now(),
-        })
-        .await
-        .expect("rating");
+        assert_eq!(backend.calls(), 1);
+        assert!(backend.prompts()[0].user.contains("LOVED | A deep report"));
     }
 }

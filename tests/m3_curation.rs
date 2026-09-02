@@ -190,7 +190,18 @@ fn scour_opml_still_yields_the_interest_list() {
 
     // The assembled profile is what actually reaches DeepSeek as the system
     // prompt; it must mention the stated preferences and the interests (§3.6).
-    let document = profile::build(&interests, profile::NO_LEARNED_ADJUSTMENTS);
+    let profile_file = profile::load_profile(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/profile.md"
+    )))
+    .expect("profile file");
+    let document = profile::build(
+        &profile_file.body,
+        &interests,
+        profile::NO_LEARNED_ADJUSTMENTS,
+        &[],
+        60,
+    );
     assert!(document.contains("Rust"));
     assert!(document.len() > 1000, "the profile is suspiciously short");
 }

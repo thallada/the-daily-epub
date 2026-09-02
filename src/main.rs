@@ -6,13 +6,14 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 use daily_epub::config::Config;
 use daily_epub::db::Db;
 use daily_epub::pipeline::{self, GenerateOptions, GenerateOutcome};
 use daily_epub::report::RunReport;
+use daily_epub::types::{ArticleId, RatingEvent, Vote};
 use daily_epub::{curate, http, server, social};
 
 /// A personalized daily newspaper, delivered as an EPUB.
@@ -36,6 +37,9 @@ enum Command {
     /// Taste-profile maintenance.
     #[command(subcommand)]
     Profile(ProfileCommand),
+    /// Inspect and edit explicit article verdicts.
+    #[command(subcommand)]
+    Ratings(RatingsCommand),
     /// Re-poll social scores for recent entries.
     BackfillSocial(BackfillSocialArgs),
     /// Database maintenance.
@@ -80,6 +84,80 @@ enum ProfileCommand {
     Rebuild,
 }
 
+#[derive(Debug, Subcommand)]
+enum RatingsCommand {
+    /// List current explicit ratings, newest first.
+    List(RatingsListArgs),
+    /// Set or correct an article's explicit rating.
+    Set(RatingsSetArgs),
+    /// Clear an article from the learned rating set.
+    Clear(RatingsClearArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RatingListLabel {
+    Loved,
+    Good,
+    Down,
+    Cleared,
+}
+
+impl RatingListLabel {
+    fn event_label(self) -> &'static str {
+        match self {
+            Self::Loved => "loved",
+            Self::Good => "good",
+            Self::Down => "not_for_me",
+            Self::Cleared => "cleared",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RatingSetLabel {
+    Loved,
+    Good,
+    Down,
+}
+
+impl RatingSetLabel {
+    fn vote(self) -> Vote {
+        match self {
+            Self::Loved => Vote::Loved,
+            Self::Good => Vote::Good,
+            Self::Down => Vote::NotForMe,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct RatingsListArgs {
+    #[arg(long, default_value_t = 90)]
+    days: i64,
+    #[arg(long, value_enum)]
+    label: Option<RatingListLabel>,
+}
+
+#[derive(Debug, clap::Args)]
+struct RatingsSetArgs {
+    #[arg(long, required_unless_present = "url", conflicts_with = "url")]
+    article: Option<ArticleId>,
+    #[arg(long, required_unless_present = "article", conflicts_with = "article")]
+    url: Option<String>,
+    #[arg(long, value_enum)]
+    label: RatingSetLabel,
+    #[arg(long)]
+    note: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct RatingsClearArgs {
+    #[arg(long, required_unless_present = "url", conflicts_with = "url")]
+    article: Option<ArticleId>,
+    #[arg(long, required_unless_present = "article", conflicts_with = "article")]
+    url: Option<String>,
+}
+
 #[derive(Debug, clap::Args)]
 struct BackfillSocialArgs {
     /// How many days back to re-poll.
@@ -113,6 +191,10 @@ async fn main() -> Result<()> {
         Command::Profile(ProfileCommand::Rebuild) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
             cmd_profile_rebuild(&config, &db).await?;
+        }
+        Command::Ratings(command) => {
+            let db = Db::open_and_migrate(&config.database_path).await?;
+            cmd_ratings(&config, &db, command).await?;
         }
         Command::BackfillSocial(args) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
@@ -236,15 +318,127 @@ fn print_lineup(issue: &daily_epub::types::Issue) {
 
 async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<()> {
     let meter = curate::llm::UsageMeter::new(&config.deepseek, config.max_daily_usd);
-    let profile = curate::profile::load_or_build(db, &config.interests_opml).await?;
+    let profile = curate::profile::load_or_build(
+        db,
+        &config.interests_opml,
+        &config.profile_path,
+        config.curation.feedback.verdicts_in_prompt,
+    )
+    .await?;
     let llm = curate::llm::LlmClient::new(&config.deepseek, profile.text, meter)?;
-    let rebuilt = curate::profile::rebuild(db, &llm, &config.interests_opml).await?;
-    let feeds = curate::profile::rebuild_feed_priors(db).await?;
+    let rebuilt = curate::profile::rebuild(
+        db,
+        &llm,
+        &config.interests_opml,
+        &config.profile_path,
+        config.curation.feedback.verdicts_in_prompt,
+    )
+    .await?;
     println!(
-        "taste profile rebuilt (version {}, {} chars); {feeds} feed priors refreshed",
+        "taste profile rebuilt (version {}, {} chars)",
         rebuilt.version,
         rebuilt.text.len()
     );
+    Ok(())
+}
+
+async fn resolve_rating_article(
+    db: &Db,
+    article: Option<ArticleId>,
+    url: Option<&str>,
+) -> Result<ArticleId> {
+    let article_id = match (article, url) {
+        (Some(article_id), None) => article_id,
+        (None, Some(url)) => {
+            let canonical = daily_epub::dedupe::canonical_url(url)
+                .with_context(|| format!("invalid article URL {url:?}"))?;
+            db.article_id_for_url(&canonical)
+                .await?
+                .with_context(|| format!("no article found for {canonical}"))?
+        }
+        _ => anyhow::bail!("provide exactly one of --article or --url"),
+    };
+    if db.get_article(article_id).await?.is_none() {
+        anyhow::bail!("article {article_id} was not found");
+    }
+    Ok(article_id)
+}
+
+async fn append_cli_event(
+    config: &Config,
+    db: &Db,
+    article_id: ArticleId,
+    vote: Option<Vote>,
+    note: Option<String>,
+) -> Result<i64> {
+    let (label, value) = match vote {
+        Some(Vote::Loved) => ("loved", Vote::Loved.value(&config.curation.feedback)),
+        Some(Vote::Good) => ("good", Vote::Good.value(&config.curation.feedback)),
+        Some(Vote::NotForMe) => (
+            "not_for_me",
+            Vote::NotForMe.value(&config.curation.feedback),
+        ),
+        None => ("cleared", 0.0),
+    };
+    let event = RatingEvent {
+        id: 0,
+        article_id,
+        issue_date: db.latest_issue_date_for_article(article_id).await?,
+        kind: "explicit".into(),
+        source: "cli".into(),
+        label: label.into(),
+        value,
+        note,
+        event_at: jiff::Timestamp::now(),
+    };
+    Ok(db.append_rating_event(&event).await?)
+}
+
+async fn cmd_ratings(config: &Config, db: &Db, command: RatingsCommand) -> Result<()> {
+    match command {
+        RatingsCommand::List(args) => {
+            let ratings = db.current_ratings_including_cleared(args.days).await?;
+            let mut shown = 0usize;
+            for rating in ratings {
+                if args
+                    .label
+                    .is_some_and(|label| rating.label != label.event_label())
+                {
+                    continue;
+                }
+                let note = rating
+                    .note
+                    .as_deref()
+                    .map(|note| format!(" · note: {note}"))
+                    .unwrap_or_default();
+                println!(
+                    "{} · article {} · {} · {} — {}{}",
+                    rating.event_at,
+                    rating.article_id,
+                    rating.label,
+                    rating.title,
+                    rating.feed_title,
+                    note
+                );
+                shown += 1;
+            }
+            println!("{shown} current rating(s)");
+        }
+        RatingsCommand::Set(args) => {
+            let article_id = resolve_rating_article(db, args.article, args.url.as_deref()).await?;
+            let vote = args.label.vote();
+            let event_id = append_cli_event(config, db, article_id, Some(vote), args.note).await?;
+            println!(
+                "recorded {} for article {article_id} (event {event_id})",
+                vote.as_str()
+            );
+        }
+        RatingsCommand::Clear(args) => {
+            let article_id = resolve_rating_article(db, args.article, args.url.as_deref()).await?;
+            let event_id = append_cli_event(config, db, article_id, None, None).await?;
+            println!("cleared article {article_id} (event {event_id})");
+        }
+    }
     Ok(())
 }
 
@@ -310,6 +504,33 @@ mod tests {
             Command::Profile(ProfileCommand::Rebuild)
         ));
         assert!(matches!(
+            Cli::try_parse_from([
+                "daily-epub",
+                "ratings",
+                "set",
+                "--article",
+                "42",
+                "--label",
+                "good"
+            ])
+            .unwrap()
+            .command,
+            Command::Ratings(RatingsCommand::Set(_))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "daily-epub",
+                "ratings",
+                "clear",
+                "--url",
+                "https://example.com"
+            ])
+            .unwrap()
+            .command,
+            Command::Ratings(RatingsCommand::Clear(_))
+        ));
+
+        assert!(matches!(
             Cli::try_parse_from(["daily-epub", "backfill-social", "--days", "14"])
                 .unwrap()
                 .command,
@@ -324,5 +545,69 @@ mod tests {
 
         let cli = Cli::try_parse_from(["daily-epub", "--config", "/tmp/x.toml", "serve"]).unwrap();
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/x.toml")));
+    }
+
+    #[tokio::test]
+    async fn cli_set_and_clear_append_cli_events_with_latest_issue_date() {
+        use sqlx::Row as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("ratings.db"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO articles (id, canonical_url, title, first_seen) VALUES
+             (42, 'https://example.com/article', 'Article', '2026-08-15T00:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO issues (date, issue_number, generated_at) VALUES
+             ('2026-08-14', 1, '2026-08-14T12:00:00Z'),
+             ('2026-08-15', 2, '2026-08-15T12:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO issue_articles (issue_date, article_id, section) VALUES
+             ('2026-08-14', 42, 'Top Stories'),
+             ('2026-08-15', 42, 'Top Stories')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let config = Config::default();
+        append_cli_event(
+            &config,
+            &db,
+            42,
+            Some(Vote::Good),
+            Some("useful note".into()),
+        )
+        .await
+        .unwrap();
+        append_cli_event(&config, &db, 42, None, None)
+            .await
+            .unwrap();
+
+        let rows = sqlx::query(
+            "SELECT issue_date, source, label, value, note FROM rating_events ORDER BY id",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get::<String, _>("source"), "cli");
+        assert_eq!(rows[0].get::<String, _>("issue_date"), "2026-08-15");
+        assert_eq!(rows[0].get::<String, _>("label"), "good");
+        assert_eq!(rows[0].get::<f64, _>("value"), 0.35);
+        assert_eq!(rows[0].get::<String, _>("note"), "useful note");
+        assert_eq!(rows[1].get::<String, _>("source"), "cli");
+        assert_eq!(rows[1].get::<String, _>("label"), "cleared");
+        assert_eq!(rows[1].get::<f64, _>("value"), 0.0);
+        assert!(db.current_ratings(36500).await.unwrap().is_empty());
     }
 }

@@ -63,8 +63,9 @@ struct SectionPage {
 }
 
 struct RatingLinks {
-    up_url: String,
-    down_url: String,
+    loved_url: String,
+    good_url: String,
+    not_for_me_url: String,
 }
 
 #[derive(Template)]
@@ -344,8 +345,15 @@ pub fn render_article(
     // The X4 has no browser, so rating links are pointless there (§7).
     let rating = match (hmac_secret, edition) {
         (Some(secret), Edition::Standard) if !secret.is_empty() => Some(RatingLinks {
-            up_url: rating_url(public_url, secret, issue.meta.date, article.id, Vote::Up),
-            down_url: rating_url(public_url, secret, issue.meta.date, article.id, Vote::Down),
+            loved_url: rating_url(public_url, secret, issue.meta.date, article.id, Vote::Loved),
+            good_url: rating_url(public_url, secret, issue.meta.date, article.id, Vote::Good),
+            not_for_me_url: rating_url(
+                public_url,
+                secret,
+                issue.meta.date,
+                article.id,
+                Vote::NotForMe,
+            ),
         }),
         _ => None,
     };
@@ -466,16 +474,19 @@ mod tests {
     #[test]
     fn rating_token_matches_the_spec_vector() {
         let date: Date = "2026-08-15".parse().unwrap();
-        assert_eq!(rating_message(date, 1234, Vote::Up), "2026-08-15/1234/up");
-        // hex(hmac_sha256("test-secret", "2026-08-15/1234/up"))[..16]
-        let token = rating_token("test-secret", date, 1234, Vote::Up);
+        assert_eq!(
+            rating_message(date, 1234, Vote::Loved),
+            "2026-08-15/1234/loved"
+        );
+        // hex(hmac_sha256("test-secret", "2026-08-15/1234/loved"))[..16]
+        let token = rating_token("test-secret", date, 1234, Vote::Loved);
         assert_eq!(token.len(), TOKEN_LEN);
         assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
 
         // Independently computed reference value.
         use hmac::Mac;
         let mut mac = Hmac::<Sha256>::new_from_slice(b"test-secret").unwrap();
-        mac.update(b"2026-08-15/1234/up");
+        mac.update(b"2026-08-15/1234/loved");
         let expected: String = hex::encode(mac.finalize().into_bytes())
             .chars()
             .take(16)
@@ -483,9 +494,12 @@ mod tests {
         assert_eq!(token, expected);
 
         // Different vote, article and secret all change the token.
-        assert_ne!(token, rating_token("test-secret", date, 1234, Vote::Down));
-        assert_ne!(token, rating_token("test-secret", date, 1235, Vote::Up));
-        assert_ne!(token, rating_token("other-secret", date, 1234, Vote::Up));
+        assert_ne!(
+            token,
+            rating_token("test-secret", date, 1234, Vote::NotForMe)
+        );
+        assert_ne!(token, rating_token("test-secret", date, 1235, Vote::Loved));
+        assert_ne!(token, rating_token("other-secret", date, 1234, Vote::Loved));
     }
 
     /// The EPUB signs the links and `server.rs` verifies them: one formula, or no
@@ -494,17 +508,28 @@ mod tests {
     #[test]
     fn epub_and_server_share_one_token_vector() {
         let date: Date = "2026-08-15".parse().unwrap();
-        assert_eq!(
-            rating_token("test-secret", date, 42, Vote::Up),
-            "3b314cf7e6d8f50f"
-        );
+        let token = rating_token("test-secret", date, 42, Vote::Loved);
+        assert_eq!(token, "cece96767d6c5f8a");
+        assert!(crate::server::verify_token(
+            "test-secret",
+            date,
+            42,
+            Vote::Loved,
+            &token
+        ));
     }
 
     #[test]
     fn rating_url_has_the_spec_shape() {
         let date: Date = "2026-08-15".parse().unwrap();
-        let url = rating_url("https://daily.hallada.net/", "s3cret", date, 99, Vote::Down);
-        let token = rating_token("s3cret", date, 99, Vote::Down);
+        let url = rating_url(
+            "https://daily.hallada.net/",
+            "s3cret",
+            date,
+            99,
+            Vote::NotForMe,
+        );
+        let token = rating_token("s3cret", date, 99, Vote::NotForMe);
         assert_eq!(
             url,
             format!("https://daily.hallada.net/r/2026-08-15/99/down?t={token}")
@@ -587,7 +612,8 @@ mod tests {
         assert!(chapter.xhtml.contains("Example Feed"));
         assert!(chapter.xhtml.contains("6 min read"));
         assert!(chapter.xhtml.contains("\u{25b2} 342 on HN"));
-        assert!(chapter.xhtml.contains("/r/2026-08-15/1/up?t="));
+        assert!(chapter.xhtml.contains("/r/2026-08-15/1/loved?t="));
+        assert!(chapter.xhtml.contains("/r/2026-08-15/1/good?t="));
         assert!(chapter.xhtml.contains("/r/2026-08-15/1/down?t="));
         assert!(chapter.xhtml.contains("Read online"));
         assert!(chapter.xhtml.contains("href=\"disc-1001.xhtml\""));

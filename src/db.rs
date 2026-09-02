@@ -2,8 +2,8 @@
 //!
 //! Runtime queries only — no `sqlx::query!` macros (implementation notes §1).
 //! Timestamps are stored as RFC3339 UTC strings and dates as `YYYY-MM-DD`
-//! (implementation notes §2). Every write is an idempotent upsert so that
-//! `generate --date X` can be re-run safely (implementation notes §12).
+//! (implementation notes §2). Pipeline writes are idempotent upserts so that
+//! `generate --date X` can be re-run safely; feedback events are append-only.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -15,8 +15,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 
 use crate::types::{
-    Article, ArticleId, Entry, EntryId, FeedId, FeedPrior, LlmScore, Pick, Rating, SocialRef,
-    SocialSource, SourceRef, Vote,
+    Article, ArticleId, Entry, EntryId, Facets, LlmScore, Pick, RatedArticle, RatingEvent,
+    SocialRef, SocialSource, SourceRef,
 };
 
 /// Embedded migrations from `./migrations` (implementation notes §1).
@@ -535,113 +535,104 @@ impl Db {
     }
 
     // -----------------------------------------------------------------
-    // ratings + feed priors (§3.9)
+    // append-only rating events (§6.2)
     // -----------------------------------------------------------------
 
-    /// Idempotent upsert of a reader vote (§3.9). Returns true if it changed anything.
-    pub async fn upsert_rating(&self, rating: &Rating) -> Result<bool> {
-        let res = sqlx::query(
-            "INSERT INTO ratings (issue_date, article_id, vote, rated_at)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(issue_date, article_id) DO UPDATE SET
-                 vote = excluded.vote,
-                 rated_at = excluded.rated_at
-             WHERE ratings.vote != excluded.vote",
+    /// Append one feedback event and return its database id.
+    pub async fn append_rating_event(&self, event: &RatingEvent) -> Result<i64> {
+        let row = sqlx::query(
+            "INSERT INTO rating_events
+                 (article_id, issue_date, kind, source, label, value, note, event_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             RETURNING id",
         )
-        .bind(rating.issue_date.to_string())
-        .bind(rating.article_id)
-        .bind(rating.vote.as_i64())
-        .bind(fmt_ts(rating.rated_at))
-        .execute(&self.pool)
+        .bind(event.article_id)
+        .bind(event.issue_date.map(|date| date.to_string()))
+        .bind(&event.kind)
+        .bind(&event.source)
+        .bind(&event.label)
+        .bind(event.value)
+        .bind(event.note.as_deref())
+        .bind(fmt_ts(event.event_at))
+        .fetch_one(&self.pool)
         .await?;
-        Ok(res.rows_affected() > 0)
+        Ok(row.get("id"))
     }
 
-    /// Every rating joined to the feed that carried the article (§3.9 priors).
-    pub async fn ratings_with_feed(&self) -> Result<Vec<(FeedId, Vote)>> {
+    /// Latest issue containing an article, used to attach CLI feedback when possible.
+    pub async fn latest_issue_date_for_article(
+        &self,
+        article_id: ArticleId,
+    ) -> Result<Option<Date>> {
+        let row = sqlx::query(
+            "SELECT issue_date FROM issue_articles
+             WHERE article_id = ? ORDER BY issue_date DESC LIMIT 1",
+        )
+        .bind(article_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            parse_date(
+                "issue_articles.issue_date",
+                &row.get::<String, _>("issue_date"),
+            )
+        })
+        .transpose()
+    }
+
+    /// Current explicit verdicts, newest first. A latest `cleared` event removes
+    /// its article from this learned set (§6.2).
+    pub async fn current_ratings(&self, lookback_days: i64) -> Result<Vec<RatedArticle>> {
+        self.latest_explicit_ratings(lookback_days, false).await
+    }
+
+    /// Current explicit events including `cleared`, for the ratings CLI.
+    pub async fn current_ratings_including_cleared(
+        &self,
+        lookback_days: i64,
+    ) -> Result<Vec<RatedArticle>> {
+        self.latest_explicit_ratings(lookback_days, true).await
+    }
+
+    async fn latest_explicit_ratings(
+        &self,
+        lookback_days: i64,
+        include_cleared: bool,
+    ) -> Result<Vec<RatedArticle>> {
+        let since = Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(lookback_days.max(0).saturating_mul(24)))
+            .unwrap_or(Timestamp::UNIX_EPOCH);
         let rows = sqlx::query(
-            "SELECT e.feed_id AS feed_id, r.vote AS vote
-             FROM ratings r
+            "WITH ranked AS (
+                 SELECT re.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY re.article_id
+                            ORDER BY re.event_at DESC, re.id DESC
+                        ) AS event_rank
+                 FROM rating_events re
+                 WHERE re.kind = 'explicit' AND re.event_at >= ?
+             )
+             SELECT r.article_id, r.issue_date, r.label, r.value, r.note, r.event_at,
+                    COALESCE(a.title, '') AS title,
+                    COALESCE(e.feed_title, '') AS feed_title,
+                    (SELECT ia.summary FROM issue_articles ia
+                     WHERE ia.article_id = r.article_id
+                     ORDER BY ia.issue_date DESC LIMIT 1) AS summary,
+                    aa.facets_json AS facets_json
+             FROM ranked r
              JOIN articles a ON a.id = r.article_id
-             JOIN entries e ON e.id = a.best_entry_id",
+             LEFT JOIN entries e ON e.id = a.best_entry_id
+             LEFT JOIN article_assessments aa
+                    ON aa.article_id = r.article_id AND aa.stage = 'deep'
+             WHERE r.event_rank = 1 AND (? OR r.label != 'cleared')
+             ORDER BY r.event_at DESC, r.id DESC",
         )
+        .bind(fmt_ts(since))
+        .bind(include_cleared)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .map(|r| {
-                let vote = if r.get::<i64, _>("vote") >= 0 {
-                    Vote::Up
-                } else {
-                    Vote::Down
-                };
-                (r.get::<i64, _>("feed_id"), vote)
-            })
-            .collect())
-    }
 
-    /// Recent ratings with article titles, for the weekly profile rewrite (§3.6).
-    pub async fn recent_ratings_detailed(&self, since: Date) -> Result<Vec<(Rating, String)>> {
-        let rows = sqlx::query(
-            "SELECT r.issue_date AS issue_date, r.article_id AS article_id, r.vote AS vote,
-                    r.rated_at AS rated_at, a.title AS title
-             FROM ratings r JOIN articles a ON a.id = r.article_id
-             WHERE r.issue_date >= ? ORDER BY r.rated_at DESC",
-        )
-        .bind(since.to_string())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter()
-            .map(|r| {
-                let rating = Rating {
-                    issue_date: parse_date(
-                        "ratings.issue_date",
-                        &r.get::<String, _>("issue_date"),
-                    )?,
-                    article_id: r.get::<i64, _>("article_id"),
-                    vote: if r.get::<i64, _>("vote") >= 0 {
-                        Vote::Up
-                    } else {
-                        Vote::Down
-                    },
-                    rated_at: parse_ts("ratings.rated_at", &r.get::<String, _>("rated_at"))?,
-                };
-                Ok((rating, r.get::<String, _>("title")))
-            })
-            .collect()
-    }
-
-    pub async fn upsert_feed_prior(&self, prior: &FeedPrior) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO feed_priors (feed_id, upvotes, downvotes, included)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(feed_id) DO UPDATE SET
-                 upvotes = excluded.upvotes,
-                 downvotes = excluded.downvotes,
-                 included = excluded.included",
-        )
-        .bind(prior.feed_id)
-        .bind(prior.upvotes)
-        .bind(prior.downvotes)
-        .bind(prior.included)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn feed_priors(&self) -> Result<Vec<FeedPrior>> {
-        let rows = sqlx::query("SELECT feed_id, upvotes, downvotes, included FROM feed_priors")
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows
-            .iter()
-            .map(|r| FeedPrior {
-                feed_id: r.get::<i64, _>("feed_id"),
-                upvotes: r.get::<i64, _>("upvotes"),
-                downvotes: r.get::<i64, _>("downvotes"),
-                included: r.get::<i64, _>("included"),
-            })
-            .collect())
+        rows.iter().map(rated_article_from_row).collect()
     }
 
     // -----------------------------------------------------------------
@@ -784,6 +775,34 @@ fn article_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Article> {
         image_urls: Vec::new(),
         social: Vec::new(),
         extract_method: crate::types::ExtractMethod::Miniflux,
+    })
+}
+
+fn rated_article_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RatedArticle> {
+    let issue_date = row
+        .get::<Option<String>, _>("issue_date")
+        .map(|raw| parse_date("rating_events.issue_date", &raw))
+        .transpose()?;
+    let facets = row.get::<Option<String>, _>("facets_json").and_then(|raw| {
+        match serde_json::from_str::<Facets>(&raw) {
+            Ok(facets) => Some(facets),
+            Err(error) => {
+                tracing::warn!(%error, "ignoring malformed assessment facets");
+                None
+            }
+        }
+    });
+    Ok(RatedArticle {
+        article_id: row.get("article_id"),
+        issue_date,
+        title: row.get("title"),
+        feed_title: row.get("feed_title"),
+        summary: row.get("summary"),
+        facets,
+        note: row.get("note"),
+        value: row.get("value"),
+        label: row.get("label"),
+        event_at: parse_ts("rating_events.event_at", &row.get::<String, _>("event_at"))?,
     })
 }
 
@@ -991,20 +1010,187 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ratings_upsert_is_idempotent() {
+    async fn latest_explicit_rating_wins_and_clear_removes_it() {
         let (_dir, db) = temp_db().await;
-        let rating = Rating {
-            issue_date: "2026-08-15".parse().unwrap(),
-            article_id: 1,
-            vote: Vote::Up,
-            rated_at: ts("2026-08-15T12:00:00Z"),
+        db.upsert_entry(&sample_entry(1)).await.unwrap();
+        let article = Article {
+            id: 0,
+            canonical_url: "https://example.com/1".into(),
+            title: "Story 1".into(),
+            best_entry_id: 1,
+            content_html: "<p>body</p>".into(),
+            word_count: 900,
+            excerpt_only: false,
+            image_count: 0,
+            sources: vec![],
+            first_seen: ts("2026-08-15T05:30:00Z"),
+            url: "https://example.com/1".into(),
+            author: None,
+            feed_id: 7,
+            feed_title: "Hacker News".into(),
+            category: None,
+            published_at: None,
+            comments_url: None,
+            image_urls: vec![],
+            social: vec![],
+            extract_method: ExtractMethod::Miniflux,
         };
-        assert!(db.upsert_rating(&rating).await.unwrap());
-        assert!(!db.upsert_rating(&rating).await.unwrap());
-        let flipped = Rating {
-            vote: Vote::Down,
-            ..rating.clone()
+        let article_id = db.upsert_article(&article).await.unwrap();
+        for (date, number, summary) in [
+            ("2026-08-14", 1, "Older summary"),
+            ("2026-08-15", 2, "Newest summary"),
+        ] {
+            db.upsert_issue(
+                date.parse().unwrap(),
+                number,
+                ts("2026-08-15T05:30:00Z"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO issue_articles
+                     (issue_date, article_id, section, position, is_lead, summary)
+                 VALUES (?, ?, 'Top Stories', 1, 0, ?)",
+            )
+            .bind(date)
+            .bind(article_id)
+            .bind(summary)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO article_assessments
+                 (article_id, stage, model, prompt_version, facets_json, assessed_at)
+             VALUES (?, 'deep', 'mock', 1, ?, '2026-08-15T11:00:00Z')",
+        )
+        .bind(article_id)
+        .bind(r#"{"format":"analysis_essay","depth":"deep","evidence":null,"commerciality":null,"topic_group":"software_engineering","technicality":"advanced","locality":null,"specific_topics":null}"#)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let event = |label: &str, value: f64, at: &str| RatingEvent {
+            id: 0,
+            article_id,
+            issue_date: Some("2026-08-15".parse().unwrap()),
+            kind: "explicit".into(),
+            source: "cli".into(),
+            label: label.into(),
+            value,
+            note: None,
+            event_at: ts(at),
         };
-        assert!(db.upsert_rating(&flipped).await.unwrap());
+        db.append_rating_event(&event("loved", 1.0, "2026-08-15T12:00:00Z"))
+            .await
+            .unwrap();
+        db.append_rating_event(&event("good", 0.35, "2026-08-15T13:00:00Z"))
+            .await
+            .unwrap();
+        let mut implicit = event("read_fully", 0.5, "2026-08-15T13:30:00Z");
+        implicit.kind = "implicit".into();
+        implicit.source = "bookorbit".into();
+        db.append_rating_event(&implicit).await.unwrap();
+        let ratings = db.current_ratings(36500).await.unwrap();
+        assert_eq!(ratings.len(), 1);
+        assert_eq!(ratings[0].label, "good");
+        assert_eq!(ratings[0].feed_title, "Hacker News");
+        assert_eq!(ratings[0].summary.as_deref(), Some("Newest summary"));
+        assert_eq!(
+            ratings[0]
+                .facets
+                .as_ref()
+                .and_then(|facets| facets.format.as_deref()),
+            Some("analysis_essay")
+        );
+
+        db.append_rating_event(&event("cleared", 0.0, "2026-08-15T14:00:00Z"))
+            .await
+            .unwrap();
+        assert!(db.current_ratings(36500).await.unwrap().is_empty());
+        let events = db.current_ratings_including_cleared(36500).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].label, "cleared");
+        let sources: Vec<String> =
+            sqlx::query_scalar("SELECT source FROM rating_events ORDER BY id")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(sources, ["cli", "cli", "bookorbit", "cli"]);
+    }
+
+    #[tokio::test]
+    async fn curation_v2_migration_copies_ratings_and_drops_old_tables() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO articles (id, canonical_url, title, first_seen) VALUES
+             (1, 'https://example.com/loved', 'Loved', '2026-08-15T00:00:00Z'),
+             (2, 'https://example.com/down', 'Down', '2026-08-15T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ratings (issue_date, article_id, vote, rated_at) VALUES
+             ('2026-08-15', 1, 1, '2026-08-15T12:00:00Z'),
+             ('2026-08-15', 2, -1, '2026-08-15T13:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!("../migrations/0002_curation_v2.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let rows = sqlx::query(
+            "SELECT article_id, issue_date, kind, source, label, value, event_at
+             FROM rating_events ORDER BY article_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get::<String, _>("label"), "loved");
+        assert_eq!(rows[0].get::<f64, _>("value"), 1.0);
+        assert_eq!(rows[1].get::<String, _>("label"), "not_for_me");
+        assert_eq!(rows[1].get::<f64, _>("value"), -1.0);
+        for row in &rows {
+            assert_eq!(row.get::<String, _>("kind"), "explicit");
+            assert_eq!(row.get::<String, _>("source"), "migration");
+            assert_eq!(row.get::<String, _>("issue_date"), "2026-08-15");
+        }
+        assert_eq!(rows[0].get::<String, _>("event_at"), "2026-08-15T12:00:00Z");
+
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(!tables.iter().any(|table| table == "ratings"));
+        assert!(!tables.iter().any(|table| table == "feed_priors"));
+        assert!(tables.iter().any(|table| table == "scores"));
+        for expected in [
+            "rating_events",
+            "article_embeddings",
+            "interest_embeddings",
+            "article_assessments",
+            "candidate_runs",
+        ] {
+            assert!(tables.iter().any(|table| table == expected), "{expected}");
+        }
     }
 }

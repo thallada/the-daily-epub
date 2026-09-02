@@ -10,7 +10,7 @@ select and introduce 15–25 of them. It assembles two EPUB editions (a standard
 and one tuned for the Xteink X4 e-ink reader), converts the X4 edition to XTC, and
 publishes the lot over its own OPDS catalog — which doubles as a
 [BookOrbit](https://github.com/thallada/bookorbit) watched folder if you run one.
-Each article chapter ends with 👍/👎 links that feed back into tomorrow's curation.
+Each article chapter ends with Loved it / Good / Not for me links that feed back into tomorrow's curation.
 
 Steady-state cost is roughly **$0.05–0.30/day** in DeepSeek tokens, hard-capped by
 `max_daily_usd`.
@@ -48,13 +48,13 @@ selects, feed excerpts stand in for summaries) instead of losing the day's issue
 | Rust (2024 edition toolchain) | building | `cargo build --release` |
 | **Miniflux** with an API key | the only content source | Settings → API Keys. The client is read-only and never mutates read state. |
 | **DeepSeek API key** | curation + editorial | <https://platform.deepseek.com>. Optional: `--skip-llm` runs the whole pipeline without it. |
-| A 32+ byte random secret | signs the 👍/👎 rating links | `openssl rand -hex 32` |
+| A 32+ byte random secret | signs the article rating links | `openssl rand -hex 32` |
 | **BookOrbit** library + watched folder | *optional* — a richer library UI on top of the same folder | Delivery does not need it: `daily-epub serve` has its own OPDS catalog over `publish.epub_dir`. If you do run it, create a dedicated "The Daily EPUB" library, enable *Watch folders*, and point `publish.epub_dir` at it. |
 | **Node.js 18+** and a clone of [`epub-to-xtc-converter`](https://github.com/bigbag/epub-to-xtc-converter) | XTC/XTCH output for the Xteink X4 | Optional (`xtc.enabled = false` turns it off). Needs `npm install` **inside `cli/`**, and a settings JSON naming a real TTF/OTF — see below. It has **no global npm bin** — it is invoked as `node <repo>/cli/index.js convert …`, which is why `xtc.command`/`xtc.args` are fully general. |
 | A reverse proxy for `daily.hallada.net` → `127.0.0.1:3499` | rating links must be reachable from e-readers on the internet | TLS via your existing setup. |
 
-`data/scour-interests.opml` (the ~220 Scour interests the taste profile is seeded
-from) must be readable at the path in `interests_opml`.
+`data/profile.md` is the hand-maintained reader profile; its optional interests are merged
+with `data/scour-interests.opml`. Both paths are configurable.
 
 ---
 
@@ -72,7 +72,10 @@ sudo install -m0755 target/release/daily-epub /usr/local/bin/
 ```
 daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm]
 daily-epub serve                # rating endpoints + OPDS catalog + downloads
-daily-epub profile rebuild      # regenerate the taste profile from ratings (weekly inside generate)
+daily-epub profile rebuild      # regenerate learned profile adjustments
+daily-epub ratings list --days 90
+daily-epub ratings set --article 42 --label loved --note "excellent"
+daily-epub ratings clear --url https://example.com/article
 daily-epub backfill-social      # re-poll social scores for recent articles
 daily-epub db migrate           # run migrations (also automatic on every start)
 ```
@@ -114,7 +117,8 @@ Secrets belong in the environment file, never in the TOML.
 | `world_briefing` | `true` | Include the Wikipedia Current Events section. |
 | `database_path` | `/var/lib/daily-epub/daily-epub.db` | SQLite file; parent dirs are created. |
 | `out_dir` | `/var/lib/daily-epub/out` | Where `generate` writes artifacts before publishing. |
-| `interests_opml` | `data/scour-interests.opml` | Scour interest export used to seed the taste profile. |
+| `profile_path` | `data/profile.md` | Hand-maintained reader profile, loaded every run. |
+| `interests_opml` | `data/scour-interests.opml` | Scour interests merged with the profile interests. |
 | `miniflux.base_url` | `http://127.0.0.1:8082` | Miniflux root (no `/v1`). |
 | `miniflux.api_key` | — | **`DAILY_EPUB_MINIFLUX__API_KEY`**. Required. |
 | `miniflux.page_limit` | `250` | Entries per page; Miniflux caps this at 250. |
@@ -131,6 +135,10 @@ Secrets belong in the environment file, never in the TOML.
 | `curation.blocked_domains` | `[]` | Hosts excluded outright. |
 | `curation.paywall_domains` | `[]` | Extra paywalled hosts, merged with the built-in list (nytimes, wsj, ft, economist, …). |
 | `curation.sections` | 8 sections | The **only** section names the model may use. `World Briefing` is reserved and never offered. |
+| `curation.feedback.loved_value` | `1.0` | Weight for a Loved it verdict. |
+| `curation.feedback.good_value` | `0.35` | Weight for a Good verdict. |
+| `curation.feedback.not_for_me_value` | `-1.0` | Weight for a Not for me verdict. |
+| `curation.feedback.verdicts_in_prompt` | `60` | Recent explicit verdicts included in the system prompt. |
 | `publish.epub_dir` | `/srv/bookorbit/libraries/daily-epub` | Both EPUB editions land here by atomic copy, and this is the directory the OPDS feed lists. The editions are distinguished by a `(X4)` tag in **both** the filename and `dc:title` — libraries and OPDS clients list books by title, so the filename alone would make them look identical. Point a BookOrbit watched folder at it if you want its UI too. **Renamed from `bookorbit_dir`**; the old key is a hard config error. |
 | `publish.xtc_dir` | `/var/lib/daily-epub/xtc` | XTC artifacts. **Not** listed in the OPDS feed — CrossPoint cannot acquire them — but downloadable at `/files/xtc/<name>` for sideloading. |
 | `xtc.enabled` | `true` | Set `false` to skip the converter entirely. |
@@ -356,9 +364,8 @@ curl -s https://daily.hallada.net/healthz
 curl -s https://daily.hallada.net/opds/daily.xml | head
 curl -s https://daily.hallada.net/issues.json | jq '.[0]'
 
-# 7. Feedback loop: tap 👍 in KOReader, then
-sqlite3 /var/lib/daily-epub/daily-epub.db 'select * from ratings;'
-sqlite3 /var/lib/daily-epub/daily-epub.db 'select * from feed_priors;'
+# 7. Feedback loop: tap Loved it / Good / Not for me in KOReader, then
+sqlite3 /var/lib/daily-epub/daily-epub.db 'select * from rating_events order by event_at desc;'
 
 # 8. Watch cost and quality for a week
 sqlite3 /var/lib/daily-epub/daily-epub.db \

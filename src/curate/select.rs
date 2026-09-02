@@ -144,9 +144,8 @@ fn render_candidate(candidate: &ScoredArticle) -> String {
     }
     let _ = writeln!(
         block,
-        "signals: social {:.2}; feed prior {:.2}; via {}{}",
+        "signals: social {:.2}; via {}{}",
         candidate.social_score,
-        candidate.feed_prior,
         source_kinds(candidate),
         if candidate.auto_include {
             "; ALWAYS-INCLUDE"
@@ -716,7 +715,6 @@ mod tests {
             article: article(id, title, words),
             prefilter_score: 40.0 + score,
             social_score: 1.0,
-            feed_prior: 0.5,
             llm: Some(LlmScore {
                 score,
                 category: "Tech & Engineering".into(),

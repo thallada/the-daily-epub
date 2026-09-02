@@ -224,6 +224,10 @@ hr.rule {
   font-size: 0.9em;
 }
 
+.rating {
+  font-size: 0.8em;
+}
+
 .rating a {
   text-decoration: none;
 }

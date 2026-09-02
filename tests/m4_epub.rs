@@ -270,16 +270,20 @@ fn rating_links_carry_the_spec_token() {
     .expect("article chapter");
 
     let date = issue.meta.date;
-    let up = build::rating_token("integration-secret", date, 1, Vote::Up);
-    let down = build::rating_token("integration-secret", date, 1, Vote::Down);
-    assert_eq!(up.len(), 16);
-    assert_ne!(up, down);
-    assert!(chapter.xhtml.contains(&format!(
-        "https://daily.hallada.net/r/2026-08-15/1/up?t={up}"
-    )));
-    assert!(chapter.xhtml.contains(&format!(
-        "https://daily.hallada.net/r/2026-08-15/1/down?t={down}"
-    )));
+    let loved = build::rating_token("integration-secret", date, 1, Vote::Loved);
+    let good = build::rating_token("integration-secret", date, 1, Vote::Good);
+    let down = build::rating_token("integration-secret", date, 1, Vote::NotForMe);
+    assert_eq!(loved.len(), 16);
+    assert_ne!(loved, good);
+    assert_ne!(good, down);
+    for (segment, token) in [("loved", loved), ("good", good), ("down", down)] {
+        assert!(chapter.xhtml.contains(&format!(
+            "https://daily.hallada.net/r/2026-08-15/1/{segment}?t={token}"
+        )));
+    }
+    assert!(chapter.xhtml.contains("[ Loved it ]"));
+    assert!(chapter.xhtml.contains("[ Good ]"));
+    assert!(chapter.xhtml.contains("[ Not for me ]"));
 }
 
 #[test]

@@ -12,15 +12,14 @@
 //! | came via Scour | +8 | §3.5 (already matched a stated interest) |
 //! | came via HN frontpage | +8 | §3.5 |
 //! | carried by several feeds | 0 … +8 | §3.2 (multi-source *is* social proof) |
-//! | feed prior | −12 … +12 | §3.9 beta-smoothed upvote rate, neutral at 0.5 |
 //! | excerpt only | −20 | §3.5 (penalized, never banned — §7) |
 //! | roundup/release-notes title | −15 | §3.5 |
 //! | blocked domain | excluded | §3.5 |
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::config::{Config, CurationConfig};
-use crate::types::{Article, ArticleId, FeedId, FeedPrior, ScoredArticle, SourceKind};
+use crate::types::{Article, ArticleId, FeedId, ScoredArticle, SourceKind};
 
 /// Title patterns that mark low-effort posts: link roundups, release notes,
 /// sponsor posts (§3.5).
@@ -64,7 +63,6 @@ pub const MAX_SOCIAL_POINTS: f64 = 25.0;
 pub const SCOUR_BONUS: f64 = 8.0;
 pub const HN_FRONTPAGE_BONUS: f64 = 8.0;
 pub const MAX_MULTI_SOURCE_POINTS: f64 = 8.0;
-pub const MAX_FEED_PRIOR_POINTS: f64 = 12.0;
 pub const EXCERPT_ONLY_PENALTY: f64 = 20.0;
 pub const ROUNDUP_TITLE_PENALTY: f64 = 15.0;
 
@@ -75,8 +73,6 @@ const SOCIAL_SATURATION: f64 = 6.0;
 /// Everything the pre-filter needs beyond the articles themselves (§3.5, §3.9).
 #[derive(Debug, Clone, Default)]
 pub struct PrefilterContext {
-    /// Per-feed Bayesian upvote rate from ratings history (§3.9).
-    pub feed_priors: HashMap<FeedId, FeedPrior>,
     /// Article ids already published in a previous issue (§3.5).
     pub already_published: Vec<ArticleId>,
     /// Article ids the LLM scored < [`STALE_LOW_SCORE`] recently (§3.5).
@@ -94,43 +90,18 @@ impl PrefilterContext {
         let since = today
             .checked_sub(jiff::Span::new().days(STALE_LOOKBACK_DAYS))
             .unwrap_or(today);
-        let feed_priors = db
-            .feed_priors()
-            .await?
-            .into_iter()
-            .map(|p| (p.feed_id, p))
-            .collect();
         let already_published = db.previously_published_ids().await?;
         let recently_rejected = db.recently_low_scored_ids(STALE_LOW_SCORE, since).await?;
         tracing::debug!(
-            priors = ?feed_priors_len(&feed_priors),
             published = already_published.len(),
             rejected = recently_rejected.len(),
             "loaded prefilter context"
         );
         Ok(Self {
-            feed_priors,
             already_published,
             recently_rejected,
         })
     }
-
-    fn prior_for(&self, article: &Article) -> f64 {
-        // The cluster's feeds are all candidates; take the most favourable one,
-        // since a story carried by a well-rated feed is a better bet.
-        let mut best = self.feed_priors.get(&article.feed_id).map(FeedPrior::rate);
-        for source in &article.sources {
-            if let Some(p) = self.feed_priors.get(&source.feed_id) {
-                let rate = p.rate();
-                best = Some(best.map_or(rate, |b: f64| b.max(rate)));
-            }
-        }
-        best.unwrap_or(0.5)
-    }
-}
-
-fn feed_priors_len(m: &HashMap<FeedId, FeedPrior>) -> usize {
-    m.len()
 }
 
 /// True when the article's feed is in `curation.always_include_feeds` (§3.5).
@@ -226,9 +197,9 @@ pub fn social_points(social_score: f64) -> f64 {
     MAX_SOCIAL_POINTS * (social_score / SOCIAL_SATURATION).min(1.0).sqrt()
 }
 
-/// Score one article 0–100 from word count, social proof, source signals, feed
-/// prior, and the excerpt/roundup/blocklist penalties (§3.5).
-pub fn score_article(article: &Article, ctx: &PrefilterContext, cfg: &Config) -> f64 {
+/// Score one article 0–100 from word count, social proof, source signals,
+/// and the excerpt/roundup/blocklist penalties (§3.5).
+pub fn score_article(article: &Article, _ctx: &PrefilterContext, cfg: &Config) -> f64 {
     if is_blocked(article, &cfg.curation) {
         return 0.0;
     }
@@ -244,9 +215,6 @@ pub fn score_article(article: &Article, ctx: &PrefilterContext, cfg: &Config) ->
 
     let extra_feeds = article.sources.len().saturating_sub(1) as f64;
     score += (extra_feeds * 4.0).min(MAX_MULTI_SOURCE_POINTS);
-
-    // Beta-smoothed upvote rate, neutral (0.5) contributing nothing (§3.9).
-    score += (ctx.prior_for(article) - 0.5) * 2.0 * MAX_FEED_PRIOR_POINTS;
 
     if article.excerpt_only {
         score -= EXCERPT_ONLY_PENALTY;
@@ -288,12 +256,10 @@ pub fn run(articles: Vec<Article>, ctx: &PrefilterContext, cfg: &Config) -> Vec<
 
         let prefilter_score = score_article(&article, ctx, cfg);
         let social_score = article.social_score();
-        let feed_prior = ctx.prior_for(&article);
         scored.push(ScoredArticle {
             article,
             prefilter_score,
             social_score,
-            feed_prior,
             llm: None,
             auto_include,
         });
@@ -489,35 +455,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn feed_prior_moves_the_score_both_ways() {
-        let cfg = cfg();
-        let mut liked = PrefilterContext::default();
-        liked.feed_priors.insert(
-            7,
-            FeedPrior {
-                feed_id: 7,
-                upvotes: 18,
-                downvotes: 0,
-                included: 18,
-            },
-        );
-        let mut disliked = PrefilterContext::default();
-        disliked.feed_priors.insert(
-            7,
-            FeedPrior {
-                feed_id: 7,
-                upvotes: 0,
-                downvotes: 18,
-                included: 18,
-            },
-        );
-        let a = article(1, "Deep dive", 1200);
-        let neutral = score_article(&a, &PrefilterContext::default(), &cfg);
-        assert!(score_article(&a, &liked, &cfg) > neutral);
-        assert!(score_article(&a, &disliked, &cfg) < neutral);
-    }
-
-    #[test]
     fn blocked_domains_and_auto_includes_match_urls_and_ids() {
         let mut cfg = cfg();
         cfg.curation.blocked_domains = vec!["spam.example".into()];
@@ -563,7 +500,6 @@ pub(crate) mod tests {
         let ctx = PrefilterContext {
             already_published: vec![4],
             recently_rejected: vec![6],
-            ..PrefilterContext::default()
         };
 
         let kept = run(articles, &ctx, &cfg);
@@ -598,7 +534,6 @@ pub(crate) mod tests {
         let ctx = PrefilterContext {
             recently_rejected: vec![1],
             already_published: vec![2],
-            ..PrefilterContext::default()
         };
         let kept = run(vec![a, b], &ctx, &cfg);
         let ids: Vec<ArticleId> = kept.iter().map(|s| s.article.id).collect();
@@ -613,14 +548,6 @@ pub(crate) mod tests {
             .expect("db");
         let date: jiff::civil::Date = "2026-08-15".parse().expect("date");
 
-        db.upsert_feed_prior(&FeedPrior {
-            feed_id: 7,
-            upvotes: 4,
-            downvotes: 1,
-            included: 5,
-        })
-        .await
-        .expect("prior");
         sqlx::query(
             "INSERT INTO articles (id, canonical_url, title, first_seen) VALUES
                  (42, 'https://example.com/42', 'Printed', '2026-08-14T00:00:00Z'),
@@ -660,6 +587,5 @@ pub(crate) mod tests {
         let ctx = PrefilterContext::load(&db, date).await.expect("context");
         assert_eq!(ctx.already_published, vec![42]);
         assert_eq!(ctx.recently_rejected, vec![43], "old rejects age out");
-        assert!((ctx.feed_priors[&7].rate() - 5.0 / 7.0).abs() < 1e-12);
     }
 }

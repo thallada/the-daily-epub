@@ -24,9 +24,10 @@
       <hr class="rule"/>
       <div class="article-footer">
 {% if let Some(links) = rating %}
-        <p class="rating">Was this a good pick? <a href="{{ links.up_url }}">[ &#128077; Yes ]</a> &#183; <a href="{{ links.down_url }}">[ &#128078; No ]</a></p>
-{% endif %}
+        <p class="rating">Was this a good pick? &#160; <a href="{{ links.loved_url }}">[ Loved it ]</a> &#160; <a href="{{ links.good_url }}">[ Good ]</a> &#160; <a href="{{ links.not_for_me_url }}">[ Not for me ]</a> &#160;&#160;&#160; <a href="{{ read_online_url }}">Read online &#8599;</a></p>
+{% else %}
         <p class="read-online"><a href="{{ read_online_url }}">Read online &#8599;</a></p>
+{% endif %}
 {% if let Some(href) = discussion_href %}
         <p class="see-discussion"><a href="{{ href }}">&#128172; Read the discussion</a></p>
 {% endif %}

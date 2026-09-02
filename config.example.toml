@@ -22,7 +22,8 @@ database_path = "/var/lib/daily-epub/daily-epub.db"
 # Default output directory for generated artifacts (overridden by `--out`).
 out_dir = "/var/lib/daily-epub/out"
 
-# Path to the Scour interests OPML used to seed the taste profile (§3.6).
+# Hand-maintained reader profile and Scour interests merged into the system prompt.
+profile_path = "data/profile.md"
 interests_opml = "data/scour-interests.opml"
 
 [miniflux]
@@ -58,6 +59,12 @@ sections = [
   "Niche Corner",
   "From the Blogroll",
 ]
+
+[curation.feedback]
+loved_value = 1.0
+good_value = 0.35
+not_for_me_value = -1.0
+verdicts_in_prompt = 60
 
 [publish]
 # Where both EPUB editions land, and what the OPDS feed lists. BookOrbit is

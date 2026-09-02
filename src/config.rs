@@ -69,6 +69,8 @@ pub struct Config {
     pub out_dir: PathBuf,
     /// Scour interests OPML used to seed the taste profile (§3.6).
     pub interests_opml: PathBuf,
+    /// Hand-maintained reader profile loaded for every curation run (§8.2).
+    pub profile_path: PathBuf,
 
     pub miniflux: MinifluxConfig,
     pub deepseek: DeepseekConfig,
@@ -92,6 +94,7 @@ impl Default for Config {
             database_path: PathBuf::from("/var/lib/daily-epub/daily-epub.db"),
             out_dir: PathBuf::from("/var/lib/daily-epub/out"),
             interests_opml: PathBuf::from("data/scour-interests.opml"),
+            profile_path: PathBuf::from("data/profile.md"),
             miniflux: MinifluxConfig::default(),
             deepseek: DeepseekConfig::default(),
             curation: CurationConfig::default(),
@@ -172,6 +175,7 @@ pub struct CurationConfig {
     pub paywall_domains: Vec<String>,
     /// The only section names the LLM may use (§3.6 stage B).
     pub sections: Vec<String>,
+    pub feedback: FeedbackConfig,
 }
 
 impl Default for CurationConfig {
@@ -193,6 +197,28 @@ impl Default for CurationConfig {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+            feedback: FeedbackConfig::default(),
+        }
+    }
+}
+
+/// `[curation.feedback]` — explicit verdict weights and prompt history (§6, §8.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FeedbackConfig {
+    pub loved_value: f64,
+    pub good_value: f64,
+    pub not_for_me_value: f64,
+    pub verdicts_in_prompt: usize,
+}
+
+impl Default for FeedbackConfig {
+    fn default() -> Self {
+        Self {
+            loved_value: 1.0,
+            good_value: 0.35,
+            not_for_me_value: -1.0,
+            verdicts_in_prompt: 60,
         }
     }
 }
@@ -382,6 +408,9 @@ mod tests {
         assert_eq!(c.max_daily_usd, 2.0);
         assert!(c.world_briefing);
         assert_eq!(c.deepseek.model, "deepseek-v4-flash");
+        assert_eq!(c.profile_path, PathBuf::from("data/profile.md"));
+        assert_eq!(c.curation.feedback.good_value, 0.35);
+        assert_eq!(c.curation.feedback.verdicts_in_prompt, 60);
         assert_eq!(c.xtc.format, XtcFormat::Xtch);
         assert_eq!(c.curation.sections.len(), 8);
         c.validate().unwrap();

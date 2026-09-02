@@ -283,7 +283,7 @@ async fn assemble_build_publish(
     )
     .expect("render chapters");
     let first = issue.lineup.picks[0].article.id;
-    let expected = auth::rating_url(&cfg.server.public_url, SECRET, date(), first, Vote::Up);
+    let expected = auth::rating_url(&cfg.server.public_url, SECRET, date(), first, Vote::Loved);
     let chapter = chapters
         .iter()
         .find(|c| c.id == format!("art-{}", issue.lineup.picks[0].article.best_entry_id))
@@ -298,8 +298,8 @@ async fn assemble_build_publish(
             SECRET,
             date(),
             first,
-            Vote::Up,
-            &auth::rating_token(SECRET, date(), first, Vote::Up)
+            Vote::Loved,
+            &auth::rating_token(SECRET, date(), first, Vote::Loved)
         ),
         "the server must accept the token the EPUB minted"
     );

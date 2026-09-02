@@ -6,7 +6,7 @@
 //! Routes (§3.12):
 //! | route | behaviour |
 //! |---|---|
-//! | `GET /r/{date}/{article_id}/{vote}?t=` | verify HMAC, upsert rating, rebuild feed priors |
+//! | `GET /r/{date}/{article_id}/{vote}?t=` | verify HMAC and append a rating event |
 //! | `GET /opds/daily.xml` (also `/opds`, `/opds/`) | OPDS 1.2 acquisition feed over `publish.epub_dir` |
 //! | `GET /files/epub/{name}` | EPUB download — what the feed's acquisition links point at |
 //! | `GET /files/xtc/{name}` | XTC artifact download, unlisted (no path traversal) |
@@ -15,7 +15,7 @@
 //!
 //! `/opds/*` and `/files/*` sit behind optional Basic auth (`server.basic_auth_*`).
 //!
-//! The EPUB article footer (§3.10) mints its 👍/👎 links with the very same
+//! The EPUB article footer (§3.10) mints its three verdict links with the very same
 //! [`rating_url`] this module verifies with — both re-export [`crate::auth`],
 //! which pins the shared test vector (`secret = "test-secret"`, `2026-08-15`,
 //! article `42`, `up` → `3b314cf7e6d8f50f`). An issue generated while
@@ -38,7 +38,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::types::{ArticleId, Rating, Vote};
+use crate::types::{ArticleId, RatingEvent, Vote};
 
 /// Characters of the hex HMAC kept in rating links (§3.9).
 pub const TOKEN_LEN: usize = crate::auth::TOKEN_LEN;
@@ -244,46 +244,47 @@ async fn handle_rating(
         }
     };
 
-    let rating = Rating {
-        issue_date: date,
+    let label = match vote {
+        Vote::Loved => "loved",
+        Vote::Good => "good",
+        Vote::NotForMe => "not_for_me",
+    };
+    let event = RatingEvent {
+        id: 0,
+        issue_date: Some(date),
         article_id,
-        vote,
-        rated_at: Timestamp::now(),
+        kind: "explicit".into(),
+        source: "epub".into(),
+        label: label.into(),
+        value: vote.value(&state.config.curation.feedback),
+        note: None,
+        event_at: Timestamp::now(),
     };
-    let changed = match state.db.upsert_rating(&rating).await {
-        Ok(changed) => changed,
-        Err(e) => {
-            tracing::error!(error = %e, article_id, "recording the rating failed");
-            return page(StatusCode::INTERNAL_SERVER_ERROR, "Database error.", None);
-        }
-    };
-    if changed && let Err(e) = crate::curate::profile::rebuild_feed_priors(&state.db).await {
-        // The vote is stored; a stale prior only affects the next run's ranking.
-        tracing::error!(error = %e, "refreshing feed priors failed");
+    if let Err(error) = state.db.append_rating_event(&event).await {
+        tracing::error!(%error, article_id, "recording the rating failed");
+        return page(StatusCode::INTERNAL_SERVER_ERROR, "Database error.", None);
     }
     tracing::info!(
         %date,
         article_id,
         feed_id = article.feed_id,
         vote = vote.as_str(),
-        changed,
         title = %article.title,
-        "recorded rating"
+        "recorded rating event"
     );
 
-    let glyph = match vote {
-        Vote::Up => "👍",
-        Vote::Down => "👎",
+    let message = match vote {
+        Vote::Loved => "Recorded: Loved it — thanks.",
+        Vote::Good => "Recorded: Good — thanks.",
+        Vote::NotForMe => "Recorded: Not for me — thanks.",
     };
-    let message = if changed {
-        format!("Recorded {glyph} — thanks!")
-    } else {
-        format!("Already recorded {glyph} — thanks!")
-    };
-    page(
+    confirmation_page(
         StatusCode::OK,
-        &message,
-        Some(&format!("{date} · article {article_id}")),
+        message,
+        &state.config,
+        date,
+        article_id,
+        vote,
     )
 }
 
@@ -457,7 +458,7 @@ fn check_basic_auth(config: &Config, headers: &HeaderMap) -> Option<Response> {
 /// A self-contained response page — no external CSS, well under 1 KB, legible on
 /// a 6" e-ink browser (§3.9).
 fn page(status: StatusCode, message: &str, note: Option<&str>) -> Response {
-    let body = page_html(message, note);
+    let body = page_html(message, note, None);
     (
         status,
         [
@@ -469,8 +470,52 @@ fn page(status: StatusCode, message: &str, note: Option<&str>) -> Response {
         .into_response()
 }
 
-/// The page markup itself: no stylesheet, no script, no images (§3.9).
-fn page_html(message: &str, note: Option<&str>) -> String {
+fn confirmation_page(
+    status: StatusCode,
+    message: &str,
+    config: &Config,
+    date: Date,
+    article_id: ArticleId,
+    selected: Vote,
+) -> Response {
+    let Some(secret) = config.server.hmac_secret.as_deref() else {
+        return page(status, message, None);
+    };
+    let choices = [
+        (Vote::Loved, "Loved it"),
+        (Vote::Good, "Good"),
+        (Vote::NotForMe, "Not for me"),
+    ]
+    .into_iter()
+    .filter(|(vote, _)| *vote != selected)
+    .map(|(vote, label)| {
+        let url = rating_url(&config.server.public_url, secret, date, article_id, vote);
+        format!(
+            "<a href=\"{}\">[ {} ]</a>",
+            escape_attr(&url),
+            escape(label)
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(" &nbsp; ");
+    let body = page_html(
+        message,
+        None,
+        Some(&format!("<p><small>Change it: {choices}</small></p>")),
+    );
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// The page markup itself: no external stylesheet, script, or images (§6.1).
+fn page_html(message: &str, note: Option<&str>, extra_html: Option<&str>) -> String {
     let note = note
         .map(|n| format!("<p><small>{}</small></p>", escape(n)))
         .unwrap_or_default();
@@ -478,11 +523,12 @@ fn page_html(message: &str, note: Option<&str>) -> String {
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <title>The Daily EPUB</title>\
-<style>body{{margin:3em auto;max-width:16em;padding:0 1em;text-align:center;\
+<style>body{{margin:3em auto;max-width:18em;padding:0 1em;text-align:center;\
 font:1.3em/1.5 Georgia,serif}}small{{font-size:.65em}}</style>\
-<p>{}</p>{}",
+<p>{}</p>{}{}",
         escape(message),
-        note
+        note,
+        extra_html.unwrap_or_default()
     )
 }
 
@@ -490,6 +536,10 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+fn escape_attr(s: &str) -> String {
+    escape(s).replace('\"', "&quot;")
 }
 
 #[cfg(test)]
@@ -512,29 +562,33 @@ mod tests {
 
     #[test]
     fn token_matches_the_shared_test_vector() {
-        assert_eq!(
-            rating_token(VECTOR_SECRET, date(), 42, Vote::Up),
-            VECTOR_TOKEN_UP
-        );
-        assert_eq!(rating_token(VECTOR_SECRET, date(), 42, Vote::Up).len(), 16);
+        let loved = rating_token(VECTOR_SECRET, date(), 42, Vote::Loved);
+        assert_eq!(loved, "cece96767d6c5f8a");
+        assert_eq!(loved.len(), 16);
         // Down differs from up, and both verify.
-        let down = rating_token(VECTOR_SECRET, date(), 42, Vote::Down);
+        let down = rating_token(VECTOR_SECRET, date(), 42, Vote::NotForMe);
         assert_ne!(down, VECTOR_TOKEN_UP);
         assert!(verify_token(
             VECTOR_SECRET,
             date(),
             42,
-            Vote::Up,
+            Vote::Loved,
             VECTOR_TOKEN_UP
         ));
-        assert!(verify_token(VECTOR_SECRET, date(), 42, Vote::Down, &down));
+        assert!(verify_token(
+            VECTOR_SECRET,
+            date(),
+            42,
+            Vote::NotForMe,
+            &down
+        ));
     }
 
     /// The links the EPUB footer embeds must verify here — this is the whole
     /// feedback loop in one assertion (§3.9).
     #[test]
     fn epub_footer_links_verify_against_this_server() {
-        for (id, vote) in [(42, Vote::Up), (1234, Vote::Down)] {
+        for (id, vote) in [(42, Vote::Loved), (1234, Vote::NotForMe)] {
             let from_epub = crate::epub::build::rating_url(
                 "https://daily.hallada.net",
                 VECTOR_SECRET,
@@ -556,23 +610,23 @@ mod tests {
 
     #[test]
     fn token_verification_rejects_tampering() {
-        let t = rating_token(VECTOR_SECRET, date(), 42, Vote::Up);
-        assert!(!verify_token(VECTOR_SECRET, date(), 42, Vote::Down, &t));
-        assert!(!verify_token(VECTOR_SECRET, date(), 43, Vote::Up, &t));
-        assert!(!verify_token("other-secret", date(), 42, Vote::Up, &t));
+        let t = rating_token(VECTOR_SECRET, date(), 42, Vote::Loved);
+        assert!(!verify_token(VECTOR_SECRET, date(), 42, Vote::NotForMe, &t));
+        assert!(!verify_token(VECTOR_SECRET, date(), 43, Vote::Loved, &t));
+        assert!(!verify_token("other-secret", date(), 42, Vote::Loved, &t));
         assert!(!verify_token(
             VECTOR_SECRET,
             "2026-08-16".parse().unwrap(),
             42,
-            Vote::Up,
+            Vote::Loved,
             &t
         ));
-        assert!(!verify_token(VECTOR_SECRET, date(), 42, Vote::Up, ""));
+        assert!(!verify_token(VECTOR_SECRET, date(), 42, Vote::Loved, ""));
         assert!(!verify_token(
             VECTOR_SECRET,
             date(),
             42,
-            Vote::Up,
+            Vote::Loved,
             &format!("{t}00")
         ));
     }
@@ -585,9 +639,12 @@ mod tests {
                 VECTOR_SECRET,
                 date(),
                 42,
-                Vote::Up
+                Vote::Loved
             ),
-            format!("https://daily.hallada.net/r/2026-08-15/42/up?t={VECTOR_TOKEN_UP}")
+            format!(
+                "https://daily.hallada.net/r/2026-08-15/42/loved?t={}",
+                rating_token(VECTOR_SECRET, date(), 42, Vote::Loved)
+            )
         );
     }
 
@@ -626,16 +683,20 @@ mod tests {
 
     #[test]
     fn the_confirmation_page_is_tiny_and_self_contained() {
-        let html = page_html("Recorded 👍 — thanks!", Some("2026-08-15 · article 42"));
+        let html = page_html(
+            "Recorded: Loved it — thanks.",
+            Some("2026-08-15 · article 42"),
+            None,
+        );
         assert!(html.len() < 1024, "page is {} bytes", html.len());
         assert!(!html.contains("<link"), "no external stylesheet");
         assert!(!html.contains("<script"), "no script");
-        assert!(html.contains("Recorded 👍"));
+        assert!(html.contains("Recorded: Loved it"));
         assert_eq!(
             page(StatusCode::FORBIDDEN, "Invalid link.", None).status(),
             StatusCode::FORBIDDEN
         );
-        assert!(page_html("<b>x</b>", None).contains("&lt;b&gt;"));
+        assert!(page_html("<b>x</b>", None, None).contains("&lt;b&gt;"));
     }
 
     // -----------------------------------------------------------------
@@ -810,47 +871,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rating_happy_path_is_idempotent_and_updates_priors() {
+    async fn rating_taps_append_events_and_latest_correction_wins() {
         let server = TestServer::start(false).await;
         let id = server.seed_article().await;
-        let url = rating_url(&server.base, VECTOR_SECRET, date(), id, Vote::Up);
+        let loved = rating_url(&server.base, VECTOR_SECRET, date(), id, Vote::Loved);
 
-        let res = client().get(&url).send().await.unwrap();
-        assert_eq!(res.status(), 200);
-        let body = res.text().await.unwrap();
-        assert!(body.contains("Recorded"), "{body}");
-        assert!(!body.contains("Already"), "{body}");
+        let response = client().get(&loved).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("Recorded: Loved it — thanks."), "{body}");
+        assert!(body.contains("[ Good ]"), "{body}");
+        assert!(body.contains("[ Not for me ]"), "{body}");
         assert!(
-            body.len() < 1024,
+            body.len() < 2048,
             "confirmation page is {} bytes",
             body.len()
         );
 
-        // Same tap again: still 200, but reported as already recorded.
-        let body = client()
-            .get(&url)
-            .send()
-            .await
-            .unwrap()
-            .text()
+        // Every tap is history, even a repeated one.
+        assert_eq!(client().get(&loved).send().await.unwrap().status(), 200);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rating_events")
+            .fetch_one(server.db.pool())
             .await
             .unwrap();
-        assert!(body.contains("Already recorded"), "{body}");
+        assert_eq!(count, 2);
 
-        let ratings = server.db.ratings_with_feed().await.unwrap();
-        assert_eq!(ratings, vec![(7, Vote::Up)]);
-        let priors = server.db.feed_priors().await.unwrap();
-        assert_eq!(priors.len(), 1);
-        assert_eq!(
-            (priors[0].feed_id, priors[0].upvotes, priors[0].downvotes),
-            (7, 1, 0)
-        );
-
-        // Flipping the vote rewrites the prior rather than double-counting.
-        let down = rating_url(&server.base, VECTOR_SECRET, date(), id, Vote::Down);
+        // A correction appends and becomes the current verdict.
+        let down = rating_url(&server.base, VECTOR_SECRET, date(), id, Vote::NotForMe);
         assert_eq!(client().get(&down).send().await.unwrap().status(), 200);
-        let priors = server.db.feed_priors().await.unwrap();
-        assert_eq!((priors[0].upvotes, priors[0].downvotes), (0, 1));
+        let current = server.db.current_ratings(36500).await.unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].label, "not_for_me");
+        let sources: Vec<String> =
+            sqlx::query_scalar("SELECT source FROM rating_events ORDER BY id")
+                .fetch_all(server.db.pool())
+                .await
+                .unwrap();
+        assert_eq!(sources, ["epub", "epub", "epub"]);
     }
 
     #[tokio::test]
@@ -864,17 +921,21 @@ mod tests {
         assert_eq!(client().get(&missing).send().await.unwrap().status(), 403);
 
         // A valid token for an article that does not exist.
-        let unknown = rating_url(&server.base, VECTOR_SECRET, date(), 9999, Vote::Up);
+        let unknown = rating_url(&server.base, VECTOR_SECRET, date(), 9999, Vote::Loved);
         assert_eq!(client().get(&unknown).send().await.unwrap().status(), 404);
 
         // Malformed date / vote.
-        let token = rating_token(VECTOR_SECRET, date(), id, Vote::Up);
+        let token = rating_token(VECTOR_SECRET, date(), id, Vote::Loved);
         let bad_date = format!("{}/r/not-a-date/{id}/up?t={token}", server.base);
         assert_eq!(client().get(&bad_date).send().await.unwrap().status(), 400);
         let bad_vote = format!("{}/r/2026-08-15/{id}/sideways?t={token}", server.base);
         assert_eq!(client().get(&bad_vote).send().await.unwrap().status(), 400);
 
-        assert!(server.db.ratings_with_feed().await.unwrap().is_empty());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rating_events")
+            .fetch_one(server.db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
