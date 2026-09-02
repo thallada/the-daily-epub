@@ -15,7 +15,7 @@ use sqlx::Row as _;
 
 use crate::curate::signals::{Neighbour, Signals, TopInterest};
 use crate::db::{Db, fmt_ts};
-use crate::types::ArticleId;
+use crate::types::{ArticleId, Candidate};
 
 /// The stage vocabulary of §7.4, in pipeline order.
 pub const STAGES: [&str; 7] = [
@@ -190,6 +190,22 @@ pub fn serialize_signals(signals: &Signals, auto_include: bool) -> String {
         notes: signals.notes.clone(),
     })
     .unwrap_or_else(|_| "{}".into())
+}
+
+/// Serialize a full candidate, adding the triage assessment and admission flags
+/// that are not cheap-signal fields (§7.5).
+pub fn serialize_candidate(candidate: &Candidate) -> String {
+    let base = serialize_signals(&candidate.signals, candidate.auto_include);
+    let mut value: SignalsJson = serde_json::from_str(&base).unwrap_or_default();
+    value.exploration = candidate.exploration;
+    if let Some(triage) = candidate.assessment.triage.as_ref() {
+        value.raw.insert("triage".into(), triage.interest);
+        value
+            .norm
+            .insert("triage".into(), (triage.interest / 10.0).clamp(0.0, 1.0));
+        value.present.insert("triage".into(), true);
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -662,6 +678,30 @@ mod tests {
         let weights: f64 = typed.weights.values().sum();
         assert!((weights - 1.0).abs() < 1e-9);
         assert!(typed.blend().is_some());
+    }
+
+    #[test]
+    fn candidate_json_adds_triage_and_exploration() {
+        let mut candidate = crate::types::Candidate::new(
+            crate::curate::prefilter::tests::article(1, "Article", 900),
+            false,
+        );
+        candidate.signals = signals(41.0, 0.55);
+        candidate.exploration = true;
+        candidate.assessment.triage = Some(crate::types::Triage {
+            interest: 7.5,
+            kind: "essay".into(),
+            why: "specific".into(),
+            model: "mock".into(),
+            prompt_version: 1,
+            assessed_at: "2026-09-02T05:30:00Z".parse().unwrap(),
+        });
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serialize_candidate(&candidate)).unwrap();
+        assert_eq!(parsed["raw"]["triage"], 7.5);
+        assert_eq!(parsed["norm"]["triage"], 0.75);
+        assert_eq!(parsed["present"]["triage"], true);
+        assert_eq!(parsed["exploration"], true);
     }
 
     #[tokio::test]

@@ -1,15 +1,16 @@
-//! Curation pipeline: pre-filter → LLM scoring → selection → editorial (spec §3.5, §3.6).
+//! Personalized curation: signals → triage → admission → assessment → editor.
 //!
 //! ```text
-//! ~400 articles ─prefilter─▶ ~120 candidates ─stage A─▶ scored ─stage B─▶ lineup ─stage C─▶ editorial
+//! ~400 eligible ─triage─▶ union admission (120) ─stage A─▶ editor ─▶ editorial
 //! ```
 //!
 //! [`Curator`] is the thin orchestration layer the `generate` pipeline calls; the
 //! interesting logic lives in the stage modules. Every stage is safe to run with
-//! no provider at all (`--skip-llm`): the prefilter order stands in for selection
+//! no provider at all (`--skip-llm`): the cheap-signal blend stands in for selection
 //! and feed excerpts stand in for summaries (notes §6). Scoring runs on the bulk
 //! client; selection and editorial on the editor with per-call bulk fallback.
 
+pub mod admit;
 pub mod editorial;
 pub mod embedding;
 pub mod llm;
@@ -19,12 +20,13 @@ pub mod score;
 pub mod select;
 pub mod signals;
 pub mod telemetry;
+pub mod triage;
 
 use jiff::civil::Date;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::types::{Article, Editorial, Lineup, ScoredArticle};
+use crate::types::{Editorial, Lineup, ScoredArticle};
 
 /// Runs the three curation stages against one day's articles (§3.5, §3.6).
 pub struct Curator {
@@ -34,52 +36,17 @@ pub struct Curator {
 }
 
 impl Curator {
-    /// An empty [`llm::Llms`] corresponds to `--skip-llm`: prefilter order is
+    /// An empty [`llm::Llms`] corresponds to `--skip-llm`: cheap-signal order is
     /// used for selection and feed excerpts stand in for summaries (notes §6).
     /// With only `bulk`, every editor call runs on DeepSeek (§4.2).
     pub fn new(config: Config, db: Db, llms: llm::Llms) -> Self {
         Self { config, db, llms }
     }
 
-    /// Heuristic pre-filter: 300–500 articles → `prefilter_keep` (§3.5).
-    ///
-    /// Also persists each candidate's `prefilter_score` for the day so that a
-    /// re-run of the same date is idempotent (notes §12).
-    pub async fn prefilter(
-        &self,
-        articles: Vec<Article>,
-        date: Date,
-    ) -> anyhow::Result<Vec<ScoredArticle>> {
-        let span = tracing::info_span!("prefilter", articles = articles.len());
-        let _guard = span.enter();
-
-        let ctx = prefilter::PrefilterContext::load(&self.db, date).await?;
-        let candidates = prefilter::run(articles, &ctx, &self.config);
-        for candidate in &candidates {
-            if candidate.article.id == 0 {
-                continue; // not persisted yet (dry run over synthetic articles)
-            }
-            if let Err(e) = self
-                .db
-                .upsert_score(
-                    candidate.article.id,
-                    date,
-                    Some(candidate.prefilter_score),
-                    None,
-                )
-                .await
-            {
-                tracing::warn!(article_id = candidate.article.id, error = %e,
-                    "could not persist the prefilter score");
-            }
-        }
-        Ok(candidates)
-    }
-
     /// Stage A: batched LLM scoring of the surviving candidates (§3.6).
     ///
     /// A no-op under `--skip-llm`. Scores are persisted per `(article, date)`.
-    pub async fn score(&self, candidates: &mut [ScoredArticle], date: Date) -> anyhow::Result<()> {
+    pub async fn score(&self, candidates: &mut [ScoredArticle], _date: Date) -> anyhow::Result<()> {
         let Some(llm) = self.llms.bulk.as_ref() else {
             tracing::info!("--skip-llm: stage A scoring skipped");
             return Ok(());
@@ -98,20 +65,6 @@ impl Curator {
         .await?;
         tracing::info!(scored, total = candidates.len(), "stage A complete");
 
-        for candidate in candidates.iter() {
-            if candidate.article.id == 0 {
-                continue;
-            }
-            if let Some(llm_score) = candidate.llm.as_ref()
-                && let Err(e) = self
-                    .db
-                    .upsert_score(candidate.article.id, date, None, Some(llm_score))
-                    .await
-            {
-                tracing::warn!(article_id = candidate.article.id, error = %e,
-                    "could not persist the llm score");
-            }
-        }
         Ok(())
     }
 

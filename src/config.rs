@@ -49,8 +49,6 @@ pub struct Config {
     pub lookback_hours: u32,
     /// How many articles the lineup should contain (§3.6 stage B).
     pub target_article_count: usize,
-    /// How many articles survive the heuristic pre-filter (§3.5).
-    pub prefilter_keep: usize,
     /// Days of published EPUBs kept in `publish.epub_dir` (§3.11).
     pub retention_days: u32,
     /// How many XTC issues to keep in `publish.xtc_dir` (§3.11).
@@ -89,7 +87,6 @@ impl Default for Config {
             timezone: "America/New_York".into(),
             lookback_hours: 26,
             target_article_count: 20,
-            prefilter_keep: 120,
             retention_days: 21,
             xtc_retention_count: 5,
             max_daily_usd: 2.0,
@@ -142,6 +139,8 @@ pub struct DeepseekConfig {
     pub api_key: Option<String>,
     /// Articles per stage-A scoring request (§3.6).
     pub score_batch_size: usize,
+    /// Articles per first-pass triage request (§10).
+    pub triage_batch_size: usize,
     pub max_concurrent_requests: usize,
     pub score_temperature: f32,
     pub editorial_temperature: f32,
@@ -160,6 +159,7 @@ impl Default for DeepseekConfig {
             model: "deepseek-v4-flash".into(),
             api_key: None,
             score_batch_size: 12,
+            triage_batch_size: 25,
             max_concurrent_requests: 4,
             score_temperature: 0.3,
             editorial_temperature: 0.8,
@@ -269,6 +269,8 @@ impl Default for VoyageConfig {
 pub struct CurationConfig {
     /// Absolute issue-size ceiling; the editor has no minimum (§13).
     pub max_article_count: usize,
+    pub recent_rejection_days: i64,
+    pub recent_rejection_floor: f64,
     /// Miniflux feed ids or site URLs that can never be dropped (§3.5).
     pub always_include_feeds: Vec<String>,
     /// Hosts excluded outright (§3.5).
@@ -286,6 +288,8 @@ impl Default for CurationConfig {
     fn default() -> Self {
         Self {
             max_article_count: 28,
+            recent_rejection_days: 7,
+            recent_rejection_floor: 3.0,
             always_include_feeds: Vec::new(),
             blocked_domains: Vec::new(),
             paywall_domains: Vec::new(),
@@ -602,6 +606,22 @@ impl Config {
             Some(p) => (Some(p.to_path_buf()), true),
             None => (Some(PathBuf::from(DEFAULT_CONFIG_FILE)), false),
         };
+        if let Some(path) = path.as_deref().filter(|path| path.exists()) {
+            let raw = std::fs::read_to_string(path).map_err(|error| {
+                ConfigError::Invalid(format!("could not inspect {}: {error}", path.display()))
+            })?;
+            if raw.lines().any(|line| {
+                let line = line.trim_start();
+                !line.starts_with('#')
+                    && line
+                        .strip_prefix("prefilter_keep")
+                        .is_some_and(|tail| tail.trim_start().starts_with('='))
+            }) {
+                return Err(ConfigError::Invalid(
+                    "prefilter_keep was removed; use curation.ranking.deep_keep".into(),
+                ));
+            }
+        }
         let mut config: Config = Self::figment(path.as_deref(), require)?.extract()?;
         // §1 tells the operator to set `DAILY_EPUB_SECRET`; §3.14 calls the key
         // `server.hmac_secret`. Accept both, with the explicit key winning.
@@ -624,11 +644,6 @@ impl Config {
                 "target_article_count must be > 0".into(),
             ));
         }
-        if self.prefilter_keep < self.target_article_count {
-            return Err(ConfigError::Invalid(
-                "prefilter_keep must be >= target_article_count".into(),
-            ));
-        }
         if self.curation.max_article_count < self.target_article_count {
             return Err(ConfigError::Invalid(
                 "curation.max_article_count must be >= target_article_count".into(),
@@ -637,6 +652,11 @@ impl Config {
         if self.deepseek.score_batch_size == 0 {
             return Err(ConfigError::Invalid(
                 "deepseek.score_batch_size must be >= 1".into(),
+            ));
+        }
+        if self.deepseek.triage_batch_size == 0 {
+            return Err(ConfigError::Invalid(
+                "deepseek.triage_batch_size must be >= 1".into(),
             ));
         }
         if self.deepseek.max_concurrent_requests == 0 {
@@ -753,11 +773,14 @@ mod tests {
         assert_eq!(c.timezone, "America/New_York");
         assert_eq!(c.lookback_hours, 26);
         assert_eq!(c.target_article_count, 20);
-        assert_eq!(c.prefilter_keep, 120);
+        assert_eq!(c.curation.ranking.deep_keep, 120);
         assert_eq!(c.retention_days, 21);
         assert_eq!(c.max_daily_usd, 2.0);
         assert!(c.world_briefing);
         assert_eq!(c.deepseek.model, "deepseek-v4-flash");
+        assert_eq!(c.deepseek.triage_batch_size, 25);
+        assert_eq!(c.curation.recent_rejection_days, 7);
+        assert_eq!(c.curation.recent_rejection_floor, 3.0);
         assert_eq!(c.profile_path, PathBuf::from("data/profile.md"));
         assert_eq!(c.curation.feedback.good_value, 0.35);
         assert_eq!(c.curation.feedback.verdicts_in_prompt, 60);
@@ -845,6 +868,17 @@ mod tests {
     }
 
     #[test]
+    fn removed_prefilter_keep_fails_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "prefilter_keep = 120\n").unwrap();
+        let error = Config::load(Some(&path)).expect_err("the stale key must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("prefilter_keep"), "{message}");
+        assert!(message.contains("curation.ranking.deep_keep"), "{message}");
+    }
+
+    #[test]
     fn shipped_example_config_parses() {
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         let c = Config::load(Some(&example)).expect("config.example.toml must parse");
@@ -853,6 +887,7 @@ mod tests {
         assert_eq!(c.server.bind, "127.0.0.1:3499");
         assert_eq!(c.deepseek.base_url, "https://api.deepseek.com/v1");
         assert_eq!(c.deepseek.max_concurrent_requests, 4);
+        assert_eq!(c.deepseek.triage_batch_size, 25);
         assert!(c.anthropic.enabled);
         assert_eq!(c.anthropic.model, "claude-opus-5");
         assert_eq!(c.anthropic.effort, "high");
@@ -884,6 +919,9 @@ mod tests {
         assert!(c.validate().is_err());
         let mut c = Config::default();
         c.deepseek.score_batch_size = 0;
+        assert!(c.validate().is_err());
+        let mut c = Config::default();
+        c.deepseek.triage_batch_size = 0;
         assert!(c.validate().is_err());
         let mut c = Config::default();
         c.editorial.summary_input_tokens = 0;
@@ -956,14 +994,9 @@ mod tests {
 
     #[test]
     fn validation_rejects_nonsense() {
-        assert!(
-            Config {
-                prefilter_keep: 5,
-                ..Config::default()
-            }
-            .validate()
-            .is_err()
-        );
+        let mut too_small = Config::default();
+        too_small.curation.ranking.deep_keep = 5;
+        assert!(too_small.validate().is_err());
         assert!(
             Config {
                 timezone: "Mars/Olympus_Mons".into(),

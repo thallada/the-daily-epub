@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! Miniflux ingest ─▶ dedupe ─▶ extraction ─▶ persist ─▶ social enrichment
-//!   ─▶ pre-filter ─▶ LLM scoring ─▶ selection ─▶ comments ─▶ editorial
+//!   ─▶ signals ─▶ triage ─▶ admission ─▶ LLM scoring ─▶ selection
+//!   ─▶ comments ─▶ editorial
 //!   ─▶ world briefing ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
 //! ```
 //!
@@ -16,10 +17,10 @@
 //!   and the run continues.
 //! * **Degrading** — every DeepSeek stage. A missing key, a dead API or a tripped
 //!   `max_daily_usd` guardrail turns the run into the `--skip-llm` shape
-//!   (prefilter order selects, feed excerpts stand in for summaries) rather than
+//!   (cheap-signal admission, feed excerpts as summaries) rather than
 //!   losing the day's issue.
 //!
-//! The run is idempotent per date (notes §12): entries, articles, scores and the
+//! The run is idempotent per date (notes §12): entries, articles, assessments and the
 //! issue itself are upserted, `issue_articles` is replaced wholesale, and the
 //! published filenames are derived from the date.
 
@@ -32,14 +33,14 @@ use jiff::{Timestamp, Zoned};
 
 use crate::config::Config;
 use crate::curate::llm::{Llms, PriceTable, UsageMeter};
-use crate::curate::{Curator, editorial, embedding, prefilter, profile, signals, telemetry};
+use crate::curate::{Curator, admit, editorial, embedding, profile, signals, telemetry, triage};
 use crate::db::Db;
 use crate::extract::Extractor;
 use crate::miniflux::MinifluxClient;
 use crate::publish::Published;
 use crate::report::{ProviderUsage, RunReport, RunStatus};
 use crate::types::{
-    Article, ArticleId, Artifact, Colophon, Edition, Issue, IssueMeta, Lineup, Models,
+    Article, ArticleId, Artifact, Candidate, Colophon, Edition, Issue, IssueMeta, Lineup, Models,
     reading_minutes,
 };
 use crate::{comments, dedupe, epub, http, miniflux, publish, social, world};
@@ -59,6 +60,8 @@ pub struct GenerateOptions {
     pub skip_llm: bool,
     /// `--skip-embeddings`: read the cache but make zero Voyage calls.
     pub skip_embeddings: bool,
+    /// Ignore reusable triage/deep assessments.
+    pub rescore: bool,
 }
 
 /// What one run produced, for the caller to print (§3.13).
@@ -200,6 +203,7 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
         hard_max,
         skip_llm = opts.skip_llm,
         skip_embeddings = opts.skip_embeddings,
+        rescore = opts.rescore,
         voyage_enabled = config.voyage.enabled,
         out = %out_dir.display(),
         "starting run"
@@ -227,6 +231,7 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
         dry_run: opts.dry_run,
         skip_llm: opts.skip_llm,
         skip_embeddings: opts.skip_embeddings,
+        rescore: opts.rescore,
     };
     let stages = match run_stages(&ctx, window_start, window_end, &mut report).await {
         Ok(stages) => {
@@ -291,6 +296,7 @@ struct StageContext<'a> {
     dry_run: bool,
     skip_llm: bool,
     skip_embeddings: bool,
+    rescore: bool,
 }
 
 async fn run_stages(
@@ -379,10 +385,24 @@ async fn run_stages(
     report.timings.record("social", elapsed_ms(stage));
 
     // --- Stage 6: hygiene, embeddings, and cheap signals (§8.1, §9) ---
+    let stage = Timestamp::now();
+    let mut personalized = admit::hygiene(
+        db,
+        ctx.run_id,
+        articles,
+        date,
+        &config.curation,
+        ctx.started_at,
+    )
+    .await
+    .context("running candidate hygiene")?;
+    report.counts.eligible = personalized.len() as i64;
+    report.timings.record("hygiene", elapsed_ms(stage));
     let embeddings = build_embedding_service(ctx, report);
-    let feature_signals = prepare_features(ctx, &articles, &embeddings, report).await;
+    prepare_features(ctx, &mut personalized, &embeddings, report).await;
 
-    // --- Stage 6b: the old heuristic pre-filter still gates in this step (§21) ---
+    // Build the provider clients before triage. A missing or failed bulk client
+    // skips triage and stage A, while the editor can still run on Claude (§17).
     let stage = Timestamp::now();
     let bulk_meter =
         UsageMeter::with_prices(PriceTable::deepseek(&config.deepseek), config.max_daily_usd);
@@ -407,56 +427,113 @@ async fn run_stages(
     curator_config.curation.max_article_count = ctx.hard_max;
     let curator = Curator::new(curator_config, db.clone(), llms);
 
-    let mut candidates = curator
-        .prefilter(articles, date)
+    report.timings.record("providers", elapsed_ms(stage));
+
+    // --- Stage 7: triage (§10) ---
+    let stage = Timestamp::now();
+    let triage_pool = triage::apply_pool_cap(&mut personalized, config.curation.ranking.triage_max);
+    if let Some(bulk) = curator.llms.bulk.as_ref() {
+        let profile_version = db
+            .kv_get(crate::db::KV_PROFILE_VERSION)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse().ok());
+        if let Err(error) = triage::run(
+            db,
+            bulk,
+            &mut personalized,
+            &triage_pool,
+            config.deepseek.triage_batch_size,
+            config.deepseek.max_concurrent_requests,
+            config.curation.ranking.assessment_reuse_days,
+            ctx.rescore,
+            profile_version,
+            Timestamp::now(),
+            config.deepseek.score_temperature,
+        )
         .await
-        .context("running the heuristic pre-filter")?;
-    report.counts.candidates = candidates.len() as i64;
-    let admitted = candidates
+        {
+            report.warn(format!(
+                "triage degraded; admission continues without it: {error:#}"
+            ));
+        }
+    } else {
+        tracing::info!("--skip-llm or DeepSeek unavailable: triage skipped");
+    }
+    report.counts.triaged = personalized
         .iter()
+        .filter(|candidate| candidate.assessment.triage.is_some())
+        .count() as i64;
+    report.timings.record("triage", elapsed_ms(stage));
+
+    // --- Stage 8: union admission (§11) ---
+    let stage = Timestamp::now();
+    let admission = admit::admit(&mut personalized, date, &config.curation.ranking);
+    report.counts.admitted = admission.admitted as i64;
+    report.counts.candidates = admission.admitted as i64;
+    report.counts.admitted_by = admission
+        .admitted_by
+        .iter()
+        .map(|(name, count)| (name.clone(), *count as i64))
+        .collect();
+    report.counts.exploration_admitted = admission.exploration_admitted as i64;
+    record_candidates(ctx, &personalized)
+        .await
+        .context("recording admission telemetry")?;
+    tracing::info!(
+        "admission: triage {} · interest {} · knn {} · exploration {} · blend {} · auto {}",
+        admission.admitted_by.get("triage").copied().unwrap_or(0),
+        admission.admitted_by.get("interest").copied().unwrap_or(0),
+        admission.admitted_by.get("knn").copied().unwrap_or(0),
+        admission
+            .admitted_by
+            .get("exploration")
+            .copied()
+            .unwrap_or(0),
+        admission.admitted_by.get("blend").copied().unwrap_or(0),
+        admission
+            .admitted_by
+            .get("auto_include")
+            .copied()
+            .unwrap_or(0),
+    );
+    report.timings.record("admit", elapsed_ms(stage));
+
+    let admitted = personalized
+        .iter()
+        .filter(|candidate| candidate.stage == "admitted")
         .map(|candidate| candidate.article.id)
         .collect::<Vec<_>>();
-    let admitted_set = admitted.iter().copied().collect::<HashSet<_>>();
-    let not_admitted = feature_signals
-        .keys()
-        .copied()
-        .filter(|id| !admitted_set.contains(id))
+    let mut candidates = personalized
+        .iter()
+        .filter(|candidate| candidate.stage == "admitted")
+        .cloned()
+        .map(Candidate::into_legacy_scored)
         .collect::<Vec<_>>();
-    record_stage(
-        ctx,
-        &feature_signals,
-        &not_admitted,
-        "eligible",
-        Some("not_admitted"),
-    )
-    .await
-    .context("recording prefilter telemetry")?;
-    record_stage(ctx, &feature_signals, &admitted, "admitted", None)
-        .await
-        .context("recording prefilter telemetry")?;
-    report.timings.record("prefilter", elapsed_ms(stage));
 
-    // --- Stage 7: LLM scoring, then selection (§3.6 A + B) ---
+    // --- Stage 9: legacy Stage A scoring, then editor (§21 step 4) ---
     let stage = Timestamp::now();
     if bulk_available && let Err(e) = curator.score(&mut candidates, date).await {
         // A dead API or a tripped budget must not cost us the issue: selection
-        // degrades to prefilter order exactly as `--skip-llm` does.
+        // degrades to preliminary-blend order exactly as `--skip-llm` does.
         report.warn(format!("LLM scoring failed; ranking heuristically: {e:#}"));
     }
     report.counts.llm_scored = candidates.iter().filter(|c| c.llm.is_some()).count() as i64;
     report.counts.llm_unscored = report.counts.candidates - report.counts.llm_scored;
+    report.counts.assessed = report.counts.llm_scored;
+    report.counts.shortlisted = admitted.len() as i64;
     let assessed = candidates
         .iter()
         .filter(|candidate| candidate.llm.is_some())
         .map(|candidate| candidate.article.id)
         .collect::<Vec<_>>();
-    record_stage(ctx, &feature_signals, &assessed, "assessed", None)
+    set_candidate_stage(&mut personalized, &assessed, "assessed", None);
+    // Every admitted article goes to the old selector, scored or not.
+    set_candidate_stage(&mut personalized, &admitted, "shortlisted", None);
+    record_candidates(ctx, &personalized)
         .await
         .context("recording assessment telemetry")?;
-    // Every prefilter survivor goes to the old selector, scored or not.
-    record_stage(ctx, &feature_signals, &admitted, "shortlisted", None)
-        .await
-        .context("recording shortlist telemetry")?;
 
     let mut lineup = curator
         .select(candidates, date)
@@ -481,20 +558,28 @@ async fn run_stages(
         .iter()
         .map(|pick| (pick.article.id, pick.why.as_deref()))
         .collect::<Vec<_>>();
-    record_stage_with_why(ctx, &feature_signals, &selected_with_why, "selected", None)
-        .await
-        .context("recording selection telemetry")?;
-    record_stage(
-        ctx,
-        &feature_signals,
+    set_candidate_stage(
+        &mut personalized,
         &not_selected,
         "shortlisted",
         Some("not_selected"),
-    )
-    .await
-    .context("recording selection telemetry")?;
+    );
+    let why = selected_with_why.into_iter().collect::<HashMap<_, _>>();
+    for candidate in &mut personalized {
+        if selected_set.contains(&candidate.article.id) {
+            candidate.stage = "selected".into();
+            candidate.excluded_reason = None;
+        }
+    }
+    record_candidates_with_why(ctx, &personalized, &why)
+        .await
+        .context("recording selection telemetry")?;
+    report.counts.exploration_selected = personalized
+        .iter()
+        .filter(|candidate| candidate.stage == "selected" && candidate.exploration)
+        .count() as i64;
     if lineup.picks.is_empty() {
-        report.warn("the lineup is empty — check the lookback window and pre-filter");
+        report.warn("the lineup is empty — check the lookback window and admission settings");
     }
     report.timings.record("curate", elapsed_ms(stage));
 
@@ -654,13 +739,6 @@ async fn run_stages(
     })
 }
 
-/// The cheap signals and hygiene outcome for one eligible article (§9).
-#[derive(Debug, Clone)]
-struct FeatureSignals {
-    signals: signals::Signals,
-    auto_include: bool,
-}
-
 /// The embedding cache with a Voyage client behind it, or cache-only under
 /// `--skip-embeddings`, `voyage.enabled = false` or a missing key (§16, §17).
 fn build_embedding_service(
@@ -694,64 +772,18 @@ fn build_embedding_service(
     }
 }
 
-/// Hygiene, embeddings and cheap signals for every article (§8.1, §9).
-///
-/// Hygiene-excluded articles get thin `candidate_runs` rows; every other
-/// article gets an `eligible` row with its `signals_json`. Nothing here can
-/// fail the run: embeddings and the learned signals degrade to absent (§17).
+/// Embeddings and cheap signals for every hygiene-eligible candidate (§9).
 async fn prepare_features(
     ctx: &StageContext<'_>,
-    articles: &[Article],
+    candidates: &mut [Candidate],
     service: &embedding::EmbeddingService,
     report: &mut RunReport,
-) -> HashMap<ArticleId, FeatureSignals> {
+) {
     let (config, db) = (ctx.config, ctx.db);
-    let hygiene = match prefilter::PrefilterContext::load(db, ctx.date).await {
-        Ok(context) => context,
-        Err(error) => {
-            report.warn(format!(
-                "could not load hygiene history; signals skipped: {error}"
-            ));
-            return HashMap::new();
-        }
-    };
-    let published = hygiene
-        .already_published
+    let eligible = candidates
         .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let rejected = hygiene
-        .recently_rejected
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let mut eligible = Vec::new();
-    for article in articles {
-        let auto_include = prefilter::is_auto_include(article, &config.curation);
-        let reason = if published.contains(&article.id) {
-            Some("published_before")
-        } else if !auto_include && prefilter::is_blocked(article, &config.curation) {
-            Some("blocked")
-        } else if !auto_include && rejected.contains(&article.id) {
-            Some("recently_rejected")
-        } else {
-            None
-        };
-        match reason {
-            Some(reason) => {
-                if let Err(error) =
-                    telemetry::thin_excluded(db, ctx.run_id, article.id, reason).await
-                {
-                    report.warn(format!(
-                        "could not record excluded candidate {}: {error}",
-                        article.id
-                    ));
-                }
-            }
-            None => eligible.push(article.clone()),
-        }
-    }
-    report.counts.eligible = eligible.len() as i64;
+        .map(|candidate| candidate.article.clone())
+        .collect::<Vec<_>>();
 
     // --- embed (§7.1, §7.2) ---
     let stage = Timestamp::now();
@@ -822,83 +854,73 @@ async fn prepare_features(
         }
     };
     report.counts.rated_with_embeddings = preference.rated_with_embeddings as i64;
-    let mut output = HashMap::new();
-    for article in &eligible {
-        let auto_include = prefilter::is_auto_include(article, &config.curation);
-        let signals = computed
-            .remove(&article.id)
-            .unwrap_or_else(|| signals::Signals::baseline(article));
-        output.insert(
-            article.id,
-            FeatureSignals {
-                signals,
-                auto_include,
-            },
-        );
+    for candidate in candidates.iter_mut() {
+        candidate.signals = computed
+            .remove(&candidate.article.id)
+            .unwrap_or_else(|| signals::Signals::baseline(&candidate.article));
     }
-    let eligible_ids = eligible
-        .iter()
-        .map(|article| article.id)
-        .collect::<Vec<_>>();
-    if let Err(error) = record_stage(ctx, &output, &eligible_ids, "eligible", None).await {
+    if let Err(error) = record_candidates(ctx, candidates).await {
         report.warn(format!("could not record eligible candidates: {error}"));
     }
     report.timings.record("signals", elapsed_ms(stage));
-    output
 }
 
-/// Upsert the `candidate_runs` row of every listed article at a new stage
-/// (§7.4). Articles without signals (hygiene-excluded) are left alone.
-async fn record_stage(
-    ctx: &StageContext<'_>,
-    features: &HashMap<ArticleId, FeatureSignals>,
-    ids: &[ArticleId],
-    stage: &str,
-    excluded_reason: Option<&str>,
-) -> Result<()> {
-    let rows = ids.iter().map(|id| (*id, None)).collect::<Vec<_>>();
-    record_stage_with_why(ctx, features, &rows, stage, excluded_reason).await
+async fn record_candidates(ctx: &StageContext<'_>, candidates: &[Candidate]) -> Result<()> {
+    record_candidates_with_why(ctx, candidates, &HashMap::new()).await
 }
 
-/// [`record_stage`] with the editor's `why` per article (§13, §7.4).
-async fn record_stage_with_why(
+async fn record_candidates_with_why(
     ctx: &StageContext<'_>,
-    features: &HashMap<ArticleId, FeatureSignals>,
-    rows: &[(ArticleId, Option<&str>)],
-    stage: &str,
-    excluded_reason: Option<&str>,
+    candidates: &[Candidate],
+    editor_why: &HashMap<ArticleId, Option<&str>>,
 ) -> Result<()> {
-    let admitted = matches!(stage, "admitted" | "assessed" | "shortlisted" | "selected");
-    for (id, editor_why) in rows {
-        let Some(feature) = features.get(id) else {
-            continue;
-        };
-        let json = telemetry::serialize_signals(&feature.signals, feature.auto_include);
-        let admitted_by = admitted.then_some(if feature.auto_include {
-            "[\"auto\"]"
+    for candidate in candidates {
+        let json = telemetry::serialize_candidate(candidate);
+        let admitted_by = if candidate.admitted_by.is_empty() {
+            None
         } else {
-            "[\"prefilter\"]"
-        });
+            Some(serde_json::to_string(&candidate.admitted_by)?)
+        };
         telemetry::write(
             ctx.db,
             &telemetry::CandidateRun {
                 run_id: ctx.run_id,
-                article_id: *id,
-                stage,
-                excluded_reason,
-                admitted_by,
+                article_id: candidate.article.id,
+                stage: &candidate.stage,
+                excluded_reason: candidate.excluded_reason.as_deref(),
+                admitted_by: admitted_by.as_deref(),
                 signals_json: &json,
-                utility: None,
+                utility: candidate.utility,
                 rank_utility: None,
-                cluster_id: None,
+                cluster_id: candidate.cluster,
                 cluster_rank: None,
-                editor_why: *editor_why,
+                editor_why: editor_why.get(&candidate.article.id).copied().flatten(),
             },
         )
         .await
-        .with_context(|| format!("recording candidate {id} at stage {stage}"))?;
+        .with_context(|| {
+            format!(
+                "recording candidate {} at stage {}",
+                candidate.article.id, candidate.stage
+            )
+        })?;
     }
     Ok(())
+}
+
+fn set_candidate_stage(
+    candidates: &mut [Candidate],
+    ids: &[ArticleId],
+    stage: &str,
+    excluded_reason: Option<&str>,
+) {
+    let ids = ids.iter().copied().collect::<HashSet<_>>();
+    for candidate in candidates {
+        if ids.contains(&candidate.article.id) {
+            candidate.stage = stage.into();
+            candidate.excluded_reason = excluded_reason.map(str::to_string);
+        }
+    }
 }
 
 /// Insert/refresh the `articles` rows and stamp the returned ids back on (§3.13).
@@ -1054,6 +1076,7 @@ fn log_resolved_providers(config: &Config, skip_llm: bool, skip_embeddings: bool
 /// Prompt versions recorded per run so old telemetry stays interpretable (§7.6).
 /// Bump a number when the corresponding instruction block changes.
 const PROMPT_VERSIONS: &[(&str, u32)] = &[
+    ("triage", triage::TRIAGE_PROMPT_VERSION as u32),
     ("score", 1),
     ("editor", 2),
     ("summary", 1),
@@ -1071,7 +1094,7 @@ fn resolved_run_config(config: &Config, soft_target: usize, hard_max: usize) -> 
     voyage.api_key = None;
     serde_json::json!({
         "target_article_count": soft_target,
-        "prefilter_keep": config.prefilter_keep,
+        "TRIAGE_PROMPT_VERSION": triage::TRIAGE_PROMPT_VERSION,
         "curation": curation,
         "editorial": config.editorial,
         "voyage": voyage,
@@ -1169,6 +1192,14 @@ mod tests {
         assert_eq!(value["models"]["bulk"], "deepseek-v4-flash");
         assert_eq!(value["models"]["editor"], "claude-opus-5");
         assert!(value["prompt_versions"]["editor"].is_number());
+        assert_eq!(
+            value["TRIAGE_PROMPT_VERSION"],
+            triage::TRIAGE_PROMPT_VERSION
+        );
+        assert_eq!(
+            value["prompt_versions"]["triage"],
+            triage::TRIAGE_PROMPT_VERSION
+        );
         let text = value.to_string();
         assert!(
             !text.contains("secret"),
@@ -1353,6 +1384,7 @@ mod tests {
             dry_run: true,
             skip_llm: true,
             skip_embeddings,
+            rescore: false,
         }
     }
 
@@ -1395,7 +1427,18 @@ mod tests {
         let service = mock_service(&h, backend.clone());
         let mut report = RunReport::new(run_date(), now());
 
-        let features = prepare_features(&ctx, &h.articles, &service, &mut report).await;
+        let mut features = admit::hygiene(
+            &h.db,
+            h.run_id,
+            h.articles.clone(),
+            run_date(),
+            &h.config.curation,
+            now(),
+        )
+        .await
+        .unwrap();
+        report.counts.eligible = features.len() as i64;
+        prepare_features(&ctx, &mut features, &service, &mut report).await;
         let [a, b, blocked, published] = [
             h.articles[0].id,
             h.articles[1].id,
@@ -1403,7 +1446,10 @@ mod tests {
             h.articles[3].id,
         ];
         assert_eq!(
-            features.keys().copied().collect::<BTreeSet<_>>(),
+            features
+                .iter()
+                .map(|candidate| candidate.article.id)
+                .collect::<BTreeSet<_>>(),
             BTreeSet::from([a, b])
         );
         assert_eq!(report.counts.eligible, 2);
@@ -1413,7 +1459,11 @@ mod tests {
         assert!(report.voyage_tokens > 0);
         // One batch for the two articles, one for the interest.
         assert_eq!(backend.calls(), 2);
-        let signals = &features[&a].signals;
+        let signals = &features
+            .iter()
+            .find(|candidate| candidate.article.id == a)
+            .unwrap()
+            .signals;
         assert!(signals.heuristic.is_some());
         assert!(
             signals.interest.is_some(),
@@ -1441,23 +1491,25 @@ mod tests {
                 .unwrap();
         assert_eq!(thin, "{}");
 
-        // The old prefilter and selector, with the stage transitions of step 3.
+        // Admission replaces the old prefilter and carries retriever telemetry.
         let curator = Curator::new(h.config.clone(), h.db.clone(), Llms::default());
-        let candidates = curator
-            .prefilter(h.articles.clone(), run_date())
-            .await
-            .unwrap();
-        let admitted = candidates.iter().map(|c| c.article.id).collect::<Vec<_>>();
+        admit::admit(&mut features, run_date(), &h.config.curation.ranking);
+        record_candidates(&ctx, &features).await.unwrap();
+        let admitted = features
+            .iter()
+            .filter(|candidate| candidate.stage == "admitted")
+            .map(|candidate| candidate.article.id)
+            .collect::<Vec<_>>();
         assert_eq!(
             admitted.iter().copied().collect::<BTreeSet<_>>(),
             BTreeSet::from([a, b])
         );
-        record_stage(&ctx, &features, &admitted, "admitted", None)
-            .await
-            .unwrap();
-        record_stage(&ctx, &features, &admitted, "shortlisted", None)
-            .await
-            .unwrap();
+        let candidates = features
+            .iter()
+            .filter(|candidate| candidate.stage == "admitted")
+            .cloned()
+            .map(Candidate::into_legacy_scored)
+            .collect();
         let lineup = curator.select(candidates, run_date()).await.unwrap();
         let selected = lineup
             .picks
@@ -1470,32 +1522,32 @@ mod tests {
             .copied()
             .filter(|id| !selected.contains(id))
             .collect::<Vec<_>>();
-        record_stage(&ctx, &features, &selected, "selected", None)
-            .await
-            .unwrap();
-        record_stage(
-            &ctx,
-            &features,
+        set_candidate_stage(&mut features, &selected, "selected", None);
+        set_candidate_stage(
+            &mut features,
             &not_selected,
             "shortlisted",
             Some("not_selected"),
-        )
-        .await
-        .unwrap();
+        );
+        record_candidates(&ctx, &features).await.unwrap();
 
         let rows = stage_rows(&h.db, h.run_id).await;
         assert_eq!(rows.len(), 4);
         let (winner, loser) = (selected[0], not_selected[0]);
         assert_eq!(
             rows[&winner],
-            ("selected".into(), None, Some("[\"prefilter\"]".into()))
+            (
+                "selected".into(),
+                None,
+                Some("[\"interest\",\"blend\"]".into())
+            )
         );
         assert_eq!(
             rows[&loser],
             (
                 "shortlisted".into(),
                 Some("not_selected".into()),
-                Some("[\"prefilter\"]".into())
+                Some("[\"interest\",\"blend\"]".into())
             )
         );
         let text = telemetry::explain(
@@ -1520,11 +1572,22 @@ mod tests {
         let service = build_embedding_service(&ctx, &mut report);
         assert!(!service.has_client(), "--skip-embeddings is cache-only");
         assert!(service.meter().is_none());
-        let features = prepare_features(&ctx, &h.articles, &service, &mut report).await;
+        let mut features = admit::hygiene(
+            &h.db,
+            h.run_id,
+            h.articles.clone(),
+            run_date(),
+            &h.config.curation,
+            now(),
+        )
+        .await
+        .unwrap();
+        report.counts.eligible = features.len() as i64;
+        prepare_features(&ctx, &mut features, &service, &mut report).await;
         assert_eq!(features.len(), 2);
         assert_eq!(report.counts.embedded, 0, "nothing cached yet");
-        assert!(features.values().all(|f| f.signals.interest.is_none()));
-        assert!(features.values().all(|f| f.signals.heuristic.is_some()));
+        assert!(features.iter().all(|f| f.signals.interest.is_none()));
+        assert!(features.iter().all(|f| f.signals.heuristic.is_some()));
         assert_eq!(report.voyage_tokens, 0);
     }
 
@@ -1535,13 +1598,24 @@ mod tests {
         let backend = Arc::new(MockBackend::new()); // nothing scripted: every call fails
         let service = mock_service(&h, backend.clone());
         let mut report = RunReport::new(run_date(), now());
-        let features = prepare_features(&ctx, &h.articles, &service, &mut report).await;
+        let mut features = admit::hygiene(
+            &h.db,
+            h.run_id,
+            h.articles.clone(),
+            run_date(),
+            &h.config.curation,
+            now(),
+        )
+        .await
+        .unwrap();
+        report.counts.eligible = features.len() as i64;
+        prepare_features(&ctx, &mut features, &service, &mut report).await;
         assert!(backend.calls() >= 1);
         assert_eq!(features.len(), 2);
         assert_eq!(report.counts.eligible, 2);
         assert_eq!(report.counts.embedded, 0);
         assert!(report.error.is_none());
-        for feature in features.values() {
+        for feature in &features {
             assert!(feature.signals.interest.is_none() && feature.signals.knn.is_none());
             assert!(feature.signals.heuristic.is_some());
             assert!(

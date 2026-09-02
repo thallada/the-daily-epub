@@ -12,7 +12,6 @@
 timezone = "America/New_York"
 lookback_hours = 26
 target_article_count = 20
-prefilter_keep = 120
 retention_days = 21                  # EPUBs, by age
 xtc_retention_count = 5              # XTC issues, by count (~80-100 MB each)
 max_daily_usd = 2.0                  # DeepSeek ceiling per UTC day; [anthropic] and [voyage] have their own
@@ -38,7 +37,8 @@ base_url = "https://api.deepseek.com/v1"
 model = "deepseek-v4-flash"          # DeepSeek-V4-Flash-0731 (confirmed 2026-08-15)
 # api_key via DAILY_EPUB_DEEPSEEK__API_KEY env
 score_batch_size = 12
-max_concurrent_requests = 4          # stage-A batches in flight at once
+triage_batch_size = 25               # articles per first-pass triage request
+max_concurrent_requests = 4          # triage and stage-A batches in flight at once
 score_temperature = 0.3
 editorial_temperature = 0.8          # used only when DeepSeek is the fallback editor
 # USD per 1M tokens, used for the cost guardrail.
@@ -80,6 +80,8 @@ max_daily_usd = 0.50                 # runaway guard ($0.02 / M tokens)
 
 [curation]
 max_article_count = 28               # hard ceiling; there is no minimum (§13)
+recent_rejection_days = 7
+recent_rejection_floor = 3.0
 always_include_feeds = []            # miniflux feed ids or site urls
 blocked_domains = []
 # Extra paywalled hosts, merged with the built-in list (nytimes, wsj, ft, …).

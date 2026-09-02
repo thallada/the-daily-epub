@@ -1,0 +1,16 @@
+{
+  "articles": [
+    {
+      "id": 4821,
+      "interest": 7.5,
+      "kind": "first_hand",
+      "why": "Specific field notes from a difficult migration"
+    },
+    {
+      "id": 4822,
+      "interest": 3.0,
+      "kind": "news",
+      "why": "Competent but familiar daily industry coverage"
+    }
+  ]
+}

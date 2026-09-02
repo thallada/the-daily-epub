@@ -16,8 +16,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 
 use crate::types::{
-    Article, ArticleId, Entry, EntryId, Facets, LlmScore, Pick, RatedArticle, RatingEvent,
-    SocialRef, SocialSource, SourceRef,
+    Article, ArticleId, Entry, EntryId, Facets, Pick, RatedArticle, RatingEvent, SocialRef,
+    SocialSource, SourceRef,
 };
 
 /// Embedded migrations from `./migrations` (implementation notes §1).
@@ -367,23 +367,6 @@ impl Db {
         Ok(rows.iter().map(|row| row.get::<i64, _>("id")).collect())
     }
 
-    /// Articles the LLM scored below `threshold` within the last `days` (§3.5).
-    pub async fn recently_low_scored_ids(
-        &self,
-        threshold: f64,
-        since: Date,
-    ) -> Result<Vec<ArticleId>> {
-        let rows = sqlx::query(
-            "SELECT DISTINCT article_id FROM scores
-             WHERE llm_score IS NOT NULL AND llm_score < ? AND run_date >= ?",
-        )
-        .bind(threshold)
-        .bind(since.to_string())
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(|r| r.get::<i64, _>("article_id")).collect())
-    }
-
     // -----------------------------------------------------------------
     // social (§3.4)
     // -----------------------------------------------------------------
@@ -420,37 +403,6 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(social_from_row).collect()
-    }
-
-    // -----------------------------------------------------------------
-    // scores (§3.5, §3.6)
-    // -----------------------------------------------------------------
-
-    pub async fn upsert_score(
-        &self,
-        article_id: ArticleId,
-        run_date: Date,
-        prefilter_score: Option<f64>,
-        llm: Option<&LlmScore>,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO scores (article_id, run_date, prefilter_score, llm_score, llm_category, rationale)
-             VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(article_id, run_date) DO UPDATE SET
-                 prefilter_score = COALESCE(excluded.prefilter_score, scores.prefilter_score),
-                 llm_score = COALESCE(excluded.llm_score, scores.llm_score),
-                 llm_category = COALESCE(excluded.llm_category, scores.llm_category),
-                 rationale = COALESCE(excluded.rationale, scores.rationale)",
-        )
-        .bind(article_id)
-        .bind(run_date.to_string())
-        .bind(prefilter_score)
-        .bind(llm.map(|l| l.score))
-        .bind(llm.map(|l| l.category.as_str()))
-        .bind(llm.map(|l| l.rationale.as_str()))
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -1312,6 +1264,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0003_drop_scores.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let rows = sqlx::query(
             "SELECT article_id, issue_date, kind, source, label, value, event_at
@@ -1339,7 +1295,7 @@ mod tests {
                 .unwrap();
         assert!(!tables.iter().any(|table| table == "ratings"));
         assert!(!tables.iter().any(|table| table == "feed_priors"));
-        assert!(tables.iter().any(|table| table == "scores"));
+        assert!(!tables.iter().any(|table| table == "scores"));
         for expected in [
             "rating_events",
             "article_embeddings",

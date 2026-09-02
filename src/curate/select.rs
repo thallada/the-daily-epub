@@ -25,8 +25,6 @@ use super::llm::{LlmError, Llms, strip_code_fence};
 use super::{prompt_text, truncate_words};
 use crate::types::{ArticleId, Lineup, Pick, ScoredArticle, WORLD_BRIEFING_SECTION};
 
-/// How many candidates are offered to the editor (§13; step 5 raises this to the diversified shortlist).
-pub const SHORTLIST_SIZE: usize = 40;
 /// Words of lead-in text shown per candidate in the editor prompt (§13).
 const BLURB_WORDS: usize = 60;
 
@@ -153,9 +151,21 @@ fn render_candidate(candidate: &ScoredArticle) -> String {
             let _ = writeln!(block, "score: unscored");
         }
     }
+    if let Some(triage) = candidate.triage.as_ref() {
+        let _ = writeln!(
+            block,
+            "triage: {:.1} · {} — {}",
+            triage.interest,
+            triage.kind,
+            triage.why.trim()
+        );
+    }
     let mut flags = Vec::new();
     if candidate.auto_include {
         flags.push("always-include");
+    }
+    if candidate.exploration {
+        flags.push("exploration");
     }
     if a.excerpt_only {
         flags.push("excerpt only");
@@ -526,19 +536,12 @@ async fn complete_with_fallback(
     }
 }
 
-/// Top [`SHORTLIST_SIZE`] (or `2 × hard_max`) candidates by combined score,
-/// always including the auto-includes.
-fn shortlist(candidates: &[ScoredArticle], target: usize) -> Vec<ScoredArticle> {
+/// Step 4 offers the entire admitted deep set to the editor. Step 5 replaces
+/// this with the diversified shortlist.
+fn shortlist(candidates: &[ScoredArticle], _target: usize) -> Vec<ScoredArticle> {
     let mut ranked: Vec<ScoredArticle> = candidates.to_vec();
     sort_by_combined(&mut ranked);
-    let keep = SHORTLIST_SIZE.max(target * 2);
-    if ranked.len() <= keep {
-        return ranked;
-    }
-    let (head, tail) = ranked.split_at(keep);
-    let mut out = head.to_vec();
-    out.extend(tail.iter().filter(|c| c.auto_include).cloned());
-    out
+    ranked
 }
 
 fn sort_by_combined(candidates: &mut [ScoredArticle]) {
@@ -654,7 +657,12 @@ pub fn select_without_llm(
     date: Date,
 ) -> Lineup {
     let mut ranked = candidates;
-    super::prefilter::sort_by_prefilter(&mut ranked);
+    ranked.sort_by(|left, right| {
+        right
+            .prefilter_score
+            .total_cmp(&left.prefilter_score)
+            .then_with(|| left.article.id.cmp(&right.article.id))
+    });
     let mut chosen = Vec::new();
     let mut seen = HashSet::new();
     for candidate in ranked {
@@ -711,7 +719,10 @@ mod tests {
                 rationale: "solid".into(),
                 is_paywalled_guess: false,
             }),
+            triage: None,
             auto_include: false,
+            exploration: false,
+            admitted_by: Vec::new(),
         }
     }
 
@@ -861,9 +872,19 @@ mod tests {
         );
         let mut flagged = candidates(1);
         flagged[0].auto_include = true;
+        flagged[0].exploration = true;
+        flagged[0].triage = Some(crate::types::Triage {
+            interest: 7.5,
+            kind: "first_hand".into(),
+            why: "specific field notes".into(),
+            model: "mock".into(),
+            prompt_version: 1,
+            assessed_at: "2026-09-02T05:30:00Z".parse().unwrap(),
+        });
         flagged[0].article.excerpt_only = true;
         let prompt = build_prompt(&flagged, &sections(), 6, 11);
-        assert!(prompt.contains("flags: always-include | excerpt only"));
+        assert!(prompt.contains("triage: 7.5 · first_hand — specific field notes"));
+        assert!(prompt.contains("flags: always-include | exploration | excerpt only"));
     }
 
     #[tokio::test]
@@ -1109,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_llm_lineup_uses_prefilter_order() {
+    fn skip_llm_lineup_uses_preliminary_blend_order() {
         let mut pool = candidates(10);
         pool.iter_mut().for_each(|c| c.llm = None);
         pool[7].prefilter_score = 99.0; // id 8 is the strongest heuristically

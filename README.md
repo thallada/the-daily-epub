@@ -44,7 +44,7 @@ conversion are best-effort: they log, add a warning (run status `degraded`) and
 the run continues. Every LLM stage *degrades*: a Claude call that fails, is
 refused, or is over its daily ceiling is retried with the same prompt on
 DeepSeek; if DeepSeek is missing, dead or over budget too, the run takes the
-`--skip-llm` shape (prefilter order selects, feed excerpts stand in for
+`--skip-llm` shape (admission uses cheap signals and feed excerpts stand in for
 summaries) instead of losing the day's issue. Anthropic's server-side refusal
 fallback (`fallbacks = "default"`) is enabled on every editor request.
 
@@ -81,7 +81,7 @@ sudo install -m0755 target/release/daily-epub /usr/local/bin/
 ### Commands
 
 ```
-daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm] [--skip-embeddings]
+daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm] [--skip-embeddings] [--rescore]
 daily-epub serve                # rating endpoints + OPDS catalog + downloads
 daily-epub profile rebuild      # regenerate learned profile adjustments
 daily-epub ratings list --days 90
@@ -101,6 +101,7 @@ BookOrbit, does not run the retention sweep, does not write the `issues` row and
 does not advance the ingest watermark. It prints the lineup and the cost report.
 
 `--skip-embeddings` reads the embedding cache but makes zero Voyage calls.
+`--rescore` ignores reusable triage/deep assessments for this run.
 
 `explain` answers "why was this (not) in the paper" from the `candidate_runs`
 row the run persisted for every considered article: the stage it reached and the
@@ -144,7 +145,6 @@ Secrets belong in the environment file, never in the TOML.
 | `timezone` | `America/New_York` | Day boundaries and `--date` interpretation. |
 | `lookback_hours` | `26` | Size of the ingest window ending at the issue day's end (clamped to now). |
 | `target_article_count` | `20` | Soft target the editor aims for. There is no minimum: a nine-pick issue is published as nine. |
-| `prefilter_keep` | `120` | Candidates surviving the heuristic pre-filter. Must be ≥ `target_article_count`. |
 | `retention_days` | `21` | EPUBs older than this are deleted from `publish.epub_dir`. SQLite history is kept forever. |
 | `xtc_retention_count` | `5` | How many XTC issues to keep in `publish.xtc_dir`. Counted, not dated: each `.xtch` is ~80–100 MB, so the binding constraint is disk, not age. |
 | `max_daily_usd` | `2.0` | Ceiling on DeepSeek spend per **UTC day** of the run's start, not per run — a re-run inherits what earlier runs that day already spent (`runs.provider_costs_json`). Tripping it skips remaining DeepSeek calls; in-flight requests finish and the paper still publishes. |
@@ -160,7 +160,8 @@ Secrets belong in the environment file, never in the TOML.
 | `deepseek.model` | `deepseek-v4-flash` | Verified 2026-08-15 (DeepSeek-V4-Flash-0731). |
 | `deepseek.api_key` | — | **`DAILY_EPUB_DEEPSEEK__API_KEY`**. Absent ⇒ the run curates heuristically. |
 | `deepseek.score_batch_size` | `12` | Articles per stage-A scoring request. |
-| `deepseek.max_concurrent_requests` | `4` | Stage-A batches in flight at once; the budget is checked before each is spawned. |
+| `deepseek.triage_batch_size` | `25` | Articles per first-pass triage request. |
+| `deepseek.max_concurrent_requests` | `4` | Triage and stage-A batches in flight at once; the budget is checked before each is spawned. |
 | `deepseek.score_temperature` | `0.3` | Scoring temperature. |
 | `deepseek.editorial_temperature` | `0.8` | Summaries and The Brief, only when DeepSeek is the fallback editor. |
 | `deepseek.price_input_per_mtok` | `0.14` | USD per 1M cache-miss input tokens (cost guardrail arithmetic). |
@@ -195,6 +196,8 @@ Secrets belong in the environment file, never in the TOML.
 | `curation.feedback.good_value` | `0.35` | Weight for a Good verdict. |
 | `curation.feedback.not_for_me_value` | `-1.0` | Weight for a Not for me verdict. |
 | `curation.feedback.verdicts_in_prompt` | `60` | Recent explicit verdicts included in the system prompt. |
+| `curation.recent_rejection_days` | `7` | Churn window for recent low triage/deep assessments. |
+| `curation.recent_rejection_floor` | `3.0` | Scores below this floor are excluded during the churn window (except auto-includes). |
 | `curation.ranking.*` | see below | Every weight, quota, gate and threshold of the personalized ranker. |
 | `editorial.summary_model` | `editor` | `editor` (Claude) or `bulk` (DeepSeek) for the per-article summaries. |
 | `editorial.summary_input_tokens` | `3000` | Article text offered to the summary prompt. |
@@ -455,7 +458,7 @@ sqlite3 /var/lib/daily-epub/daily-epub.db \
   'select date, status, entries_fetched, candidates, selected, cost_usd from runs order by id desc limit 7;'
 ```
 
-Tune `prefilter_keep`, `target_article_count` and `curation.always_include_feeds`
+Tune `curation.ranking.deep_keep`, `target_article_count` and `curation.always_include_feeds`
 from what you see in step 8.
 
 ### Troubleshooting
@@ -485,7 +488,7 @@ cargo fmt
 
 The crate is a library plus a thin binary, so tests drive the pipeline directly.
 `tests/e2e_pipeline.rs` is the capstone: synthetic entries → dedupe → offline
-extraction → prefilter → selection (both the `--skip-llm` route and a
+extraction → signals → triage → admission → selection (both the `--skip-llm` route and a
 `MockBackend` DeepSeek route) → editorial → both EPUB editions → publish → OPDS
 and database rows, with no network access anywhere.
 
@@ -497,8 +500,8 @@ server. The stages themselves:
 
 ```text
 miniflux.rs   ingest            curate/       scoring and selection
-dedupe.rs     clustering          prefilter, llm, score, select, editorial,
-                                  embedding, signals, telemetry
+dedupe.rs     clustering          prefilter, llm, triage, admit, score, select,
+                                  editorial, embedding, signals, telemetry
 extract.rs    body text           profile/    the reader's taste profile
 images/       article images    comments.rs   discussion chapters
   normalize     usable <img>    world.rs      the world briefing
@@ -573,11 +576,11 @@ From spec §7, plus what implementation turned up:
   each a `ChatBackend` impl with its own `UsageMeter` and price table. A third
   means another impl. Voyage AI embeddings sit behind the analogous
   `EmbeddingBackend` trait in `curate/embedding.rs`.
-- **The learned signals are computed but do not yet gate selection.** Every
-  eligible article gets interest, rated-neighbour, feed-affinity, social and
-  heuristic signals persisted to `candidate_runs.signals_json` (read them with
-  `explain`), while the heuristic pre-filter still decides what the LLM sees.
-  The rated-neighbour and feed signals stay absent until their gates open
-  (8 and 15 ratings respectively).
+- **Triage and union admission replace the heuristic gate.** Every eligible
+  article gets interest, rated-neighbour, feed-affinity, social and heuristic
+  signals, then DeepSeek reads its opening (up to `triage_max`). The deep set is
+  the union of triage, interest, neighbour, exploration, blend and auto-include
+  retrievers. `explain` shows the assessment and `admitted_by`. Learned signals
+  stay absent until their gates open (8 and 15 ratings respectively).
 - **One reader, one issue per day.** There is no multi-user support and no
   weekly/retrospective edition (spec §6).

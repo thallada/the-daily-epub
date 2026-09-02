@@ -414,7 +414,10 @@ mod tests {
             prefilter_score: 50.0,
             social_score: 0.0,
             llm: None,
+            triage: None,
             auto_include: false,
+            exploration: false,
+            admitted_by: Vec::new(),
         }
     }
 

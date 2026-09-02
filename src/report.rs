@@ -49,7 +49,7 @@ impl fmt::Display for RunStatus {
 }
 
 /// Per-stage article counts as the pipeline narrows the day's feed volume (§2).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageCounts {
     /// Entries returned by Miniflux inside the lookback window (§3.1).
     pub entries_fetched: i64,
@@ -73,7 +73,19 @@ pub struct StageCounts {
     pub embedded: i64,
     /// Current rated articles with a valid embedding.
     pub rated_with_embeddings: i64,
-    /// Articles surviving the heuristic pre-filter (§3.5).
+    /// Articles with a reusable or newly produced triage assessment.
+    pub triaged: i64,
+    /// Articles admitted to legacy Stage A / the editor.
+    pub admitted: i64,
+    /// First admitting retriever counts.
+    pub admitted_by: BTreeMap<String, i64>,
+    pub exploration_admitted: i64,
+    pub exploration_selected: i64,
+    /// Legacy Stage A assessments in step 4; deep assessments beginning step 5.
+    pub assessed: i64,
+    /// Candidates shown to the editor (the admitted set in step 4).
+    pub shortlisted: i64,
+    /// Compatibility count for the admitted deep set in step 4.
     pub candidates: i64,
     /// Articles scored by the LLM (§3.6 stage A).
     pub llm_scored: i64,

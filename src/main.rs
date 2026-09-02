@@ -69,12 +69,15 @@ struct GenerateArgs {
     /// Cap the lineup size (overrides `target_article_count`).
     #[arg(long, value_name = "N")]
     max_articles: Option<usize>,
-    /// Skip every LLM call: prefilter order selects, excerpts stand in for summaries.
+    /// Skip every LLM call: cheap-signal admission, excerpt summaries.
     #[arg(long)]
     skip_llm: bool,
     /// Use cached embeddings only: zero Voyage calls.
     #[arg(long)]
     skip_embeddings: bool,
+    /// Ignore reusable triage/deep assessments and ask the bulk model again.
+    #[arg(long)]
+    rescore: bool,
 }
 
 impl From<&GenerateArgs> for GenerateOptions {
@@ -86,6 +89,7 @@ impl From<&GenerateArgs> for GenerateOptions {
             max_articles: args.max_articles,
             skip_llm: args.skip_llm,
             skip_embeddings: args.skip_embeddings,
+            rescore: args.rescore,
         }
     }
 }
@@ -345,13 +349,43 @@ fn print_report(report: &RunReport) {
         String::new()
     };
     println!(
-        "curation: {} eligible · {} embedded · {} rated w/ embeddings → {} candidates → {} scored{unscored} → {} selected",
+        "curation: {} eligible · {} embedded · {} triaged → {} admitted → {} assessed{unscored} → {} shortlisted → {} selected",
         report.counts.eligible,
         report.counts.embedded,
-        report.counts.rated_with_embeddings,
-        report.counts.candidates,
-        report.counts.llm_scored,
+        report.counts.triaged,
+        report.counts.admitted,
+        report.counts.assessed,
+        report.counts.shortlisted,
         report.counts.selected,
+    );
+    println!(
+        "admission: triage {} · interest {} · knn {} · exploration {} · blend {} · auto {}",
+        report
+            .counts
+            .admitted_by
+            .get("triage")
+            .copied()
+            .unwrap_or(0),
+        report
+            .counts
+            .admitted_by
+            .get("interest")
+            .copied()
+            .unwrap_or(0),
+        report.counts.admitted_by.get("knn").copied().unwrap_or(0),
+        report
+            .counts
+            .admitted_by
+            .get("exploration")
+            .copied()
+            .unwrap_or(0),
+        report.counts.admitted_by.get("blend").copied().unwrap_or(0),
+        report
+            .counts
+            .admitted_by
+            .get("auto_include")
+            .copied()
+            .unwrap_or(0),
     );
     println!(
         "tokens: {} input · {} cache read · {} cache write · {} output · {} voyage = ${:.4}",
@@ -687,6 +721,7 @@ mod tests {
             "6",
             "--skip-llm",
             "--skip-embeddings",
+            "--rescore",
         ])
         .unwrap();
         match cli.command {
@@ -697,10 +732,11 @@ mod tests {
                 assert_eq!(a.max_articles, Some(6));
                 assert!(a.skip_llm);
                 assert!(a.skip_embeddings);
+                assert!(a.rescore);
 
                 let opts = GenerateOptions::from(&a);
                 assert_eq!(opts.date.as_deref(), Some("2026-08-15"));
-                assert!(opts.dry_run && opts.skip_llm && opts.skip_embeddings);
+                assert!(opts.dry_run && opts.skip_llm && opts.skip_embeddings && opts.rescore);
                 assert_eq!(opts.max_articles, Some(6));
             }
             other => panic!("expected generate, got {other:?}"),

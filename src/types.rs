@@ -261,6 +261,80 @@ pub struct LlmScore {
     pub is_paywalled_guess: bool,
 }
 
+/// Deep assessment output. Step 5 replaces the legacy stage-A producer while
+/// keeping its shape compatible for this transition step.
+pub type Deep = LlmScore;
+
+/// Personalized first-pass judgment cached in `article_assessments` (§10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Triage {
+    /// Reader interest, clamped to 0–10.
+    pub interest: f64,
+    pub kind: String,
+    /// At most twelve words in a conforming response.
+    pub why: String,
+    pub model: String,
+    pub prompt_version: i64,
+    pub assessed_at: Timestamp,
+}
+
+/// Cached LLM judgments accumulated for an article (§7.3).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Assessment {
+    pub triage: Option<Triage>,
+    /// Filled in by step 5.
+    pub deep: Option<Deep>,
+}
+
+/// An article carrying the state of the personalized curation pipeline (§18).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    pub article: Article,
+    pub auto_include: bool,
+    pub exploration: bool,
+    pub signals: crate::curate::signals::Signals,
+    pub assessment: Assessment,
+    /// Filled in by step 5.
+    pub utility: Option<f64>,
+    /// Filled in by step 5.
+    pub cluster: Option<i64>,
+    pub admitted_by: Vec<String>,
+    pub stage: String,
+    pub excluded_reason: Option<String>,
+}
+
+impl Candidate {
+    pub fn new(article: Article, auto_include: bool) -> Self {
+        let signals = crate::curate::signals::Signals::baseline(&article);
+        Self {
+            article,
+            auto_include,
+            exploration: false,
+            signals,
+            assessment: Assessment::default(),
+            utility: None,
+            cluster: None,
+            admitted_by: Vec::new(),
+            stage: "eligible".into(),
+            excluded_reason: None,
+        }
+    }
+
+    /// Adapter retained until step 5 retires stage A and `ScoredArticle`.
+    pub fn into_legacy_scored(self) -> ScoredArticle {
+        ScoredArticle {
+            prefilter_score: self.signals.preliminary.unwrap_or(0.0),
+            social_score: self.signals.social.unwrap_or(0.0),
+            llm: self.assessment.deep,
+            triage: self.assessment.triage,
+            auto_include: self.auto_include,
+            exploration: self.exploration,
+            admitted_by: self.admitted_by,
+            article: self.article,
+        }
+    }
+}
+
 /// An article carrying every ranking signal computed so far (§3.5, §3.6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScoredArticle {
@@ -271,8 +345,15 @@ pub struct ScoredArticle {
     pub social_score: f64,
     /// `None` until stage A has run (or when `--skip-llm`).
     pub llm: Option<LlmScore>,
+    /// Transitional metadata rendered by the editor until step 5 removes this type.
+    #[serde(default)]
+    pub triage: Option<Triage>,
     /// From `curation.always_include_feeds`: may be scored but never dropped (§3.5).
     pub auto_include: bool,
+    #[serde(default)]
+    pub exploration: bool,
+    #[serde(default)]
+    pub admitted_by: Vec<String>,
 }
 
 impl ScoredArticle {

@@ -2,14 +2,14 @@
 //! (spec §2, §5).
 //!
 //! ```text
-//! synthetic entries → dedupe → extract (offline) → persist → prefilter
+//! synthetic entries → dedupe → extract (offline) → persist → admission
 //!   → select → editorial → issue → both EPUB editions → publish → OPDS + rows
 //! ```
 //!
 //! Two passes over the same machinery:
 //!
 //! * [`skip_llm_pipeline_produces_a_published_issue`] takes the `--skip-llm`
-//!   route (prefilter order selects, feed excerpts stand in for summaries);
+//!   route (preliminary blend selects, feed excerpts stand in for summaries);
 //! * [`llm_pipeline_runs_against_a_mock_backend`] takes the DeepSeek route with
 //!   [`MockBackend`] standing in for the API, so stages A, B and C are all
 //!   exercised — prompts, parsers, budget accounting and all — offline.
@@ -26,11 +26,11 @@ use jiff::civil::Date;
 
 use daily_epub::config::{Config, PublishConfig, ServerConfig, XtcConfig};
 use daily_epub::curate::llm::{LlmClient, Llms, MockBackend, UsageMeter};
-use daily_epub::curate::{Curator, editorial, prefilter};
+use daily_epub::curate::{Curator, admit, editorial};
 use daily_epub::db::Db;
 use daily_epub::extract::Extractor;
 use daily_epub::types::{
-    Article, Colophon, Edition, Entry, Issue, Lineup, Models, ScoredArticle, SourceKind, Vote,
+    Article, Candidate, Colophon, Edition, Entry, Issue, Lineup, Models, SourceKind, Vote,
 };
 use daily_epub::{auth, dedupe, epub, miniflux, pipeline, publish};
 
@@ -57,7 +57,6 @@ fn test_config(root: &Path) -> Config {
         database_path: root.join("db").join("daily-epub.db"),
         out_dir: root.join("out"),
         target_article_count: 6,
-        prefilter_keep: 20,
         world_briefing: false,
         publish: PublishConfig {
             epub_dir: root.join("bookorbit"),
@@ -402,23 +401,32 @@ async fn skip_llm_pipeline_produces_a_published_issue() {
 
     // --- Stages 6–7 with no LLM at all (notes §6) ---
     let curator = Curator::new(cfg.clone(), db.clone(), Llms::default());
-    let candidates = curator
-        .prefilter(articles, date())
-        .await
-        .expect("prefilter runs");
+    let mut personalized = articles
+        .into_iter()
+        .map(|article| Candidate::new(article, false))
+        .collect::<Vec<_>>();
+    for candidate in &mut personalized {
+        candidate.signals.preliminary = candidate.signals.heuristic;
+    }
+    admit::admit(&mut personalized, date(), &cfg.curation.ranking);
+    let candidates = personalized
+        .into_iter()
+        .filter(|candidate| candidate.stage == "admitted")
+        .map(Candidate::into_legacy_scored)
+        .collect::<Vec<_>>();
     assert_eq!(candidates.len(), 5, "nothing is dropped at this volume");
-    assert!(
-        candidates
-            .windows(2)
-            .all(|w| w[0].prefilter_score >= w[1].prefilter_score),
-        "candidates come back in prefilter order"
-    );
     // The excerpt-only story is penalized (§3.5).
     let allocator = candidates
         .iter()
         .find(|c| c.article.excerpt_only)
         .expect("the allocator teaser survived");
-    assert!(allocator.prefilter_score < candidates[0].prefilter_score);
+    assert!(
+        allocator.prefilter_score
+            < candidates
+                .iter()
+                .map(|candidate| candidate.prefilter_score)
+                .fold(f64::NEG_INFINITY, f64::max)
+    );
 
     let lineup = curator.select(candidates, date()).await.expect("select");
     assert_eq!(lineup.picks.len(), 5, "target 6, only 5 candidates exist");
@@ -497,10 +505,19 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
         .expect("open db");
 
     let articles = ingest_dedupe_extract_persist(&db).await;
-    let ctx = prefilter::PrefilterContext::load(&db, date())
-        .await
-        .expect("prefilter context");
-    let candidates: Vec<ScoredArticle> = prefilter::run(articles, &ctx, &cfg);
+    let mut personalized = articles
+        .into_iter()
+        .map(|article| Candidate::new(article, false))
+        .collect::<Vec<_>>();
+    for candidate in &mut personalized {
+        candidate.signals.preliminary = candidate.signals.heuristic;
+    }
+    admit::admit(&mut personalized, date(), &cfg.curation.ranking);
+    let candidates = personalized
+        .into_iter()
+        .filter(|candidate| candidate.stage == "admitted")
+        .map(Candidate::into_legacy_scored)
+        .collect::<Vec<_>>();
     let ids: Vec<i64> = candidates.iter().map(|c| c.article.id).collect();
     assert_eq!(ids.len(), 5);
 
@@ -642,4 +659,80 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
     let issue = assemble_build_publish(&db, &cfg, lineup, colophon).await;
     assert_eq!(issue.colophon.models.bulk, cfg.deepseek.model);
     assert!(issue.colophon.cost_usd > 0.0);
+}
+
+#[tokio::test]
+async fn failing_deepseek_still_publishes_with_heuristic_fallbacks() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cfg = test_config(root.path());
+    let db = Db::open_and_migrate(&cfg.database_path)
+        .await
+        .expect("open db");
+    let articles = ingest_dedupe_extract_persist(&db).await;
+    let mut personalized = articles
+        .into_iter()
+        .map(|article| Candidate::new(article, false))
+        .collect::<Vec<_>>();
+    for candidate in &mut personalized {
+        candidate.signals.preliminary = candidate.signals.heuristic;
+    }
+    admit::admit(&mut personalized, date(), &cfg.curation.ranking);
+    let mut candidates = personalized
+        .into_iter()
+        .filter(|candidate| candidate.stage == "admitted")
+        .map(Candidate::into_legacy_scored)
+        .collect::<Vec<_>>();
+
+    let backend = std::sync::Arc::new(MockBackend::new());
+    let client = LlmClient::with_backend(
+        &cfg.deepseek.model,
+        "reader profile".into(),
+        UsageMeter::new(&cfg.deepseek, cfg.max_daily_usd),
+        backend.clone(),
+    );
+    let curator = Curator::new(
+        cfg.clone(),
+        db.clone(),
+        Llms {
+            bulk: Some(client),
+            editor: None,
+        },
+    );
+    curator
+        .score(&mut candidates, date())
+        .await
+        .expect("failed batches degrade, not abort");
+    assert!(candidates.iter().all(|candidate| candidate.llm.is_none()));
+    let mut lineup = curator
+        .select(candidates, date())
+        .await
+        .expect("fallback lineup");
+    let editorial = curator
+        .editorial(&lineup)
+        .await
+        .expect("fallback editorial");
+    pipeline::apply_summaries(&mut lineup, &editorial);
+    assert!(!lineup.picks.is_empty());
+    assert!(backend.calls() > 0, "the failing backend was exercised");
+    let issue = assemble_build_publish(
+        &db,
+        &cfg,
+        lineup,
+        Colophon {
+            provider_costs: BTreeMap::new(),
+            models: Models {
+                bulk: cfg.deepseek.model.clone(),
+                editor: format!("{} (bulk fallback)", cfg.deepseek.model),
+                summaries: cfg.deepseek.model.clone(),
+            },
+            entries_fetched: 8,
+            feeds_seen: 8,
+            candidates: 5,
+            cost_usd: 0.0,
+            generator_version: format!("daily-epub {}", daily_epub::VERSION),
+        },
+    )
+    .await;
+    assert!(!issue.lineup.picks.is_empty());
+    assert_eq!(std::fs::read_dir(&cfg.publish.epub_dir).unwrap().count(), 2);
 }
