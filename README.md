@@ -13,7 +13,11 @@ the summaries and *The Brief*. It assembles two EPUB editions (a standard one
 and one tuned for the Xteink X4 e-ink reader), converts the X4 edition to XTC, and
 publishes the lot over its own OPDS catalog — which doubles as a
 [BookOrbit](https://github.com/thallada/bookorbit) watched folder if you run one.
-Each article chapter ends with Loved it / Good / Not for me links that feed back into tomorrow's curation.
+Each article chapter ends with Loved it / Good / Not for me links that feed back
+into tomorrow's curation, and a short *Behind the paper* chapter before the
+colophon says what the run considered, how the deep set was admitted, whether
+the learned signals were active, the ten highest-utility near misses, and what
+it all cost.
 
 Steady-state cost is roughly **$1/day**: $0.05–0.30 in DeepSeek tokens plus
 ~$0.50–0.80 for the Claude editor and a few cents of Voyage AI embeddings, each
@@ -38,6 +42,25 @@ Miniflux ingest ─▶ dedupe ─▶ extraction ─▶ persist ─▶ social enr
 
 Every stage writes to SQLite, so a run is idempotent per date: re-running
 `generate --date 2026-08-15` replaces that issue rather than duplicating it.
+Only one writer runs at a time: `generate`, `profile rebuild`, `features
+backfill` and `backfill-social` take an advisory `flock` on
+`<database_path>.lock`, and a second invocation exits with `generate is already
+running` (naming whichever command holds it). `serve`, `explain`, `stats`,
+`ratings`, `features prune` and `db migrate` never wait on it, and the kernel
+releases the lock when the holder exits, however it exits.
+
+Every run ends with a four-line summary in the log and on stdout:
+
+```
+curation: 412 considered → 398 eligible → 398 triaged → 120 assessed → 60 shortlisted → 17 selected
+admission: triage 60 · interest 20 · knn 12 · exploration 5 · blend 23 · auto 0
+preference: 14 rated w/ embeddings → knn 0.35 · feed off · 41 verdicts in prompt
+providers: anthropic $0.62 · deepseek $0.11 · voyage $0.02 · total $0.75 · 23m12s
+```
+
+The full report (per-stage counts and timings — `embed`, `signals`, `triage`,
+`admit`, `assess`, `rank`, `editor`, `summaries`, `brief` among them — and
+per-provider usage) is stored on the `runs` row and in `issues.report_json`.
 
 **Failure policy.** Miniflux ingest, SQLite writes, EPUB assembly and publishing
 are fatal — without them there is no issue, and the `runs` row records why.
@@ -91,6 +114,7 @@ daily-epub ratings set --article 42 --label loved --note "excellent"
 daily-epub ratings clear --url https://example.com/article
 daily-epub explain --date YYYY-MM-DD (--article ID | --url URL) [--run-id N]
 daily-epub explain --date YYYY-MM-DD --near-misses [N]
+daily-epub stats [--days 14]    # the evaluation framework, one fact per line
 daily-epub features backfill [--days 30] [--rated-only] [--all] [--yes]
 daily-epub features prune       # stale embeddings + old candidate telemetry
 daily-epub backfill-social      # re-poll social scores for recent articles
@@ -104,6 +128,8 @@ does not advance the ingest watermark. It prints the lineup and the cost report.
 
 `--skip-embeddings` reads the embedding cache but makes zero Voyage calls.
 `--rescore` ignores reusable triage/deep assessments for this run.
+`--max-articles N` is a ceiling, never a target: the hard maximum becomes
+`min(curation.max_article_count, N)` and the soft target is lowered to fit.
 
 `explain` answers "why was this (not) in the paper" from the `candidate_runs`
 row the run persisted for every considered article: the stage it reached and the
@@ -115,6 +141,15 @@ for a pick. `--url` canonicalizes the address; an article that is not in the
 database at all is reported as never ingested (a feed problem, not a ranking
 one). `--near-misses` lists the highest-utility articles that were not selected
 (by preliminary blend for articles the ranker never reached).
+
+`stats` is the whole evaluation framework, on purpose: for the last `--days`
+(14) it prints the issues and articles published, the mean issue size, explicit
+ratings by label and per issue, the up/down ratio of rated picks per admitting
+retriever (`admitted_by[0]` — triage, interest, knn, exploration, blend,
+auto_include), the exploration yield (admitted, selected, rated positively),
+cost per day per provider from `runs.provider_costs_json`, and the mean
+generation time. Plain text, one fact per line. Tune from it and from reading
+the paper; anything more waits for more ratings.
 
 `features backfill` embeds the rated and published articles first (the learned
 set), then the standing interests, then — only with `--all` — every other
@@ -268,6 +303,9 @@ DAILY_EPUB_VOYAGE__API_KEY=…
 DAILY_EPUB_SERVER__HMAC_SECRET=$(openssl rand -hex 32)
 EOF
 sudo chown daily-epub:daily-epub /etc/daily-epub/env && sudo chmod 0600 /etc/daily-epub/env
+# `DAILY_EPUB_ANTHROPIC__API_KEY` and `DAILY_EPUB_VOYAGE__API_KEY` are the two
+# keys curation v2 added; the units read them from this file unchanged. Either
+# may be left unset: the run then falls back to DeepSeek / cached embeddings.
 
 # publish dirs must exist and be writable by the service user
 sudo install -d -o daily-epub -g daily-epub /var/lib/daily-epub/xtc
@@ -436,7 +474,7 @@ DAILY_EPUB_OUT_DIR=./out daily-epub generate --dry-run --skip-llm --max-articles
 ls -la ./out                       # two .epub files
 epubcheck "./out/The Daily EPUB - $(date +%F).epub"   # expect zero errors
 #    open the standard edition in Calibre / KOReader: cover, The Brief,
-#    In This Issue, sections, discussions, colophon; TOC depth 2
+#    In This Issue, sections, discussions, Behind the paper, colophon; TOC depth 2
 
 # 4. Now with DeepSeek and Claude, still not publishing
 daily-epub generate --dry-run --out ./out --max-articles 6
@@ -460,12 +498,13 @@ curl -s https://daily.hallada.net/issues.json | jq '.[0]'
 sqlite3 /var/lib/daily-epub/daily-epub.db 'select * from rating_events order by event_at desc;'
 
 # 8. Watch cost and quality for a week
-sqlite3 /var/lib/daily-epub/daily-epub.db \
-  'select date, status, entries_fetched, candidates, selected, cost_usd from runs order by id desc limit 7;'
+daily-epub stats --days 7
+daily-epub explain --date $(date +%F) --near-misses
 ```
 
 Tune `curation.ranking.deep_keep`, `target_article_count` and `curation.always_include_feeds`
-from what you see in step 8.
+from what you see in step 8, and read the paper's *Behind the paper* chapter
+each morning: it is the same numbers, on the device.
 
 ### Troubleshooting
 
@@ -496,7 +535,10 @@ The crate is a library plus a thin binary, so tests drive the pipeline directly.
 `tests/e2e_pipeline.rs` is the capstone: synthetic entries → dedupe → offline
 extraction → signals → triage → admission → selection (both the `--skip-llm` route and a
 `MockBackend` DeepSeek route) → editorial → both EPUB editions → publish → OPDS
-and database rows, with no network access anywhere.
+and database rows, with no network access anywhere. `tests/m4_epub.rs` covers
+the rendered chapters, including *Behind the paper* in both editions; the
+`stats` and lock tests live next to their modules (`curate/telemetry.rs`,
+`lock.rs`).
 
 ### Layout
 
@@ -516,6 +558,7 @@ images/       article images    comments.rs   discussion chapters
   encode        re-encode       publish.rs    BookOrbit + XTC
   embed         into the page   server.rs     ratings, OPDS
 html.rs       markup helpers    db.rs         SQLite
+lock.rs       one writer at a time (flock on <database_path>.lock)
 ```
 
 Two modules are worth knowing about before you go looking for their contents.

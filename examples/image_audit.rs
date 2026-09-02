@@ -417,6 +417,7 @@ fn write_audit_epub(out_dir: &Path, picks: &[Pick], assets: &[ImageAsset]) {
         },
         world_briefing: None,
         colophon: Colophon::default(),
+        behind: Default::default(),
     };
     let cfg = daily_epub::config::Config::default();
     match daily_epub::epub::build_edition_with_images(

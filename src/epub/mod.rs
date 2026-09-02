@@ -23,6 +23,7 @@ pub const CHAPTER_ORDER: &[&str] = &[
     "in-this-issue",
     "sections",
     "world-briefing",
+    "behind-the-paper",
     "colophon",
 ];
 
@@ -192,6 +193,7 @@ mod tests {
                 "OEBPS/disc-1001.xhtml",
                 "OEBPS/art-1002.xhtml",
                 "OEBPS/world.xhtml",
+                "OEBPS/behind.xhtml",
                 "OEBPS/colophon.xhtml",
             ] {
                 assert!(

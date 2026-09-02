@@ -1,7 +1,8 @@
 //! Chapter ordering and `epub-builder` assembly (spec §3.10).
 //!
-//! Structure: cover → From the Editor → In This Issue → sections (title page,
-//! article chapters, discussion chapters) → World Briefing → colophon. The
+//! Structure: cover → The Brief → In This Issue → sections (title page,
+//! article chapters, discussion chapters) → World Briefing → Behind the paper
+//! → colophon. The
 //! chapters themselves are rendered by [`super::chapters`] and the cover by
 //! [`super::cover`]; this module decides the order and zips the result.
 
@@ -14,8 +15,8 @@ use crate::types::{Edition, ImageAsset, Issue};
 
 use super::EpubError;
 use super::chapters::{
-    render_colophon, render_front_page, render_in_this_issue, render_section_page,
-    render_world_briefing, section_names,
+    render_behind_the_paper, render_colophon, render_front_page, render_in_this_issue,
+    render_section_page, render_world_briefing, section_names,
 };
 use super::cover::{CoverAsset, render_cover_page};
 use super::x4;
@@ -85,6 +86,7 @@ pub fn render_all(
     if let Some(world) = render_world_briefing(issue)? {
         chapters.push(world);
     }
+    chapters.push(render_behind_the_paper(issue)?);
     chapters.push(render_colophon(issue)?);
 
     if edition == Edition::X4 {
@@ -272,11 +274,12 @@ mod tests {
                 "sec-Niche Corner",
                 "art-1002",
                 "world",
+                "behind",
                 "colophon",
             ]
         );
         let levels: Vec<u8> = chapters.iter().map(|c| c.toc_level).collect();
-        assert_eq!(levels, vec![1, 1, 1, 1, 2, 3, 1, 2, 1, 1]);
+        assert_eq!(levels, vec![1, 1, 1, 1, 2, 3, 1, 2, 1, 1, 1]);
         for chapter in &chapters {
             assert_xml_ok(&chapter.xhtml);
         }

@@ -10,7 +10,10 @@ use askama::Template;
 use crate::comments;
 use crate::html::{text_escape, to_xhtml};
 use crate::images;
-use crate::types::{Edition, ImageAsset, Issue, Pick, SocialRef, Vote, WORLD_BRIEFING_SECTION};
+use crate::types::{
+    BehindThePaper, Edition, ImageAsset, Issue, NearMiss, Pick, SocialRef, Vote,
+    WORLD_BRIEFING_SECTION,
+};
 use crate::world;
 
 use super::EpubError;
@@ -100,6 +103,17 @@ struct WorldBriefingChapter {
     title: String,
     display_date: String,
     body_html: String,
+}
+
+#[derive(Template)]
+#[template(path = "behind.xhtml", escape = "html")]
+struct BehindChapter {
+    title: String,
+    summary_line: String,
+    admitted_line: String,
+    learned_line: String,
+    near_misses: Vec<String>,
+    models_line: String,
 }
 
 #[derive(Template)]
@@ -435,6 +449,131 @@ pub fn render_world_briefing(issue: &Issue) -> Result<Option<Chapter>, EpubError
     }))
 }
 
+/// "1,465" — thousands separators for the counts in Behind the paper.
+fn thousands(n: i64) -> String {
+    let digits = n.abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// `Considered 412 articles from 1,465 feeds · 398 eligible · …` (§15.1).
+pub fn behind_summary_line(b: &BehindThePaper) -> String {
+    format!(
+        "Considered {} articles from {} feeds \u{00b7} {} eligible \u{00b7} {} triaged \u{00b7} {} read closely \u{00b7} {} shortlisted \u{00b7} {} selected.",
+        thousands(b.considered),
+        thousands(b.feeds_seen),
+        thousands(b.eligible),
+        thousands(b.triaged),
+        thousands(b.read_closely),
+        thousands(b.shortlisted),
+        thousands(b.selected),
+    )
+}
+
+/// `Admitted via: triage 60 · interests 20 · your ratings 12 · exploration 5 · blend 23.`
+pub fn behind_admitted_line(b: &BehindThePaper) -> String {
+    let count = |name: &str| b.admitted_by.get(name).copied().unwrap_or(0);
+    let mut parts = vec![
+        format!("triage {}", count("triage")),
+        format!("interests {}", count("interest")),
+        format!("your ratings {}", count("knn")),
+        format!("exploration {}", count("exploration")),
+        format!("blend {}", count("blend")),
+    ];
+    if count("auto_include") > 0 {
+        parts.push(format!("always-include {}", count("auto_include")));
+    }
+    format!("Admitted via: {}.", parts.join(" \u{00b7} "))
+}
+
+/// `Learned signals: 14 rated articles with embeddings (neighbour signal at 35%); feed affinity off.`
+pub fn behind_learned_line(b: &BehindThePaper) -> String {
+    let percent = |gate: f64| (gate.clamp(0.0, 1.0) * 100.0).round() as i64;
+    let neighbour = if b.knn_gate > 0.0 {
+        format!("neighbour signal at {}%", percent(b.knn_gate))
+    } else {
+        "neighbour signal off".to_string()
+    };
+    let feed = if b.feed_gate > 0.0 {
+        format!("feed affinity at {}%", percent(b.feed_gate))
+    } else {
+        "feed affinity off".to_string()
+    };
+    format!(
+        "Learned signals: {} rated articles with embeddings ({neighbour}); {feed}.",
+        thousands(b.rated_with_embeddings)
+    )
+}
+
+/// `<title> — <feed> · quality 8.0 · fit 6.5 · shortlisted, not selected`.
+pub fn behind_near_miss_line(miss: &NearMiss) -> String {
+    let mut parts = vec![format!("{} \u{2014} {}", miss.title, miss.feed_title)];
+    if let Some(quality) = miss.quality {
+        parts.push(format!("quality {quality:.1}"));
+    }
+    if let Some(fit) = miss.fit {
+        parts.push(format!("fit {fit:.1}"));
+    }
+    parts.push(match &miss.reason {
+        Some(reason) => format!("{}, {}", miss.stage, reason.replace('_', " ")),
+        None => miss.stage.clone(),
+    });
+    parts.join(" \u{00b7} ")
+}
+
+/// `Models: triage and assessment … · editor and summaries … · embeddings ….
+/// Cost $0.81. Generation 23 min.`
+pub fn behind_models_line(b: &BehindThePaper) -> String {
+    let editorial = if b.models.summaries == b.models.editor {
+        format!("editor and summaries {}", b.models.editor)
+    } else {
+        format!(
+            "editor {} \u{00b7} summaries {}",
+            b.models.editor, b.models.summaries
+        )
+    };
+    let generation = if b.generation_secs < 60 {
+        format!("{} s", b.generation_secs.max(0))
+    } else {
+        format!("{} min", (b.generation_secs as f64 / 60.0).round() as i64)
+    };
+    format!(
+        "Models: triage and assessment {} \u{00b7} {editorial} \u{00b7} embeddings {}. Cost ${:.2}. Generation {generation}.",
+        b.models.bulk, b.embedding_model, b.cost_usd
+    )
+}
+
+/// "Behind the paper": the run's counts, admission mix, learned-signal state,
+/// near misses and models (§15.1). Same text in both editions; no links.
+pub fn render_behind_the_paper(issue: &Issue) -> Result<Chapter, EpubError> {
+    let behind = &issue.behind;
+    let tpl = BehindChapter {
+        title: "Behind the paper".into(),
+        summary_line: behind_summary_line(behind),
+        admitted_line: behind_admitted_line(behind),
+        learned_line: behind_learned_line(behind),
+        near_misses: behind
+            .near_misses
+            .iter()
+            .map(behind_near_miss_line)
+            .collect(),
+        models_line: behind_models_line(behind),
+    };
+    Ok(Chapter {
+        id: "behind".into(),
+        href: "behind.xhtml".into(),
+        title: "Behind the paper".into(),
+        xhtml: tpl.render()?,
+        toc_level: 1,
+    })
+}
+
 /// Colophon: generation timestamp, models used, token cost, feed counts (§3.10).
 pub fn render_colophon(issue: &Issue) -> Result<Chapter, EpubError> {
     let colophon = &issue.colophon;
@@ -674,6 +813,69 @@ mod tests {
         assert!(chapter.xhtml.contains("href=\"art-1001.xhtml\""));
         assert_xml_ok(&chapter.xhtml);
         assert!(render_discussion(&issue.lineup.picks[1]).unwrap().is_none());
+    }
+
+    #[test]
+    fn behind_the_paper_lines_follow_the_plan_shape() {
+        let issue = issue();
+        let behind = &issue.behind;
+        assert_eq!(
+            behind_summary_line(behind),
+            "Considered 412 articles from 1,465 feeds \u{00b7} 398 eligible \u{00b7} 398 triaged \u{00b7} 120 read closely \u{00b7} 60 shortlisted \u{00b7} 2 selected."
+        );
+        assert_eq!(
+            behind_admitted_line(behind),
+            "Admitted via: triage 60 \u{00b7} interests 20 \u{00b7} your ratings 12 \u{00b7} exploration 5 \u{00b7} blend 23."
+        );
+        assert_eq!(
+            behind_learned_line(behind),
+            "Learned signals: 14 rated articles with embeddings (neighbour signal at 35%); feed affinity off."
+        );
+        assert_eq!(
+            behind_near_miss_line(&behind.near_misses[0]),
+            "The One That Got Away \u{2014} Example Feed \u{00b7} quality 8.0 \u{00b7} fit 6.5 \u{00b7} shortlisted, not selected"
+        );
+        assert_eq!(
+            behind_near_miss_line(&behind.near_misses[1]),
+            "Never Read Closely \u{2014} Other Feed \u{00b7} triaged, not admitted"
+        );
+        assert_eq!(
+            behind_models_line(behind),
+            "Models: triage and assessment deepseek-v4-flash \u{00b7} editor and summaries claude-opus-5 \u{00b7} embeddings voyage-4-lite. Cost $0.81. Generation 23 min."
+        );
+        let chapter = render_behind_the_paper(&issue).unwrap();
+        assert_eq!(chapter.id, "behind");
+        assert_eq!(chapter.href, "behind.xhtml");
+        assert!(chapter.xhtml.contains("Behind the paper"));
+        assert!(chapter.xhtml.contains("1,465 feeds"));
+        assert!(chapter.xhtml.contains("The One That Got Away"));
+        assert!(!chapter.xhtml.contains("<a "), "no links in the chapter");
+        assert_xml_ok(&chapter.xhtml);
+
+        // Auto-includes are named only when there were any; a short run is in
+        // seconds; a differing summaries model is listed separately.
+        let mut short = behind.clone();
+        short.admitted_by.insert("auto_include".into(), 2);
+        short.generation_secs = 48;
+        short.feed_gate = 0.6;
+        short.models.summaries = "deepseek-v4-flash".into();
+        short.near_misses.clear();
+        assert!(behind_admitted_line(&short).ends_with("blend 23 \u{00b7} always-include 2."));
+        assert!(behind_learned_line(&short).ends_with("feed affinity at 60%."));
+        assert!(
+            behind_models_line(&short)
+                .contains("editor claude-opus-5 \u{00b7} summaries deepseek-v4-flash")
+        );
+        assert!(behind_models_line(&short).ends_with("Generation 48 s."));
+        let mut issue = issue;
+        issue.behind = short;
+        let chapter = render_behind_the_paper(&issue).unwrap();
+        assert!(chapter.xhtml.contains("None recorded"));
+        assert_xml_ok(&chapter.xhtml);
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 
     #[test]

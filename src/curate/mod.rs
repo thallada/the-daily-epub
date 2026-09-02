@@ -112,17 +112,28 @@ impl Curator {
         }
     }
 
-    /// Stage C: per-article summaries, section intros and the front page (§3.6).
+    /// Stage C: per-article summaries and the Brief (§14).
     ///
     /// Never fails the run: a budget trip or an API error degrades to excerpts.
     pub async fn editorial(&self, lineup: &Lineup) -> anyhow::Result<Editorial> {
+        Ok(self.editorial_timed(lineup).await?.0)
+    }
+
+    /// [`Self::editorial`] plus the `summaries` / `brief` stage timings (§15.4).
+    pub async fn editorial_timed(
+        &self,
+        lineup: &Lineup,
+    ) -> anyhow::Result<(Editorial, editorial::EditorialTimings)> {
         if self.llms.editor_or_bulk().is_none() {
             tracing::info!("--skip-llm: using feed excerpts as summaries");
-            return Ok(editorial::fallback_editorial(lineup));
+            return Ok((
+                editorial::fallback_editorial(lineup),
+                editorial::EditorialTimings::default(),
+            ));
         }
         let span = tracing::info_span!("llm_editorial", picks = lineup.picks.len());
         let _guard = span.enter();
-        Ok(editorial::run(
+        Ok(editorial::run_timed(
             &self.llms,
             lineup,
             &self.config.editorial,

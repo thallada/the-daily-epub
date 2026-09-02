@@ -831,6 +831,7 @@ dependencies = [
  "hmac",
  "image",
  "jiff",
+ "libc",
  "rand 0.10.2",
  "reqwest",
  "resvg",

@@ -155,6 +155,53 @@ pub fn issue() -> Issue {
             cost_usd: 0.0731,
             generator_version: "daily-epub 0.1.0".into(),
         },
+        behind: BehindThePaper {
+            considered: 412,
+            feeds_seen: 1465,
+            eligible: 398,
+            triaged: 398,
+            read_closely: 120,
+            shortlisted: 60,
+            selected: 2,
+            admitted_by: BTreeMap::from([
+                ("triage".to_string(), 60),
+                ("interest".to_string(), 20),
+                ("knn".to_string(), 12),
+                ("exploration".to_string(), 5),
+                ("blend".to_string(), 23),
+            ]),
+            rated_with_embeddings: 14,
+            knn_gate: 0.35,
+            feed_gate: 0.0,
+            near_misses: vec![
+                NearMiss {
+                    article_id: 3,
+                    title: "The One That Got Away".into(),
+                    feed_title: "Example Feed".into(),
+                    quality: Some(8.0),
+                    fit: Some(6.5),
+                    stage: "shortlisted".into(),
+                    reason: Some("not_selected".into()),
+                },
+                NearMiss {
+                    article_id: 4,
+                    title: "Never Read Closely".into(),
+                    feed_title: "Other Feed".into(),
+                    quality: None,
+                    fit: None,
+                    stage: "triaged".into(),
+                    reason: Some("not_admitted".into()),
+                },
+            ],
+            models: Models {
+                bulk: "deepseek-v4-flash".into(),
+                editor: "claude-opus-5".into(),
+                summaries: "claude-opus-5".into(),
+            },
+            embedding_model: "voyage-4-lite".into(),
+            cost_usd: 0.81,
+            generation_secs: 23 * 60 + 12,
+        },
     }
 }
 

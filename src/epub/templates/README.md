@@ -8,12 +8,13 @@ the crate root points askama here (`dirs = ["src/epub/templates"]`).
 |---|---|---|
 | `base.xhtml` | — | Shared XHTML skeleton (`{% block body_class %}`, `{% block content %}`) |
 | `cover_page.xhtml` | `CoverPage` | Page that displays the rasterized cover image |
-| `front_page.xhtml` | `FrontPage` | "From the Editor" + issue stats line |
+| `front_page.xhtml` | `FrontPage` | "The Brief" + issue stats line |
 | `in_this_issue.xhtml` | `InThisIssue` | Introduction chapter: per-section linked index |
-| `section.xhtml` | `SectionPage` | Section title page + LLM intro |
+| `section.xhtml` | `SectionPage` | Section title page (name only) |
 | `chapter.xhtml` | `ArticleChapter` | Article: header, body, rating/read-online footer |
 | `discussion.xhtml` | `DiscussionChapter` | Comment chapter (§3.7); body from `comments::render_xhtml` |
 | `world_briefing.xhtml` | `WorldBriefingChapter` | Wikipedia Current Events (§3.8), body from `world::render_xhtml` |
+| `behind.xhtml` | `BehindChapter` | "Behind the paper": run counts, admission mix, near misses, models (§15.1) |
 | `colophon.xhtml` | `ColophonChapter` | Back matter: models, cost, counts |
 | `cover.svg` | `CoverSvg` | Typographic cover, rasterized with resvg + tiny-skia |
 | `style.css` | — | Standard-edition stylesheet, embedded as `stylesheet.css` |

@@ -23,6 +23,7 @@ pub mod extract;
 pub mod html;
 pub mod http;
 pub mod images;
+pub mod lock;
 pub mod miniflux;
 pub mod pipeline;
 pub mod publish;

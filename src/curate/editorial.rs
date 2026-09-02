@@ -318,21 +318,42 @@ pub fn fallback_editorial(lineup: &Lineup) -> Editorial {
     }
 }
 
+/// Wall-clock milliseconds of the two editorial calls, for the run report's
+/// `summaries` and `brief` stage timings (§15.4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EditorialTimings {
+    pub summaries_ms: i64,
+    pub brief_ms: i64,
+}
+
 pub async fn run(
     llms: &Llms,
     lineup: &Lineup,
     config: &EditorialConfig,
     temperature: f32,
 ) -> Editorial {
+    run_timed(llms, lineup, config, temperature).await.0
+}
+
+/// [`run`], also reporting how long the summaries and the brief took.
+pub async fn run_timed(
+    llms: &Llms,
+    lineup: &Lineup,
+    config: &EditorialConfig,
+    temperature: f32,
+) -> (Editorial, EditorialTimings) {
     if lineup.picks.is_empty() {
-        return fallback_editorial(lineup);
+        return (fallback_editorial(lineup), EditorialTimings::default());
     }
+    let started = std::time::Instant::now();
     let mut summaries = summarize_all(llms, lineup, config, temperature).await;
     for pick in &lineup.picks {
         summaries
             .entry(pick.article.id)
             .or_insert_with(|| excerpt_summary(pick));
     }
+    let summaries_ms = started.elapsed().as_millis() as i64;
+    let started = std::time::Instant::now();
     let front_page_html = match brief(llms, lineup, &summaries, temperature).await {
         Ok(text) => text_to_paragraphs(&text),
         Err(error) => {
@@ -340,10 +361,17 @@ pub async fn run(
             fallback_front_page_html(lineup)
         }
     };
-    Editorial {
-        front_page_html,
-        summaries,
-    }
+    let brief_ms = started.elapsed().as_millis() as i64;
+    (
+        Editorial {
+            front_page_html,
+            summaries,
+        },
+        EditorialTimings {
+            summaries_ms,
+            brief_ms,
+        },
+    )
 }
 
 pub fn summary_to_html(summary: &str) -> String {

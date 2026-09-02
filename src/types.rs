@@ -383,6 +383,9 @@ pub struct TasteProfile {
     pub text: String,
     pub version: i64,
     pub built_at: Timestamp,
+    /// Explicit verdicts rendered into the prompt's "Recent verdicts" block (§8.4).
+    #[serde(default)]
+    pub verdicts: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -562,6 +565,9 @@ pub struct Issue {
     pub world_briefing: Option<WorldBriefing>,
     /// Colophon facts: models used, token cost, feed counts (§3.10).
     pub colophon: Colophon,
+    /// The "Behind the paper" chapter's facts (§15.1); filled by the pipeline.
+    #[serde(default)]
+    pub behind: BehindThePaper,
 }
 
 /// Resolved model names printed in the colophon (§15.1).
@@ -582,6 +588,49 @@ pub struct Colophon {
     pub candidates: i64,
     pub cost_usd: f64,
     pub generator_version: String,
+}
+
+/// One of the highest-utility articles that did not make the paper (§15.1).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NearMiss {
+    pub article_id: ArticleId,
+    pub title: String,
+    pub feed_title: String,
+    pub quality: Option<f64>,
+    pub fit: Option<f64>,
+    /// `candidate_runs.stage` reached.
+    pub stage: String,
+    /// `candidate_runs.excluded_reason`, when the row carries one.
+    pub reason: Option<String>,
+}
+
+/// Facts for the "Behind the paper" chapter (§15.1), derived from the run's
+/// report and its `candidate_runs` rows. Templates render it verbatim.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BehindThePaper {
+    /// Deduplicated articles the run looked at.
+    pub considered: i64,
+    pub feeds_seen: i64,
+    pub eligible: i64,
+    pub triaged: i64,
+    /// Deep-assessed ("read closely").
+    pub read_closely: i64,
+    pub shortlisted: i64,
+    pub selected: i64,
+    /// First admitting retriever → count (§11).
+    pub admitted_by: BTreeMap<String, i64>,
+    pub rated_with_embeddings: i64,
+    /// The neighbour signal's gate ramp, 0–1 (§9.2).
+    pub knn_gate: f64,
+    /// The feed-affinity gate ramp, 0–1 (§9.3).
+    pub feed_gate: f64,
+    pub near_misses: Vec<NearMiss>,
+    pub models: Models,
+    pub embedding_model: String,
+    /// Every provider, Voyage included.
+    pub cost_usd: f64,
+    /// Wall clock from the run's start to issue assembly.
+    pub generation_secs: i64,
 }
 
 /// A downloaded, re-encoded image embedded in an edition (§3.10 images).

@@ -1,0 +1,20 @@
+{% extends "base.xhtml" %}
+{% block body_class %}behind{% endblock %}
+{% block content %}
+      <h1>Behind the paper</h1>
+      <p class="fact-line">{{ summary_line }}</p>
+      <p class="fact-line">{{ admitted_line }}</p>
+      <p class="fact-line">{{ learned_line }}</p>
+      <h2>Near misses</h2>
+      <p class="fact-line"><em>Highest utility not selected.</em></p>
+{% if near_misses.is_empty() %}
+      <p class="fact-line">None recorded for this run.</p>
+{% else %}
+      <ul class="near-misses">
+{% for line in near_misses %}
+        <li>{{ line }}</li>
+{% endfor %}
+      </ul>
+{% endif %}
+      <p class="fact-line">{{ models_line }}</p>
+{% endblock %}

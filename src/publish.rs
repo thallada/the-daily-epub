@@ -752,6 +752,7 @@ mod tests {
             editorial: Editorial::default(),
             world_briefing: None,
             colophon: Colophon::default(),
+            behind: Default::default(),
         }
     }
 

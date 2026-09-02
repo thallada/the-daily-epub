@@ -2,9 +2,10 @@
 //!
 //! ```text
 //! Miniflux ingest ─▶ dedupe ─▶ extraction ─▶ persist ─▶ social enrichment
-//!   ─▶ signals ─▶ triage ─▶ admission ─▶ LLM scoring ─▶ selection
-//!   ─▶ comments ─▶ editorial
-//!   ─▶ world briefing ─▶ EPUB (standard + X4) ─▶ XTC ─▶ publish ─▶ report
+//!   ─▶ hygiene ─▶ embeddings + signals ─▶ triage ─▶ admission ─▶ deep assessment
+//!   ─▶ utility + shortlist ─▶ editor ─▶ comments ─▶ summaries + brief
+//!   ─▶ world briefing ─▶ behind the paper ─▶ EPUB (standard + X4) ─▶ XTC
+//!   ─▶ publish ─▶ report
 //! ```
 //!
 //! Failure policy (notes §3):
@@ -40,10 +41,10 @@ use crate::db::Db;
 use crate::extract::Extractor;
 use crate::miniflux::MinifluxClient;
 use crate::publish::Published;
-use crate::report::{ProviderUsage, RunReport, RunStatus};
+use crate::report::{ProviderUsage, RunReport, RunStatus, VOYAGE_PROVIDER};
 use crate::types::{
-    Article, ArticleId, Artifact, Candidate, Colophon, Edition, Issue, IssueMeta, Lineup, Models,
-    reading_minutes,
+    Article, ArticleId, Artifact, BehindThePaper, Candidate, Colophon, Edition, Issue, IssueMeta,
+    Lineup, Models, TokenUsage, reading_minutes,
 };
 use crate::{comments, dedupe, epub, http, miniflux, publish, social, world};
 
@@ -169,6 +170,7 @@ pub fn build_issue(
         editorial,
         world_briefing,
         colophon,
+        behind: BehindThePaper::default(),
     }
 }
 
@@ -238,6 +240,10 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
     let stages = match run_stages(&ctx, window_start, window_end, &mut report).await {
         Ok(stages) => {
             report.finish(Timestamp::now());
+            // The once-per-run info block of §15.4.
+            for line in report.info_block() {
+                tracing::info!("{line}");
+            }
             stages
         }
         Err(e) => {
@@ -483,23 +489,7 @@ async fn run_stages(
     record_candidates(ctx, &personalized)
         .await
         .context("recording admission telemetry")?;
-    tracing::info!(
-        "admission: triage {} · interest {} · knn {} · exploration {} · blend {} · auto {}",
-        admission.admitted_by.get("triage").copied().unwrap_or(0),
-        admission.admitted_by.get("interest").copied().unwrap_or(0),
-        admission.admitted_by.get("knn").copied().unwrap_or(0),
-        admission
-            .admitted_by
-            .get("exploration")
-            .copied()
-            .unwrap_or(0),
-        admission.admitted_by.get("blend").copied().unwrap_or(0),
-        admission
-            .admitted_by
-            .get("auto_include")
-            .copied()
-            .unwrap_or(0),
-    );
+    tracing::debug!(admitted_by = ?admission.admitted_by, "admission complete");
     report.timings.record("admit", elapsed_ms(stage));
 
     // --- Stage 9: deep assessment (§12.1) ---
@@ -606,19 +596,23 @@ async fn run_stages(
     report.counts.discussions = comments::fetch_all(&http, &mut lineup.picks).await as i64;
     report.timings.record("comments", elapsed_ms(stage));
 
-    // --- Stage 9: editorial (§3.6 C) ---
-    let stage = Timestamp::now();
-    let editorial = match curator.editorial(&lineup).await {
-        Ok(editorial) => editorial,
+    // --- Stage 9: editorial — summaries and the Brief (§14) ---
+    let editorial = match curator.editorial_timed(&lineup).await {
+        Ok((editorial, timings)) => {
+            report.timings.record("summaries", timings.summaries_ms);
+            report.timings.record("brief", timings.brief_ms);
+            editorial
+        }
         Err(e) => {
             report.warn(format!(
                 "editorial generation failed; using excerpts: {e:#}"
             ));
+            report.timings.record("summaries", 0);
+            report.timings.record("brief", 0);
             editorial::fallback_editorial(&lineup)
         }
     };
     apply_summaries(&mut lineup, &editorial);
-    report.timings.record("editorial", elapsed_ms(stage));
 
     // --- Stage 10: completed-day World Briefing (§3.8), best effort ---
     // Editorial retains budget priority; only the remaining metered budget is
@@ -656,6 +650,19 @@ async fn run_stages(
             cost_usd: editor_meter.cost_usd(),
         },
     );
+    // Voyage rides along in `provider_costs_json` (§7.6) so `stats` can price
+    // it per day; its tokens are embedding input, kept out of the LLM aggregate.
+    report.provider_costs.insert(
+        VOYAGE_PROVIDER.into(),
+        ProviderUsage {
+            usage: TokenUsage {
+                input_tokens: report.voyage_tokens,
+                ..TokenUsage::default()
+            },
+            cost_usd: report.voyage_cost_usd,
+        },
+    );
+    let total_cost = bulk_meter.cost_usd() + editor_meter.cost_usd() + report.voyage_cost_usd;
     let summary_model = match config.editorial.summary_model {
         crate::config::SummaryModel::Editor if curator.llms.editor.is_some() => {
             config.anthropic.model.clone()
@@ -668,30 +675,32 @@ async fn run_stages(
         .iter()
         .map(|(provider, usage)| (provider.clone(), usage.cost_usd))
         .collect();
+    let models = Models {
+        bulk: if bulk_available {
+            config.deepseek.model.clone()
+        } else {
+            "none".into()
+        },
+        editor: if curator.llms.editor.is_some() {
+            config.anthropic.model.clone()
+        } else if bulk_available {
+            format!("{} (bulk fallback)", config.deepseek.model)
+        } else {
+            "none".into()
+        },
+        summaries: summary_model,
+    };
     let colophon = Colophon {
         provider_costs,
-        models: Models {
-            bulk: if bulk_available {
-                config.deepseek.model.clone()
-            } else {
-                "none".into()
-            },
-            editor: if curator.llms.editor.is_some() {
-                config.anthropic.model.clone()
-            } else if bulk_available {
-                format!("{} (bulk fallback)", config.deepseek.model)
-            } else {
-                "none".into()
-            },
-            summaries: summary_model,
-        },
+        models: models.clone(),
         entries_fetched: report.counts.entries_fetched,
         feeds_seen: report.counts.feeds_seen,
         candidates: report.counts.candidates,
-        cost_usd: bulk_meter.cost_usd() + editor_meter.cost_usd(),
+        cost_usd: total_cost,
         generator_version: format!("daily-epub {}", crate::VERSION),
     };
-    let issue = build_issue(
+    let behind = behind_the_paper(ctx, report, models, total_cost).await;
+    let mut issue = build_issue(
         date,
         issue_number,
         Timestamp::now(),
@@ -700,6 +709,7 @@ async fn run_stages(
         world_briefing,
         colophon,
     );
+    issue.behind = behind;
 
     // --- Stage 12: build both EPUB editions (§3.10) — fatal on failure ---
     let stage = Timestamp::now();
@@ -755,6 +765,51 @@ async fn run_stages(
         xtc,
         published,
     })
+}
+
+/// Near misses listed in the "Behind the paper" chapter (§15.1).
+const NEAR_MISSES_IN_PAPER: usize = 10;
+
+/// The facts of §15.1, from the report so far and the run's `candidate_runs`
+/// rows (selection telemetry must already be written). Never fails: a
+/// telemetry read error leaves the near-miss list empty.
+async fn behind_the_paper(
+    ctx: &StageContext<'_>,
+    report: &RunReport,
+    models: Models,
+    cost_usd: f64,
+) -> BehindThePaper {
+    let near_misses =
+        match telemetry::paper_near_misses(ctx.db, ctx.run_id, NEAR_MISSES_IN_PAPER).await {
+            Ok(misses) => misses,
+            Err(error) => {
+                tracing::warn!(%error, "could not read near misses for the paper");
+                Vec::new()
+            }
+        };
+    let counts = &report.counts;
+    BehindThePaper {
+        considered: counts.articles,
+        feeds_seen: counts.feeds_seen,
+        eligible: counts.eligible,
+        triaged: counts.triaged,
+        read_closely: counts.assessed,
+        shortlisted: counts.shortlisted,
+        selected: counts.selected,
+        admitted_by: counts.admitted_by.clone(),
+        rated_with_embeddings: counts.rated_with_embeddings,
+        knn_gate: counts.knn_gate,
+        feed_gate: counts.feed_gate,
+        near_misses,
+        models,
+        embedding_model: if counts.embedded > 0 {
+            ctx.config.voyage.model.clone()
+        } else {
+            "none".into()
+        },
+        cost_usd,
+        generation_secs: (Timestamp::now().as_second() - ctx.started_at.as_second()).max(0),
+    }
 }
 
 /// The embedding cache with a Voyage client behind it, or cache-only under
@@ -872,6 +927,8 @@ async fn prepare_features(
         }
     };
     report.counts.rated_with_embeddings = preference.rated_with_embeddings as i64;
+    report.counts.knn_gate = preference.knn_gate;
+    report.counts.feed_gate = preference.feed_gate;
     for candidate in candidates.iter_mut() {
         candidate.signals = computed
             .remove(&candidate.article.id)
@@ -1013,6 +1070,7 @@ async fn build_llms(
             return Llms::default();
         }
     };
+    report.counts.verdicts_in_prompt = profile.verdicts as i64;
     if ctx.skip_llm {
         tracing::info!("--skip-llm: profile rebuilt; no provider calls will be made");
         return Llms::default();
@@ -1047,6 +1105,7 @@ async fn build_llms(
                 version = rebuilt.version,
                 "taste profile rebuilt with editor-or-bulk"
             );
+            report.counts.verdicts_in_prompt = rebuilt.verdicts as i64;
             llms = make_clients(rebuilt.text);
         }
         Ok(None) => {}
@@ -1663,6 +1722,66 @@ mod tests {
             .unwrap();
         assert!(misses.contains("not selected, by utility"), "{misses}");
         assert!(misses.contains("shortlisted, not_selected"), "{misses}");
+
+        // The Behind-the-paper facts come from the same rows and the report.
+        report.counts.articles = 4;
+        report.counts.feeds_seen = 4;
+        report.counts.admitted = 2;
+        report.counts.admitted_by = BTreeMap::from([("interest".to_string(), 2)]);
+        report.counts.shortlisted = 2;
+        report.counts.selected = 1;
+        let behind = behind_the_paper(&ctx, &report, Models::default(), 0.25).await;
+        assert_eq!(behind.considered, 4);
+        assert_eq!(behind.feeds_seen, 4);
+        assert_eq!(behind.eligible, 2);
+        assert_eq!(behind.shortlisted, 2);
+        assert_eq!(behind.selected, 1);
+        assert_eq!(behind.admitted_by.get("interest"), Some(&2));
+        assert_eq!(behind.rated_with_embeddings, 0);
+        assert_eq!(behind.knn_gate, 0.0);
+        assert_eq!(behind.embedding_model, h.config.voyage.model);
+        assert_eq!(behind.cost_usd, 0.25);
+        assert_eq!(behind.near_misses.len(), 1, "one shortlisted, not selected");
+        let miss = &behind.near_misses[0];
+        assert_eq!(miss.article_id, loser);
+        assert_eq!(
+            miss.title,
+            format!(
+                "Post {}",
+                h.articles
+                    .iter()
+                    .find(|a| a.id == loser)
+                    .unwrap()
+                    .best_entry_id
+            )
+        );
+        assert_eq!(
+            miss.feed_title,
+            h.articles
+                .iter()
+                .find(|a| a.id == loser)
+                .unwrap()
+                .feed_title
+        );
+        assert_eq!(miss.stage, "shortlisted");
+        assert_eq!(miss.reason.as_deref(), Some("not_selected"));
+        assert!(miss.quality.is_none(), "no deep assessment ran");
+        let chapter = crate::epub::chapters::render_behind_the_paper(&Issue {
+            behind: behind.clone(),
+            ..crate::epub::fixtures::issue()
+        })
+        .unwrap();
+        assert!(
+            chapter.xhtml.contains("Considered 4 articles from 4 feeds"),
+            "{}",
+            chapter.xhtml
+        );
+        assert!(chapter.xhtml.contains(&miss.title), "{}", chapter.xhtml);
+        assert!(
+            chapter.xhtml.contains("shortlisted, not selected"),
+            "{}",
+            chapter.xhtml
+        );
     }
 
     #[tokio::test]

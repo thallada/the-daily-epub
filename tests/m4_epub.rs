@@ -89,6 +89,7 @@ fn standard_edition_is_a_well_formed_epub3_archive() {
         "OEBPS/sec-niche-corner.xhtml",
         "OEBPS/art-1002.xhtml",
         "OEBPS/world.xhtml",
+        "OEBPS/behind.xhtml",
         "OEBPS/colophon.xhtml",
     ] {
         assert!(contains_entry(&zip, entry), "missing {entry}");
@@ -186,9 +187,75 @@ fn chapter_ids_hrefs_and_toc_levels_are_stable() {
             ),
             ("art-1002".into(), "art-1002.xhtml".into(), 2),
             ("world".into(), "world.xhtml".into(), 1),
+            ("behind".into(), "behind.xhtml".into(), 1),
             ("colophon".into(), "colophon.xhtml".into(), 1),
         ]
     );
+}
+
+/// "Behind the paper" sits between the World Briefing and the colophon in both
+/// editions, carries the counts, the admission mix, the learned-signal state,
+/// the near misses and the models, and has no links (§15.1).
+#[test]
+fn behind_the_paper_renders_counts_and_near_misses_in_both_editions() {
+    let issue = fixtures::issue();
+    for edition in [Edition::Standard, Edition::X4] {
+        let (_dir, _, zip) = build_edition_to_bytes(&issue, edition);
+        let behind = read_entry(&zip, "OEBPS/behind.xhtml");
+        assert!(behind.contains("<h1>Behind the paper</h1>"), "{behind}");
+        assert!(
+            behind.contains(
+                "Considered 412 articles from 1,465 feeds \u{00b7} 398 eligible \u{00b7} 398 triaged \u{00b7} 120 read closely \u{00b7} 60 shortlisted \u{00b7} 2 selected."
+            ),
+            "{behind}"
+        );
+        assert!(
+            behind.contains(
+                "Admitted via: triage 60 \u{00b7} interests 20 \u{00b7} your ratings 12 \u{00b7} exploration 5 \u{00b7} blend 23."
+            ),
+            "{behind}"
+        );
+        assert!(
+            behind.contains(
+                "Learned signals: 14 rated articles with embeddings (neighbour signal at 35%); feed affinity off."
+            ),
+            "{behind}"
+        );
+        assert!(behind.contains("<h2>Near misses</h2>"), "{behind}");
+        assert!(
+            behind.contains(
+                "<li>The One That Got Away \u{2014} Example Feed \u{00b7} quality 8.0 \u{00b7} fit 6.5 \u{00b7} shortlisted, not selected</li>"
+            ),
+            "{behind}"
+        );
+        assert!(
+            behind.contains(
+                "<li>Never Read Closely \u{2014} Other Feed \u{00b7} triaged, not admitted</li>"
+            ),
+            "{behind}"
+        );
+        assert!(
+            behind.contains(
+                "Models: triage and assessment deepseek-v4-flash \u{00b7} editor and summaries claude-opus-5 \u{00b7} embeddings voyage-4-lite. Cost $0.81. Generation 23 min."
+            ),
+            "{behind}"
+        );
+        assert!(!behind.contains("<a "), "no links in {edition:?}: {behind}");
+        assert!(!behind.contains("&nbsp;"));
+        for tag in ["html", "head", "body", "div", "p", "ul", "li", "h1", "h2"] {
+            // `<li` would also match `<link`; count real opening tags only.
+            let opens = behind.matches(&format!("<{tag}>")).count()
+                + behind.matches(&format!("<{tag} ")).count();
+            let closes = behind.matches(&format!("</{tag}>")).count();
+            assert_eq!(opens, closes, "unbalanced <{tag}> in {edition:?}");
+        }
+
+        // Ordering: world → behind → colophon in the spine.
+        let opf = read_entry(&zip, "OEBPS/content.opf");
+        let position = |href: &str| opf.find(&format!("href=\"{href}\"")).expect(href);
+        assert!(position("world.xhtml") < position("behind.xhtml"));
+        assert!(position("behind.xhtml") < position("colophon.xhtml"));
+    }
 }
 
 #[test]

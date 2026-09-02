@@ -15,7 +15,8 @@ use sqlx::Row as _;
 
 use crate::curate::signals::{Neighbour, Signals, TopInterest};
 use crate::db::{Db, fmt_ts};
-use crate::types::{ArticleId, Candidate};
+use crate::report::RunReport;
+use crate::types::{ArticleId, Candidate, NearMiss};
 
 /// The stage vocabulary of §7.4, in pipeline order.
 pub const STAGES: [&str; 7] = [
@@ -230,6 +231,8 @@ pub struct ExplainRow {
     pub run_id: i64,
     pub article_id: ArticleId,
     pub title: String,
+    /// The best entry's feed, for the paper's near-miss list.
+    pub feed_title: String,
     pub stage: String,
     pub excluded_reason: Option<String>,
     pub admitted_by: Option<String>,
@@ -247,6 +250,7 @@ impl ExplainRow {
             run_id: row.get("run_id"),
             article_id: row.get("article_id"),
             title: row.get("title"),
+            feed_title: row.get("feed_title"),
             stage: row.get("stage"),
             excluded_reason: row.get("excluded_reason"),
             admitted_by: row.get("admitted_by"),
@@ -305,9 +309,11 @@ pub async fn explain_row(
 ) -> Result<Option<ExplainRow>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT cr.run_id, cr.article_id, COALESCE(a.title, '') AS title,
+                COALESCE(e.feed_title, '') AS feed_title,
                 cr.stage, cr.excluded_reason, cr.admitted_by, cr.signals_json,
                 cr.utility, cr.rank_utility, cr.cluster_id, cr.cluster_rank, cr.editor_why
          FROM candidate_runs cr JOIN articles a ON a.id = cr.article_id
+         LEFT JOIN entries e ON e.id = a.best_entry_id
          WHERE cr.run_id = ? AND cr.article_id = ?",
     )
     .bind(run_id)
@@ -326,9 +332,11 @@ pub async fn near_misses(
 ) -> Result<Vec<ExplainRow>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT cr.run_id, cr.article_id, COALESCE(a.title, '') AS title,
+                COALESCE(e.feed_title, '') AS feed_title,
                 cr.stage, cr.excluded_reason, cr.admitted_by, cr.signals_json,
                 cr.utility, cr.rank_utility, cr.cluster_id, cr.cluster_rank, cr.editor_why
          FROM candidate_runs cr JOIN articles a ON a.id = cr.article_id
+         LEFT JOIN entries e ON e.id = a.best_entry_id
          WHERE cr.run_id = ? AND cr.stage != 'selected' AND cr.stage != 'excluded'",
     )
     .bind(run_id)
@@ -574,6 +582,265 @@ pub async fn explain_near_misses(
             row.stage,
             reason,
             row.article_id
+        );
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Behind the paper (§15.1)
+// ---------------------------------------------------------------------------
+
+/// The `limit` highest-utility articles the run did not select, shaped for
+/// the "Behind the paper" chapter: the same query as `explain --near-misses`.
+pub async fn paper_near_misses(
+    db: &Db,
+    run_id: i64,
+    limit: usize,
+) -> Result<Vec<NearMiss>, sqlx::Error> {
+    Ok(near_misses(db, run_id, limit)
+        .await?
+        .iter()
+        .map(|row| {
+            let signals = row.signals();
+            let raw = |name: &str| signals.as_ref().and_then(|s| s.raw.get(name).copied());
+            NearMiss {
+                article_id: row.article_id,
+                title: row.title.clone(),
+                feed_title: row.feed_title.clone(),
+                quality: raw("quality"),
+                fit: raw("fit"),
+                stage: row.stage.clone(),
+                reason: row.excluded_reason.clone(),
+            }
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// `stats` (§15.3)
+// ---------------------------------------------------------------------------
+
+/// `admitted_by[0]`: the retriever that admitted a pick (§11).
+fn first_retriever(admitted_by: Option<&str>) -> String {
+    admitted_by
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .and_then(|names| names.into_iter().next())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct UpDown {
+    rated: i64,
+    up: i64,
+    down: i64,
+}
+
+/// `daily-epub stats [--days N]` as text: the whole evaluation framework
+/// (§15.3). One fact per line, nothing wider than 80 columns.
+pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String> {
+    let days = days.max(1);
+    let since_ts = now
+        .checked_sub(jiff::Span::new().hours(days.saturating_mul(24)))
+        .unwrap_or(Timestamp::UNIX_EPOCH);
+    let since = fmt_ts(since_ts);
+    let utc = jiff::tz::TimeZone::UTC;
+    let since_date = since_ts.to_zoned(utc.clone()).date().to_string();
+    let today = now.to_zoned(utc).date().to_string();
+    let mut out = String::new();
+    let _ = writeln!(out, "stats: last {days} days ({since_date} → {today})");
+
+    // --- issues and articles ---
+    let issues: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE date >= ?")
+        .bind(&since_date)
+        .fetch_one(db.pool())
+        .await?;
+    let published: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM issue_articles WHERE issue_date >= ?")
+            .bind(&since_date)
+            .fetch_one(db.pool())
+            .await?;
+    let _ = writeln!(out, "issues: {issues}");
+    let _ = writeln!(out, "articles published: {published}");
+    let per_issue = |n: i64| {
+        if issues > 0 {
+            format!("{:.1}", n as f64 / issues as f64)
+        } else {
+            "n/a".to_string()
+        }
+    };
+    let _ = writeln!(out, "mean issue size: {} articles", per_issue(published));
+
+    // --- explicit ratings by label ---
+    let labels = sqlx::query(
+        "SELECT label, COUNT(*) AS n FROM rating_events
+         WHERE kind = 'explicit' AND event_at >= ? GROUP BY label ORDER BY label",
+    )
+    .bind(&since)
+    .fetch_all(db.pool())
+    .await?;
+    let mut total_ratings = 0i64;
+    let mut by_label = Vec::new();
+    for row in &labels {
+        let label = row.get::<String, _>("label");
+        let n = row.get::<i64, _>("n");
+        if label != "cleared" {
+            total_ratings += n;
+        }
+        by_label.push((label, n));
+    }
+    let _ = writeln!(out, "explicit ratings: {total_ratings}");
+    for (label, n) in &by_label {
+        let _ = writeln!(out, "explicit ratings ({label}): {n}");
+    }
+    let _ = writeln!(out, "ratings per issue: {}", per_issue(total_ratings));
+
+    // --- up/down per admitting retriever, from rated picks ---
+    let rated_picks = sqlx::query(
+        "WITH latest AS (
+             SELECT re.article_id, re.issue_date, re.label, re.value,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY re.article_id
+                        ORDER BY re.event_at DESC, re.id DESC
+                    ) AS rn
+             FROM rating_events re
+             WHERE re.kind = 'explicit' AND re.event_at >= ?
+         )
+         SELECT l.article_id, l.value, cr.admitted_by, cr.signals_json
+         FROM latest l
+         JOIN candidate_runs cr ON cr.article_id = l.article_id AND cr.stage = 'selected'
+         JOIN runs r ON r.id = cr.run_id AND r.status != 'dry_run'
+         WHERE l.rn = 1 AND l.label != 'cleared'
+           AND (l.issue_date IS NULL OR r.date = l.issue_date)
+         ORDER BY l.article_id, cr.run_id DESC",
+    )
+    .bind(&since)
+    .fetch_all(db.pool())
+    .await?;
+    let mut per_retriever: BTreeMap<String, UpDown> = BTreeMap::new();
+    let mut exploration_positive = 0i64;
+    let mut seen: Option<ArticleId> = None;
+    for row in &rated_picks {
+        let article_id = row.get::<ArticleId, _>("article_id");
+        if seen == Some(article_id) {
+            continue; // a rerun of the date: keep the latest run only
+        }
+        seen = Some(article_id);
+        let value = row.get::<f64, _>("value");
+        let retriever = first_retriever(row.get::<Option<String>, _>("admitted_by").as_deref());
+        let entry = per_retriever.entry(retriever).or_default();
+        entry.rated += 1;
+        if value > 0.0 {
+            entry.up += 1;
+        } else if value < 0.0 {
+            entry.down += 1;
+        }
+        let exploration =
+            serde_json::from_str::<SignalsJson>(&row.get::<String, _>("signals_json"))
+                .map(|signals| signals.exploration)
+                .unwrap_or(false);
+        if exploration && value > 0.0 {
+            exploration_positive += 1;
+        }
+    }
+    if per_retriever.is_empty() {
+        let _ = writeln!(out, "rated picks by admitting retriever: none");
+    }
+    for (retriever, counts) in &per_retriever {
+        let ratio = if counts.rated > 0 {
+            format!("{:.0}% up", 100.0 * counts.up as f64 / counts.rated as f64)
+        } else {
+            "n/a".to_string()
+        };
+        let _ = writeln!(
+            out,
+            "admitted by {retriever}: {} rated · {} up · {} down · {ratio}",
+            counts.rated, counts.up, counts.down
+        );
+    }
+
+    // --- exploration yield ---
+    let exploration_rows = sqlx::query(
+        "SELECT cr.stage FROM candidate_runs cr
+         JOIN runs r ON r.id = cr.run_id
+         WHERE r.status != 'dry_run' AND r.started_at >= ?
+           AND cr.signals_json LIKE '%\"exploration\":true%'",
+    )
+    .bind(&since)
+    .fetch_all(db.pool())
+    .await?;
+    let mut exploration_admitted = 0i64;
+    let mut exploration_selected = 0i64;
+    for row in &exploration_rows {
+        match row.get::<String, _>("stage").as_str() {
+            "selected" => {
+                exploration_admitted += 1;
+                exploration_selected += 1;
+            }
+            "admitted" | "assessed" | "shortlisted" => exploration_admitted += 1,
+            _ => {}
+        }
+    }
+    let _ = writeln!(out, "exploration admitted: {exploration_admitted}");
+    let _ = writeln!(out, "exploration selected: {exploration_selected}");
+    let _ = writeln!(out, "exploration rated positively: {exploration_positive}");
+
+    // --- cost per day per provider (§7.6) ---
+    let cost_rows = sqlx::query(
+        "SELECT provider_costs_json FROM runs
+         WHERE started_at >= ? AND provider_costs_json IS NOT NULL",
+    )
+    .bind(&since)
+    .fetch_all(db.pool())
+    .await?;
+    let mut totals: BTreeMap<String, f64> = BTreeMap::new();
+    for row in &cost_rows {
+        let raw = row.get::<String, _>("provider_costs_json");
+        let Ok(providers) =
+            serde_json::from_str::<BTreeMap<String, crate::report::ProviderUsage>>(&raw)
+        else {
+            continue;
+        };
+        for (provider, usage) in providers {
+            *totals.entry(provider).or_insert(0.0) += usage.cost_usd;
+        }
+    }
+    let mut grand = 0.0;
+    for (provider, total) in &totals {
+        grand += total;
+        let _ = writeln!(
+            out,
+            "cost per day ({provider}): ${:.3}",
+            total / days as f64
+        );
+    }
+    let _ = writeln!(out, "cost per day (total): ${:.3}", grand / days as f64);
+
+    // --- mean generation time ---
+    let run_rows = sqlx::query(
+        "SELECT started_at, finished_at FROM runs
+         WHERE started_at >= ? AND finished_at IS NOT NULL",
+    )
+    .bind(&since)
+    .fetch_all(db.pool())
+    .await?;
+    let mut durations = Vec::new();
+    for row in &run_rows {
+        let started = row.get::<String, _>("started_at").parse::<Timestamp>();
+        let finished = row.get::<String, _>("finished_at").parse::<Timestamp>();
+        if let (Ok(started), Ok(finished)) = (started, finished) {
+            durations.push((finished.as_second() - started.as_second()).max(0));
+        }
+    }
+    if durations.is_empty() {
+        let _ = writeln!(out, "mean generation time: n/a (0 runs)");
+    } else {
+        let mean = durations.iter().sum::<i64>() / durations.len() as i64;
+        let _ = writeln!(
+            out,
+            "mean generation time: {} ({} runs)",
+            RunReport::format_duration(mean),
+            durations.len()
         );
     }
     Ok(out)
@@ -970,6 +1237,236 @@ mod tests {
             text.contains("top 1 not selected, by preliminary blend"),
             "{text}"
         );
+    }
+
+    #[tokio::test]
+    async fn paper_near_misses_carry_feed_quality_fit_and_stage() {
+        let (_dir, db) = db_with_articles(&[1, 2]).await;
+        sqlx::query(
+            "INSERT INTO entries (id, feed_id, feed_title, title, url, raw_content, fetched_at)
+             VALUES (11, 5, 'Example Feed', 'Article 1', 'https://example.com/1', '', '2026-08-15T00:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE articles SET best_entry_id = 11 WHERE id = 1")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let run_id = db.start_run(date(), Timestamp::now()).await.unwrap();
+        let mut candidate = crate::types::Candidate::new(
+            crate::curate::prefilter::tests::article(1, "Article 1", 900),
+            false,
+        );
+        candidate.signals = signals(41.0, 0.55);
+        candidate.assessment.deep = Some(crate::types::Deep {
+            quality: 8.0,
+            fit: 6.5,
+            category: None,
+            rationale: String::new(),
+            paywalled_guess: false,
+            facets: Default::default(),
+            model: "mock".into(),
+            prompt_version: 1,
+            assessed_at: "2026-09-02T05:30:00Z".parse().unwrap(),
+        });
+        let json = serialize_candidate(&candidate);
+        write(
+            &db,
+            &CandidateRun {
+                run_id,
+                article_id: 1,
+                stage: "shortlisted",
+                excluded_reason: Some("not_selected"),
+                admitted_by: Some("[\"triage\"]"),
+                signals_json: &json,
+                utility: Some(71.0),
+                rank_utility: Some(3),
+                cluster_id: None,
+                cluster_rank: None,
+                editor_why: None,
+            },
+        )
+        .await
+        .unwrap();
+        write(
+            &db,
+            &CandidateRun {
+                run_id,
+                article_id: 2,
+                stage: "selected",
+                excluded_reason: None,
+                admitted_by: Some("[\"triage\"]"),
+                signals_json: "{}",
+                utility: Some(90.0),
+                rank_utility: Some(1),
+                cluster_id: None,
+                cluster_rank: None,
+                editor_why: Some("because"),
+            },
+        )
+        .await
+        .unwrap();
+        let misses = paper_near_misses(&db, run_id, 10).await.unwrap();
+        assert_eq!(misses.len(), 1, "selected picks are not near misses");
+        let miss = &misses[0];
+        assert_eq!(miss.article_id, 1);
+        assert_eq!(miss.title, "Article 1");
+        assert_eq!(miss.feed_title, "Example Feed");
+        assert_eq!(miss.quality, Some(8.0));
+        assert_eq!(miss.fit, Some(6.5));
+        assert_eq!(miss.stage, "shortlisted");
+        assert_eq!(miss.reason.as_deref(), Some("not_selected"));
+    }
+
+    #[tokio::test]
+    async fn stats_prints_every_fact_from_runs_issues_and_ratings() {
+        let (_dir, db) = db_with_articles(&[1, 2, 3, 4]).await;
+        let now: Timestamp = "2026-09-02T12:00:00Z".parse().unwrap();
+        // Two issues inside the window, one outside it.
+        sqlx::query(
+            "INSERT INTO issues (date, issue_number, generated_at) VALUES
+                 ('2026-08-01', 1, '2026-08-01T10:00:00Z'),
+                 ('2026-08-30', 30, '2026-08-30T10:00:00Z'),
+                 ('2026-09-01', 32, '2026-09-01T10:00:00Z');
+             INSERT INTO issue_articles (issue_date, article_id, section) VALUES
+                 ('2026-08-01', 4, 'Top Stories'),
+                 ('2026-08-30', 1, 'Top Stories'),
+                 ('2026-08-30', 2, 'Top Stories'),
+                 ('2026-09-01', 3, 'Top Stories');",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        // Two finished runs with provider costs, one of them a rerun of 08-30.
+        let mut run_ids = Vec::new();
+        for (date, started, finished, costs) in [
+            (
+                "2026-08-30",
+                "2026-08-30T09:30:00Z",
+                "2026-08-30T09:50:00Z",
+                r#"{"deepseek":{"input_tokens":1,"cached_tokens":0,"cache_write_tokens":0,"output_tokens":1,"cost_usd":0.10},"anthropic":{"input_tokens":1,"cached_tokens":0,"cache_write_tokens":0,"output_tokens":1,"cost_usd":0.60},"voyage":{"input_tokens":1,"cached_tokens":0,"cache_write_tokens":0,"output_tokens":0,"cost_usd":0.02}}"#,
+            ),
+            (
+                "2026-08-30",
+                "2026-08-30T11:00:00Z",
+                "2026-08-30T11:10:00Z",
+                r#"{"deepseek":{"input_tokens":1,"cached_tokens":0,"cache_write_tokens":0,"output_tokens":1,"cost_usd":0.04}}"#,
+            ),
+            (
+                "2026-09-01",
+                "2026-09-01T09:30:00Z",
+                "2026-09-01T09:45:00Z",
+                r#"{"deepseek":{"input_tokens":1,"cached_tokens":0,"cache_write_tokens":0,"output_tokens":1,"cost_usd":0.14}}"#,
+            ),
+        ] {
+            let run_id = db
+                .start_run(date.parse().unwrap(), started.parse().unwrap())
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE runs SET finished_at = ?, status = 'ok', provider_costs_json = ? WHERE id = ?",
+            )
+            .bind(finished)
+            .bind(costs)
+            .bind(run_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+            run_ids.push(run_id);
+        }
+        // Article 1 was admitted by triage in the first 08-30 run and by knn
+        // in the rerun; the latest run wins. Article 2 was an exploration
+        // pick admitted by exploration. Article 3 was admitted by blend.
+        let exploration = r#"{"v":1,"exploration":true}"#;
+        for (run_id, article_id, stage, admitted_by, json) in [
+            (run_ids[0], 1, "selected", "[\"triage\"]", "{}"),
+            (run_ids[1], 1, "selected", "[\"knn\"]", "{}"),
+            (run_ids[1], 2, "selected", "[\"exploration\"]", exploration),
+            (run_ids[1], 4, "assessed", "[\"exploration\"]", exploration),
+            (run_ids[2], 3, "selected", "[\"blend\"]", "{}"),
+        ] {
+            write(
+                &db,
+                &CandidateRun {
+                    run_id,
+                    article_id,
+                    stage,
+                    excluded_reason: None,
+                    admitted_by: Some(admitted_by),
+                    signals_json: json,
+                    utility: Some(50.0),
+                    rank_utility: None,
+                    cluster_id: None,
+                    cluster_rank: None,
+                    editor_why: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO rating_events (article_id, issue_date, kind, source, label, value, event_at) VALUES
+                 (1, '2026-08-30', 'explicit', 'epub', 'good', 0.35, '2026-08-31T08:00:00Z'),
+                 (1, '2026-08-30', 'explicit', 'epub', 'loved', 1.0, '2026-08-31T09:00:00Z'),
+                 (2, '2026-08-30', 'explicit', 'epub', 'loved', 1.0, '2026-08-31T09:30:00Z'),
+                 (3, '2026-09-01', 'explicit', 'epub', 'not_for_me', -1.0, '2026-09-01T12:00:00Z'),
+                 (4, '2026-08-01', 'explicit', 'epub', 'loved', 1.0, '2026-08-02T12:00:00Z'),
+                 (3, NULL, 'explicit', 'cli', 'cleared', 0.0, '2026-08-20T12:00:00Z');",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let text = stats(&db, 14, now).await.unwrap();
+        println!("{text}");
+        for line in [
+            "stats: last 14 days (2026-08-19 → 2026-09-02)",
+            "issues: 2",
+            "articles published: 3",
+            "mean issue size: 1.5 articles",
+            "explicit ratings: 4",
+            "explicit ratings (cleared): 1",
+            "explicit ratings (good): 1",
+            "explicit ratings (loved): 2",
+            "explicit ratings (not_for_me): 1",
+            "ratings per issue: 2.0",
+            "admitted by blend: 1 rated · 0 up · 1 down · 0% up",
+            "admitted by exploration: 1 rated · 1 up · 0 down · 100% up",
+            "admitted by knn: 1 rated · 1 up · 0 down · 100% up",
+            "exploration admitted: 2",
+            "exploration selected: 1",
+            "exploration rated positively: 1",
+            "cost per day (anthropic): $0.043",
+            "cost per day (deepseek): $0.020",
+            "cost per day (voyage): $0.001",
+            "cost per day (total): $0.064",
+            "mean generation time: 15m00s (3 runs)",
+        ] {
+            assert!(text.contains(line), "missing {line:?} in:\n{text}");
+        }
+        assert!(
+            !text.contains("admitted by triage"),
+            "the rerun's row replaces the first run's: {text}"
+        );
+        assert!(
+            text.lines().all(|line| line.chars().count() <= 80),
+            "no line wider than 80 columns"
+        );
+
+        // An empty database still prints every heading.
+        let (_dir, empty) = db_with_articles(&[]).await;
+        let text = stats(&empty, 7, now).await.unwrap();
+        for line in [
+            "issues: 0",
+            "mean issue size: n/a articles",
+            "ratings per issue: n/a",
+            "rated picks by admitting retriever: none",
+            "cost per day (total): $0.000",
+            "mean generation time: n/a (0 runs)",
+        ] {
+            assert!(text.contains(line), "missing {line:?} in:\n{text}");
+        }
     }
 
     #[tokio::test]

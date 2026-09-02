@@ -15,9 +15,9 @@ use daily_epub::curate::embedding::{self, BACKFILL_CONFIRM_TOKENS};
 use daily_epub::curate::telemetry;
 use daily_epub::db::Db;
 use daily_epub::pipeline::{self, GenerateOptions, GenerateOutcome};
-use daily_epub::report::RunReport;
+use daily_epub::report::{RunReport, VOYAGE_PROVIDER};
 use daily_epub::types::{ArticleId, RatingEvent, Vote};
-use daily_epub::{curate, http, server, social};
+use daily_epub::{curate, http, lock, server, social};
 
 /// A personalized daily newspaper, delivered as an EPUB.
 #[derive(Debug, Parser)]
@@ -45,6 +45,8 @@ enum Command {
     Ratings(RatingsCommand),
     /// Why an article was (not) in the paper, from persisted run telemetry.
     Explain(ExplainArgs),
+    /// The weekly numbers: issues, ratings, retriever yield, cost, timing.
+    Stats(StatsArgs),
     /// Embedding cache and telemetry maintenance.
     #[command(subcommand)]
     Features(FeaturesCommand),
@@ -199,6 +201,14 @@ struct ExplainArgs {
     near_misses: Option<usize>,
 }
 
+/// `stats [--days 14]` (plan §15.3).
+#[derive(Debug, clap::Args)]
+struct StatsArgs {
+    /// How many days back to summarize.
+    #[arg(long, default_value_t = 14)]
+    days: i64,
+}
+
 #[derive(Debug, Subcommand)]
 enum FeaturesCommand {
     /// Embed rated and published articles, then interests, into the cache.
@@ -243,6 +253,14 @@ async fn main() -> Result<()> {
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
     tracing::debug!(?config.database_path, "configuration loaded");
 
+    // One writer at a time (§5); read-only commands never wait on it.
+    let _lock = match lock_holder(&cli.command) {
+        Some(name) => {
+            Some(lock::acquire(&config.database_path, name).map_err(|e| anyhow::anyhow!("{e}"))?)
+        }
+        None => None,
+    };
+
     match cli.command {
         Command::Generate(args) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
@@ -265,6 +283,11 @@ async fn main() -> Result<()> {
             let db = Db::open_and_migrate(&config.database_path).await?;
             cmd_explain(&db, args).await?;
         }
+        Command::Stats(args) => {
+            let db = Db::open_and_migrate(&config.database_path).await?;
+            let text = telemetry::stats(&db, args.days, jiff::Timestamp::now()).await?;
+            print!("{text}");
+        }
         Command::Features(command) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
             cmd_features(&config, &db, command).await?;
@@ -280,6 +303,24 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The commands that write the database and provider budgets and so hold the
+/// run lock (§5): `generate`, `profile rebuild`, `features backfill`,
+/// `backfill-social`. Everything else is read-only or its own writer.
+fn lock_holder(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Generate(_) => Some("generate"),
+        Command::Profile(ProfileCommand::Rebuild) => Some("profile rebuild"),
+        Command::Features(FeaturesCommand::Backfill(_)) => Some("features backfill"),
+        Command::BackfillSocial(_) => Some("backfill-social"),
+        Command::Serve
+        | Command::Ratings(_)
+        | Command::Explain(_)
+        | Command::Stats(_)
+        | Command::Features(FeaturesCommand::Prune)
+        | Command::Db(_) => None,
+    }
 }
 
 /// `RUST_LOG`-driven tracing, defaulting to `info` (crate table "logging").
@@ -343,44 +384,10 @@ fn print_report(report: &RunReport) {
         report.counts.duplicates_merged,
         report.counts.entries_dropped,
     );
-    println!(
-        "curation: {} considered → {} eligible → {} triaged → {} assessed → {} shortlisted → {} selected",
-        report.counts.articles,
-        report.counts.eligible,
-        report.counts.triaged,
-        report.counts.assessed,
-        report.counts.shortlisted,
-        report.counts.selected,
-    );
-    println!(
-        "admission: triage {} · interest {} · knn {} · exploration {} · blend {} · auto {}",
-        report
-            .counts
-            .admitted_by
-            .get("triage")
-            .copied()
-            .unwrap_or(0),
-        report
-            .counts
-            .admitted_by
-            .get("interest")
-            .copied()
-            .unwrap_or(0),
-        report.counts.admitted_by.get("knn").copied().unwrap_or(0),
-        report
-            .counts
-            .admitted_by
-            .get("exploration")
-            .copied()
-            .unwrap_or(0),
-        report.counts.admitted_by.get("blend").copied().unwrap_or(0),
-        report
-            .counts
-            .admitted_by
-            .get("auto_include")
-            .copied()
-            .unwrap_or(0),
-    );
+    // The same four lines the run logged (§15.4).
+    for line in report.info_block() {
+        println!("{line}");
+    }
     println!(
         "tokens: {} input · {} cache read · {} cache write · {} output · {} voyage = ${:.4}",
         report.usage.input_tokens,
@@ -391,6 +398,9 @@ fn print_report(report: &RunReport) {
         report.cost_usd,
     );
     for (provider, usage) in &report.provider_costs {
+        if provider == VOYAGE_PROVIDER {
+            continue; // embedding tokens are printed on their own line below
+        }
         println!(
             "  {provider}: {} input · {} cache read · {} cache write · {} output = ${:.4}",
             usage.usage.input_tokens,
@@ -790,6 +800,56 @@ mod tests {
 
         let cli = Cli::try_parse_from(["daily-epub", "--config", "/tmp/x.toml", "serve"]).unwrap();
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/x.toml")));
+    }
+
+    #[test]
+    fn only_the_writing_commands_take_the_lock() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("daily-epub").chain(args.iter().copied()))
+                .unwrap()
+                .command
+        };
+        assert_eq!(lock_holder(&parse(&["generate"])), Some("generate"));
+        assert_eq!(
+            lock_holder(&parse(&["profile", "rebuild"])),
+            Some("profile rebuild")
+        );
+        assert_eq!(
+            lock_holder(&parse(&["features", "backfill"])),
+            Some("features backfill")
+        );
+        assert_eq!(
+            lock_holder(&parse(&["backfill-social"])),
+            Some("backfill-social")
+        );
+        for args in [
+            vec!["serve"],
+            vec!["explain", "--date", "2026-09-02", "--near-misses"],
+            vec!["stats"],
+            vec!["ratings", "list"],
+            vec!["db", "migrate"],
+            vec!["features", "prune"],
+        ] {
+            assert_eq!(lock_holder(&parse(&args)), None, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn parses_stats() {
+        match Cli::try_parse_from(["daily-epub", "stats"])
+            .unwrap()
+            .command
+        {
+            Command::Stats(args) => assert_eq!(args.days, 14),
+            other => panic!("expected stats, got {other:?}"),
+        }
+        match Cli::try_parse_from(["daily-epub", "stats", "--days", "7"])
+            .unwrap()
+            .command
+        {
+            Command::Stats(args) => assert_eq!(args.days, 7),
+            other => panic!("expected stats, got {other:?}"),
+        }
     }
 
     #[test]

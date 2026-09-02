@@ -304,6 +304,7 @@ pub async fn load_or_build(
         ),
         version,
         built_at,
+        verdicts: ratings.len().min(verdict_limit),
     };
     db.kv_set(KV_TASTE_PROFILE, &profile.text).await?;
     tracing::debug!(
@@ -472,6 +473,7 @@ pub async fn rebuild(
         ),
         version: next_version,
         built_at,
+        verdicts: current.len().min(verdict_limit),
     };
     db.kv_set(KV_TASTE_PROFILE, &profile.text).await?;
     tracing::info!(
