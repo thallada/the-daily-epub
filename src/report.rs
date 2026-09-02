@@ -84,6 +84,13 @@ pub struct StageCounts {
     pub verdicts_in_prompt: i64,
     /// Articles with a reusable or newly produced triage assessment.
     pub triaged: i64,
+    /// Triage assessments served from cached rows.
+    #[serde(default)]
+    pub triage_reused: i64,
+    /// Pool articles without a triage because a provider rejected them
+    /// (this run's unrecovered rejections plus fresh `provider_rejected` rows).
+    #[serde(default)]
+    pub triage_rejected: i64,
     /// Articles admitted to close reading.
     pub admitted: i64,
     /// First admitting retriever counts.
@@ -92,6 +99,13 @@ pub struct StageCounts {
     pub exploration_selected: i64,
     /// Deep assessments, whether reused or newly produced.
     pub assessed: i64,
+    /// Deep assessments served from cached rows.
+    #[serde(default)]
+    pub deep_reused: i64,
+    /// Admitted articles without a deep assessment because a provider
+    /// rejected them.
+    #[serde(default)]
+    pub deep_rejected: i64,
     /// Candidates shown to the editor after diversification.
     pub shortlisted: i64,
     /// Leader clusters formed over the deep set.
@@ -287,10 +301,24 @@ impl RunReport {
         } else {
             providers
         };
+        let rejected = |count: i64| {
+            if count > 0 {
+                format!(" · {count} rejected")
+            } else {
+                String::new()
+            }
+        };
         [
             format!(
-                "curation: {} considered → {} eligible → {} triaged → {} assessed → {} shortlisted → {} selected",
-                c.articles, c.eligible, c.triaged, c.assessed, c.shortlisted, c.selected
+                "curation: {} considered → {} eligible → {} triaged{} → {} assessed{} → {} shortlisted → {} selected",
+                c.articles,
+                c.eligible,
+                c.triaged,
+                rejected(c.triage_rejected),
+                c.assessed,
+                rejected(c.deep_rejected),
+                c.shortlisted,
+                c.selected
             ),
             format!(
                 "admission: triage {} · interest {} · knn {} · exploration {} · blend {} · auto {}",
@@ -435,6 +463,21 @@ mod tests {
         );
         assert_eq!(RunReport::format_duration(48), "48s");
         assert_eq!(RunReport::format_duration(3600), "60m00s");
+
+        // Provider rejections show up only when there were any.
+        r.counts.triaged = 395;
+        r.counts.triage_rejected = 3;
+        r.counts.deep_rejected = 0;
+        assert_eq!(
+            r.info_block()[0],
+            "curation: 412 considered → 398 eligible → 395 triaged · 3 rejected → 120 assessed → 60 shortlisted → 17 selected"
+        );
+        r.counts.assessed = 119;
+        r.counts.deep_rejected = 1;
+        assert_eq!(
+            r.info_block()[0],
+            "curation: 412 considered → 398 eligible → 395 triaged · 3 rejected → 119 assessed · 1 rejected → 60 shortlisted → 17 selected"
+        );
     }
 
     #[test]

@@ -469,9 +469,10 @@ async fn run_stages(
         .flatten()
         .and_then(|value| value.parse().ok());
     if let Some(bulk) = curator.llms.bulk.as_ref() {
-        if let Err(error) = triage::run(
+        match triage::run(
             db,
             bulk,
+            curator.llms.editor.as_ref(),
             &mut personalized,
             &triage_pool,
             config.llm.triage_batch_size,
@@ -484,9 +485,13 @@ async fn run_stages(
         )
         .await
         {
-            report.warn(format!(
+            Ok(summary) => {
+                report.counts.triage_reused = summary.reused as i64;
+                report.counts.triage_rejected = summary.rejected_total() as i64;
+            }
+            Err(error) => report.warn(format!(
                 "triage degraded; admission continues without it: {error:#}"
-            ));
+            )),
         }
     } else {
         tracing::info!("--skip-llm or no bulk provider: triage skipped");
@@ -516,7 +521,7 @@ async fn run_stages(
 
     // --- Stage 9: deep assessment (§12.1) ---
     let stage = Timestamp::now();
-    if let Err(error) = curator
+    match curator
         .assess(
             &mut personalized,
             ctx.rescore,
@@ -525,9 +530,13 @@ async fn run_stages(
         )
         .await
     {
-        report.warn(format!(
+        Ok(summary) => {
+            report.counts.deep_reused = summary.reused as i64;
+            report.counts.deep_rejected = summary.rejected_total() as i64;
+        }
+        Err(error) => report.warn(format!(
             "deep assessment degraded; ranking continues on present signals: {error:#}"
-        ));
+        )),
     }
     report.counts.assessed = personalized
         .iter()
@@ -1666,16 +1675,28 @@ mod tests {
         assert_eq!(thin, "{}");
 
         // Admission replaces the old prefilter and carries retriever telemetry.
-        // The bulk provider is "down": the client exists but every call fails, so
-        // the deep set is ranked on present signals and the editor falls back
-        // to utility order (§17).
+        // The bulk provider is "down": the client exists but the one deep batch
+        // fails transiently through every retry (a content-filter rejection
+        // would be bisected instead), so the deep set is ranked on present
+        // signals and the editor falls back to utility order (§17).
         let bulk_backend = Arc::new(ChatMockBackend::new());
+        for _ in 0..3 {
+            bulk_backend.push_llm_error(crate::curate::llm::LlmError::Transient {
+                provider: "deepseek".into(),
+                message: "503".into(),
+            });
+        }
         let bulk = LlmClient::with_backend(
             &h.config.providers["deepseek"].model,
             "SYSTEM".into(),
             UsageMeter::for_provider(&h.config.providers["deepseek"]),
             bulk_backend.clone(),
-        );
+        )
+        .with_retry(crate::http::RetryPolicy {
+            max_attempts: 3,
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(2),
+        });
         let curator = Curator::new(
             h.config.clone(),
             h.db.clone(),
@@ -1699,9 +1720,21 @@ mod tests {
         let assessed = curator
             .assess(&mut features, false, None, now())
             .await
-            .unwrap();
+            .unwrap()
+            .assessed();
         assert_eq!(assessed, 0, "every deep batch failed");
-        assert_eq!(bulk_backend.calls(), 1, "one batch was attempted");
+        assert_eq!(
+            bulk_backend.calls(),
+            3,
+            "one batch was attempted, three times; nothing was bisected"
+        );
+        let rejected: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM article_assessments WHERE kind = 'provider_rejected'",
+        )
+        .fetch_one(h.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(rejected, 0, "a transient failure is not a rejection");
         assert!(features.iter().all(|c| c.assessment.deep.is_none()));
         let embeddings = features
             .iter()
@@ -1743,7 +1776,7 @@ mod tests {
         let lineup = curator.select(candidates, run_date()).await.unwrap();
         assert_eq!(
             bulk_backend.calls(),
-            2,
+            4,
             "the editor tried the bulk fallback"
         );
         let selected = lineup

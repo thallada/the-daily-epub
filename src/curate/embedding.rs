@@ -416,8 +416,8 @@ pub fn decode_blob(bytes: &[u8], dimension: usize) -> Result<Vec<f32>, Embedding
         });
     }
     let mut vector = Vec::with_capacity(dimension);
-    for chunk in bytes.chunks_exact(4) {
-        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for chunk in bytes.as_chunks::<4>().0 {
+        let value = f32::from_le_bytes(*chunk);
         if !value.is_finite() {
             return Err(EmbeddingError::NonFinite);
         }

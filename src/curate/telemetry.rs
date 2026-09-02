@@ -429,6 +429,12 @@ pub async fn render_explain(db: &Db, row: &ExplainRow) -> Result<String, sqlx::E
             let rationale = assessment
                 .get::<Option<String>, _>("rationale")
                 .unwrap_or_default();
+            if assessment.get::<Option<String>, _>("kind").as_deref()
+                == Some(super::triage::PROVIDER_REJECTED)
+            {
+                let _ = writeln!(out, "  {stage}: rejected by provider — {rationale}");
+                continue;
+            }
             if stage == "deep" {
                 let _ = writeln!(
                     out,
@@ -1005,6 +1011,56 @@ mod tests {
         assert_eq!(parsed["norm"]["triage"], 0.75);
         assert_eq!(parsed["present"]["triage"], true);
         assert_eq!(parsed["exploration"], true);
+    }
+
+    #[tokio::test]
+    async fn explain_names_provider_rejections_instead_of_scores() {
+        let (_dir, db) = db_with_articles(&[1]).await;
+        let run_id = db.start_run(date(), Timestamp::now()).await.unwrap();
+        write(
+            &db,
+            &CandidateRun {
+                run_id,
+                article_id: 1,
+                stage: "admitted",
+                excluded_reason: None,
+                admitted_by: Some("[\"interest\"]"),
+                signals_json: "{}",
+                utility: None,
+                rank_utility: None,
+                cluster_id: None,
+                cluster_rank: None,
+                editor_why: None,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO article_assessments
+             (article_id, stage, model, prompt_version, score, fit, kind, rationale, assessed_at)
+             VALUES (1, 'triage', 'deepseek-v4-flash', 1, NULL, NULL, 'provider_rejected',
+                     'deepseek: 400 Bad Request: Content Exists Risk', '2026-09-02T04:00:00Z'),
+                    (1, 'deep', 'deepseek-v4-flash', 1, NULL, NULL, 'provider_rejected',
+                     'deepseek: returned a refusal', '2026-09-02T04:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let text = explain(&db, date(), None, &ExplainTarget::Article(1))
+            .await
+            .unwrap();
+        assert!(
+            text.contains(
+                "  triage: rejected by provider — deepseek: 400 Bad Request: Content Exists Risk\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("  deep: rejected by provider — deepseek: returned a refusal\n"),
+            "{text}"
+        );
+        assert!(!text.contains("interest —"), "{text}");
+        assert!(!text.contains("quality —"), "{text}");
     }
 
     #[tokio::test]

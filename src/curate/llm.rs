@@ -627,7 +627,7 @@ impl LlmClient {
     }
 
     #[cfg(test)]
-    fn with_retry(mut self, retry: RetryPolicy) -> Self {
+    pub(crate) fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
     }

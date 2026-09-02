@@ -685,5 +685,18 @@ From spec §7, plus what implementation turned up:
   beginning/middle/end sample, separates editorial quality from reader fit, and
   records descriptive facets. Utility is normalized over the deep set; embedding
   leader clusters cap near-duplicates before the 60-item editor shortlist.
+- **DeepSeek's content filter rejects whole batches.** A `400 Content Exists
+  Risk` refuses the entire request when any one article in it trips the input
+  filter, without saying which. Triage and deep assessment therefore bisect a
+  rejected batch (halves, then quarters, down to single articles) so the other
+  articles keep their assessment. A single article the bulk provider still
+  refuses is retried once on the editor provider with the same prompt when that
+  is a different provider; if that also fails, an `article_assessments` row with
+  `kind = 'provider_rejected'` and a NULL score is written so the article is not
+  sent again for `assessment_reuse_days`, and it is ranked on its other signals.
+  See them with `explain` (`triage: rejected by provider — deepseek: …`), the
+  `triage:` / `assess:` log lines (`… 3 rejected (2 recovered on gemini)`), the
+  ` · N rejected` suffix on the `curation:` line, or
+  `sqlite3 /var/lib/daily-epub/daily-epub.db "select stage, count(*) from article_assessments where kind = 'provider_rejected' group by stage"`.
 - **One reader, one issue per day.** There is no multi-user support and no
   weekly/retrospective edition (spec §6).

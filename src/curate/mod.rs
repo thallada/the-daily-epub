@@ -12,6 +12,7 @@
 
 pub mod admit;
 pub mod assess;
+pub mod batch;
 pub mod editor;
 pub mod editorial;
 pub mod embedding;
@@ -50,23 +51,30 @@ impl Curator {
     /// A no-op under `--skip-llm`: like triage, nothing is read or written and
     /// utility falls back to the present signals (§12.3, §17). When the bulk
     /// provider is down or its budget trips, cached rows are still reused and
-    /// the failed batches simply stay unassessed.
+    /// the failed batches simply stay unassessed. A batch the provider's
+    /// content filter rejects is bisected, and a rejected single article is
+    /// retried on the editor when that is another provider (`curate::batch`).
     pub async fn assess(
         &self,
         candidates: &mut [Candidate],
         rescore: bool,
         profile_version: Option<i64>,
         assessed_at: Timestamp,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<batch::StageSummary> {
         let Some(bulk) = self.llms.bulk.as_ref() else {
             tracing::info!("--skip-llm: deep assessment skipped");
-            return Ok(0);
+            return Ok(batch::StageSummary::default());
         };
-        let span = tracing::info_span!("llm_assess", candidates = candidates.len());
+        let admitted = candidates
+            .iter()
+            .filter(|candidate| candidate.stage == "admitted")
+            .count();
+        let span = tracing::info_span!("llm_assess", candidates = admitted);
         let _guard = span.enter();
         assess::run(
             &self.db,
             Some(bulk),
+            self.llms.editor.as_ref(),
             &bulk.model,
             candidates,
             self.config.llm.deep_batch_size,

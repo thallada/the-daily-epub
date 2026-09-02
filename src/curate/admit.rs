@@ -494,4 +494,49 @@ mod tests {
         .expect("thin row");
         assert_eq!(reason, "recently_rejected");
     }
+
+    #[tokio::test]
+    async fn provider_rejected_rows_do_not_mark_an_article_recently_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_and_migrate(&dir.path().join("hygiene.db"))
+            .await
+            .expect("db");
+        sqlx::query(
+            "INSERT INTO articles (id, canonical_url, title, first_seen) VALUES
+             (1, 'https://example.com/1', 'Refused', '2026-09-02T00:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .expect("article");
+        sqlx::query(
+            "INSERT INTO article_assessments
+             (article_id, stage, model, prompt_version, score, fit, kind, rationale, assessed_at)
+             VALUES (1, 'triage', 'model', 1, NULL, NULL, 'provider_rejected',
+                     'deepseek: Content Exists Risk', '2026-09-02T04:00:00Z'),
+                    (1, 'deep', 'model', 1, NULL, NULL, 'provider_rejected',
+                     'deepseek: Content Exists Risk', '2026-09-02T04:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .expect("rejection rows");
+        let run_id = db
+            .start_run(
+                "2026-09-02".parse().expect("date"),
+                "2026-09-02T05:30:00Z".parse().expect("timestamp"),
+            )
+            .await
+            .expect("run");
+        let eligible = hygiene(
+            &db,
+            run_id,
+            vec![article(1, "Refused", 500)],
+            "2026-09-02".parse().expect("date"),
+            &CurationConfig::default(),
+            "2026-09-02T05:30:00Z".parse().expect("timestamp"),
+        )
+        .await
+        .expect("hygiene");
+        assert_eq!(eligible.len(), 1, "a NULL score is not a low score");
+        assert_eq!(eligible[0].article.id, 1);
+    }
 }

@@ -3,12 +3,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use futures::{StreamExt, stream};
 use jiff::Timestamp;
 use serde_json::Value;
 use sqlx::Row as _;
 
+use super::batch::{Assessed, BatchRunner, Scored, StageSummary, run_batches};
 use super::llm::{LlmClient, strip_code_fence};
+use super::triage::{PROVIDER_REJECTED, reusable_models, write_rejection};
 use super::{prompt_text, truncate_words};
 use crate::db::{Db, fmt_ts, parse_ts};
 use crate::types::{ArticleId, Candidate, Deep, Facets};
@@ -316,10 +317,24 @@ fn as_bool(value: &Value) -> Option<bool> {
     })
 }
 
+impl Assessed for DeepItem {
+    fn article_id(&self) -> ArticleId {
+        self.id
+    }
+}
+
+/// Assess the admitted set on `llm` (cache only when `None`), bisecting
+/// rejected batches and retrying rejected singles on `fallback` when it is
+/// another provider (see [`super::batch`]).
+///
+/// Cached rows written by either configured model are reused; a fresh
+/// `provider_rejected` row skips the article and leaves its deep assessment
+/// absent, so ranking falls back to the present signals (§12.3).
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     db: &Db,
     llm: Option<&LlmClient>,
+    fallback: Option<&LlmClient>,
     model: &str,
     candidates: &mut [Candidate],
     batch_size: usize,
@@ -330,22 +345,31 @@ pub async fn run(
     assessed_at: Timestamp,
     temperature: f32,
     sections: &[String],
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<StageSummary> {
     let positions = candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| candidate.stage == "admitted")
         .map(|(index, candidate)| (candidate.article.id, index))
         .collect::<HashMap<_, _>>();
+    let mut summary = StageSummary {
+        stage: "assess",
+        pool: positions.len(),
+        ..StageSummary::default()
+    };
+    let mut known_rejected = HashSet::new();
     if !rescore && !positions.is_empty() {
         let since = assessed_at - jiff::Span::new().hours(assessment_reuse_days.max(0) * 24);
+        let models = reusable_models(model, fallback);
         let rows = sqlx::query(
-            "SELECT article_id, score, fit, kind, facets_json, rationale, category,
+            "SELECT article_id, model, score, fit, kind, facets_json, rationale, category,
                     paywalled_guess, assessed_at
              FROM article_assessments
-             WHERE stage = 'deep' AND model = ? AND prompt_version = ? AND assessed_at >= ?",
+             WHERE stage = 'deep' AND model IN (?, ?) AND prompt_version = ?
+               AND assessed_at >= ?",
         )
-        .bind(model)
+        .bind(models[0])
+        .bind(models[1])
         .bind(DEEP_PROMPT_VERSION)
         .bind(fmt_ts(since))
         .fetch_all(db.pool())
@@ -355,6 +379,10 @@ pub async fn run(
             let Some(index) = positions.get(&id).copied() else {
                 continue;
             };
+            if row.get::<Option<String>, _>("kind").as_deref() == Some(PROVIDER_REJECTED) {
+                known_rejected.insert(id);
+                continue;
+            }
             let (Some(quality), Some(fit)) = (
                 row.get::<Option<f64>, _>("score"),
                 row.get::<Option<f64>, _>("fit"),
@@ -376,52 +404,47 @@ pub async fn run(
                     .unwrap_or_default(),
                 paywalled_guess: row.get::<i64, _>("paywalled_guess") != 0,
                 facets,
-                model: model.to_string(),
+                model: row.get::<String, _>("model"),
                 prompt_version: DEEP_PROMPT_VERSION,
                 assessed_at: parse_ts(
                     "article_assessments.assessed_at",
                     &row.get::<String, _>("assessed_at"),
                 )?,
             });
+            summary.reused += 1;
         }
     }
+    summary.known_rejected = known_rejected.len();
 
     let pending = candidates
         .iter()
-        .filter(|candidate| candidate.stage == "admitted" && candidate.assessment.deep.is_none())
+        .filter(|candidate| {
+            candidate.stage == "admitted"
+                && candidate.assessment.deep.is_none()
+                && !known_rejected.contains(&candidate.article.id)
+        })
         .collect::<Vec<_>>();
     if let Some(llm) = llm {
-        let prompts = pending
+        summary.requested = pending.len();
+        let batches = pending
             .chunks(batch_size.max(1))
-            .map(|batch| {
-                let allowed = batch
-                    .iter()
-                    .map(|candidate| candidate.article.id)
-                    .collect::<HashSet<_>>();
-                (allowed, build_batch_prompt(batch, sections))
-            })
+            .map(<[&Candidate]>::to_vec)
             .collect::<Vec<_>>();
-        let results = stream::iter(prompts)
-            .map(|(allowed, prompt)| async move {
-                if let Err(error) = llm.meter.check_budget() {
-                    tracing::warn!(%error, "bulk budget tripped; skipping deep batch");
-                    return Vec::new();
-                }
-                match llm.complete(&prompt, temperature, true).await {
-                    Ok(raw) => parse_deep_response(&raw, sections)
-                        .into_iter()
-                        .filter(|item| allowed.contains(&item.id))
-                        .collect(),
-                    Err(error) => {
-                        tracing::warn!(%error, "deep batch failed; its articles remain unassessed");
-                        Vec::new()
-                    }
-                }
-            })
-            .buffer_unordered(max_concurrent_requests.max(1))
-            .collect::<Vec<Vec<DeepItem>>>()
-            .await;
-        for item in results.into_iter().flatten() {
+        summary.batches = batches.len();
+        let build_prompt = |batch: &[&Candidate]| build_batch_prompt(batch, sections);
+        let parse = |raw: &str| parse_deep_response(raw, sections);
+        let runner = BatchRunner {
+            llm,
+            fallback,
+            temperature,
+            build_prompt: &build_prompt,
+            parse: &parse,
+        };
+        summary.fallback_provider = runner.fallback_provider();
+        let outcome = run_batches(&runner, batches, max_concurrent_requests).await;
+        summary.rejected = outcome.rejected;
+        summary.recovered = outcome.recovered;
+        for Scored { item, model } in outcome.items {
             let Some(index) = positions.get(&item.id).copied() else {
                 continue;
             };
@@ -432,7 +455,7 @@ pub async fn run(
                 rationale: item.rationale,
                 paywalled_guess: item.paywalled_guess,
                 facets: item.facets,
-                model: model.to_string(),
+                model,
                 prompt_version: DEEP_PROMPT_VERSION,
                 assessed_at,
             };
@@ -450,7 +473,7 @@ pub async fn run(
                      paywalled_guess = excluded.paywalled_guess, assessed_at = excluded.assessed_at",
             )
             .bind(item.id)
-            .bind(model)
+            .bind(&deep.model)
             .bind(DEEP_PROMPT_VERSION)
             .bind(profile_version)
             .bind(deep.quality)
@@ -464,6 +487,19 @@ pub async fn run(
             .execute(db.pool())
             .await?;
             candidates[index].assessment.deep = Some(deep);
+            summary.applied += 1;
+        }
+        for rejection in &outcome.rejections {
+            write_rejection(
+                db,
+                "deep",
+                rejection,
+                model,
+                DEEP_PROMPT_VERSION,
+                profile_version,
+                assessed_at,
+            )
+            .await?;
         }
     }
     for candidate in candidates
@@ -472,17 +508,16 @@ pub async fn run(
     {
         candidate.stage = "assessed".into();
     }
-    Ok(candidates
-        .iter()
-        .filter(|candidate| candidate.assessment.deep.is_some())
-        .count())
+    tracing::info!("{}", summary.info_line());
+    Ok(summary)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{CurationConfig, ProviderConfig};
-    use crate::curate::llm::{MockBackend, PriceTable, UsageMeter};
+    use crate::curate::batch::tests::{FilterBackend, deep_answer_for};
+    use crate::curate::llm::{ChatBackend, MockBackend, PriceTable, UsageMeter};
     use crate::curate::prefilter::tests::{article, with_social};
     use crate::curate::signals::{Neighbour, TopInterest};
     use crate::types::{TokenUsage, Triage};
@@ -555,6 +590,7 @@ mod tests {
         run(
             db,
             llm,
+            None,
             "deepseek-v4-flash",
             candidates,
             batch_size,
@@ -568,6 +604,7 @@ mod tests {
         )
         .await
         .expect("deep assessment never aborts the run")
+        .assessed()
     }
 
     #[test]
@@ -951,6 +988,7 @@ mod tests {
         let assessed = run(
             &db,
             Some(&llm),
+            None,
             "deepseek-v4-flash",
             &mut candidates,
             1,
@@ -963,7 +1001,8 @@ mod tests {
             &sections(),
         )
         .await
-        .expect("assessment");
+        .expect("assessment")
+        .assessed();
         assert_eq!(assessed, 1, "only the first batch ran");
         assert_eq!(backend.calls(), 1);
         assert!(llm.meter.budget_exceeded());
@@ -1032,6 +1071,7 @@ mod tests {
         run(
             &db,
             None,
+            None,
             "other-model",
             &mut other_model,
             8,
@@ -1053,6 +1093,7 @@ mod tests {
         let mut stale_prompt = vec![candidate(1, 800)];
         run(
             &db,
+            None,
             None,
             "deepseek-v4-flash",
             &mut stale_prompt,
@@ -1078,6 +1119,7 @@ mod tests {
         let mut old = vec![candidate(1, 800)];
         run(
             &db,
+            None,
             None,
             "deepseek-v4-flash",
             &mut old,
@@ -1116,5 +1158,167 @@ mod tests {
                 .await
                 .expect("row");
         assert_eq!(stored, 4.0);
+    }
+
+    fn named_client(provider: &str, model: &str, backend: Arc<dyn ChatBackend>) -> LlmClient {
+        LlmClient::with_backend_options(
+            provider,
+            model,
+            "SYSTEM".into(),
+            None,
+            UsageMeter::with_prices(PriceTable::from(&ProviderConfig::deepseek()), 10.0),
+            backend,
+        )
+    }
+
+    fn titled(n: i64) -> Vec<Candidate> {
+        (1..=n)
+            .map(|id| {
+                let mut c = candidate(id, 900);
+                c.article.title = format!("Piece {id}");
+                c
+            })
+            .collect()
+    }
+
+    async fn assess_with(
+        db: &Db,
+        llm: &LlmClient,
+        fallback: Option<&LlmClient>,
+        candidates: &mut [Candidate],
+        rescore: bool,
+        at: Timestamp,
+    ) -> StageSummary {
+        run(
+            db,
+            Some(llm),
+            fallback,
+            "deepseek-v4-flash",
+            candidates,
+            4,
+            4,
+            3,
+            rescore,
+            Some(1),
+            at,
+            0.3,
+            &sections(),
+        )
+        .await
+        .expect("deep assessment never aborts the run")
+    }
+
+    #[tokio::test]
+    async fn rejected_deep_batches_are_bisected_and_rejections_persisted() {
+        let (_dir, db) = db_with_articles(&[1, 2, 3, 4]).await;
+        let backend = FilterBackend::deep(&["Piece 3"]);
+        let llm = named_client("deepseek", "deepseek-v4-flash", backend.clone());
+        let mut candidates = titled(4);
+        let summary = assess_with(&db, &llm, None, &mut candidates, false, timestamp()).await;
+        assert_eq!(backend.calls(), 5);
+        assert_eq!(summary.assessed(), 3);
+        assert_eq!((summary.rejected, summary.recovered), (1, 0));
+        assert_eq!(
+            summary.info_line(),
+            "assess: 4 in pool · 0 reused · 4 requested in 1 batches · 1 rejected"
+        );
+        assert!(candidates[2].assessment.deep.is_none());
+        assert_eq!(
+            candidates[2].stage, "admitted",
+            "kept for present-signal ranking"
+        );
+        assert!(candidates[0].assessment.deep.is_some());
+        let row = sqlx::query(
+            "SELECT model, score, fit, kind, rationale, facets_json FROM article_assessments
+             WHERE article_id = 3 AND stage = 'deep'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("rejection row");
+        assert_eq!(row.get::<String, _>("model"), "deepseek-v4-flash");
+        assert_eq!(row.get::<Option<f64>, _>("score"), None);
+        assert_eq!(row.get::<Option<f64>, _>("fit"), None);
+        assert_eq!(
+            row.get::<Option<String>, _>("kind").as_deref(),
+            Some(PROVIDER_REJECTED)
+        );
+        assert!(
+            row.get::<Option<String>, _>("rationale")
+                .is_some_and(|why| why.starts_with("deepseek: 400 Bad Request"))
+        );
+        assert_eq!(row.get::<Option<String>, _>("facets_json"), None);
+
+        // Honoured next run, ignored under --rescore.
+        let mut cached = titled(4);
+        let summary = assess_with(&db, &llm, None, &mut cached, false, timestamp()).await;
+        assert_eq!(backend.calls(), 5);
+        assert_eq!(
+            (summary.reused, summary.known_rejected, summary.requested),
+            (3, 1, 0)
+        );
+        assert_eq!(summary.rejected_total(), 1);
+        assert!(cached[2].assessment.deep.is_none());
+        let mut rescored = titled(4);
+        let summary = assess_with(&db, &llm, None, &mut rescored, true, timestamp()).await;
+        assert_eq!(summary.requested, 4);
+        assert_eq!(backend.calls(), 10);
+
+        // Expired: retried (and rejected again).
+        let later = timestamp() + jiff::Span::new().hours(4 * 24);
+        let mut expired = titled(4);
+        let summary = assess_with(&db, &llm, None, &mut expired, false, later).await;
+        assert_eq!(summary.known_rejected, 0);
+        assert_eq!(summary.requested, 4);
+    }
+
+    #[tokio::test]
+    async fn deep_fallback_rows_carry_the_editor_model_and_are_reused() {
+        let (_dir, db) = db_with_articles(&[1, 2]).await;
+        let backend = FilterBackend::deep(&["Piece 2"]);
+        let llm = named_client("deepseek", "deepseek-v4-flash", backend.clone());
+        let editor_backend = Arc::new(MockBackend::new());
+        editor_backend.push(deep_answer_for(&[2]), TokenUsage::default());
+        let editor = named_client("anthropic", "claude-opus-5", editor_backend.clone());
+        let mut candidates = titled(2);
+        let summary = assess_with(
+            &db,
+            &llm,
+            Some(&editor),
+            &mut candidates,
+            false,
+            timestamp(),
+        )
+        .await;
+        assert_eq!(editor_backend.calls(), 1);
+        assert_eq!(
+            editor_backend.prompts()[0].user,
+            backend.prompts_for_single(2),
+            "the same single-article prompt"
+        );
+        assert_eq!((summary.rejected, summary.recovered), (1, 1));
+        assert_eq!(summary.assessed(), 2);
+        let deep = candidates[1].assessment.deep.as_ref().expect("recovered");
+        assert_eq!(deep.model, "claude-opus-5");
+        assert_eq!(candidates[1].stage, "assessed");
+        let rejected: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM article_assessments WHERE kind = 'provider_rejected'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("count");
+        assert_eq!(rejected, 0);
+
+        let mut cached = titled(2);
+        let summary = assess_with(&db, &llm, Some(&editor), &mut cached, false, timestamp()).await;
+        assert_eq!(summary.reused, 2, "the editor's row is reusable");
+        assert_eq!(
+            cached[1]
+                .assessment
+                .deep
+                .as_ref()
+                .map(|deep| deep.model.as_str()),
+            Some("claude-opus-5")
+        );
+        assert_eq!(backend.calls(), 3);
     }
 }

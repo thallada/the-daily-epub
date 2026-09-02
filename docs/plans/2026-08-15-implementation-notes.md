@@ -211,3 +211,13 @@ implementer needs that are easy to get wrong:
   concurrency (`triage`, `assess`) is the bulk provider's `max_concurrent_requests`; the
   summaries fan out at the summary provider's. `Models { bulk, editor, summaries }` in the
   colophon and Behind the paper stay model ids taken from the built clients.
+- **Provider rejections** (2026-09-02): `curate::batch` bisects a triage or deep batch that
+  fails with a non-transient error (`Api`, `Refusal`, `EmptyResponse`, or a response that
+  parses to zero items) down to single articles; a rejected single is retried once on the
+  editor client when it is another provider. An article both refuse gets an
+  `article_assessments` row with `kind = 'provider_rejected'`, `score`/`fit` NULL,
+  `rationale = "<provider>: <message ≤ 200 chars>"`, the bulk `model` and the stage's
+  `prompt_version`; the cache loaders skip it (leaving the assessment absent) while it is within
+  `assessment_reuse_days`, `--rescore` ignores it, and `admit::hygiene` never treats it as a low
+  score. Because a recovered article's row carries the editor's model, reuse accepts rows whose
+  `model` is either configured model (`triage::reusable_models`).

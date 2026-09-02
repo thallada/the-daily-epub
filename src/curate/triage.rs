@@ -3,17 +3,20 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use futures::{StreamExt, stream};
 use jiff::Timestamp;
 use serde_json::Value;
 use sqlx::Row as _;
 
+use super::batch::{Assessed, BatchRunner, Rejection, Scored, StageSummary, run_batches};
 use super::llm::{LlmClient, strip_code_fence};
 use super::{prompt_text, truncate_words};
 use crate::db::{Db, fmt_ts, parse_ts};
 use crate::types::{ArticleId, Candidate, Triage};
 
 pub const TRIAGE_PROMPT_VERSION: i64 = 1;
+/// The `kind` of an `article_assessments` row recording that the provider
+/// refused the article; `score` (and `fit`) are NULL and `rationale` says why.
+pub const PROVIDER_REJECTED: &str = "provider_rejected";
 pub const TRIAGE_INSTRUCTIONS: &str = r#"TASK: first-pass triage of today's candidate articles for The Daily EPUB.
 
 You see only each article's opening. Decide how much THIS reader (profile in your
@@ -337,10 +340,36 @@ fn compare_signal(
         .then_with(|| left_id.cmp(&right_id))
 }
 
+impl Assessed for TriageItem {
+    fn article_id(&self) -> ArticleId {
+        self.id
+    }
+}
+
+/// The models whose cached rows a stage may reuse: the bulk model and, when
+/// an editor on another provider can recover rejected articles, its model.
+pub fn reusable_models<'a>(model: &'a str, fallback: Option<&'a LlmClient>) -> [&'a str; 2] {
+    [
+        model,
+        fallback
+            .map(|client| client.model.as_str())
+            .unwrap_or(model),
+    ]
+}
+
+/// Triage every pool article without a fresh cached assessment on the bulk
+/// client, bisecting rejected batches and retrying rejected singles on
+/// `fallback` when it is another provider (see [`super::batch`]).
+///
+/// Cached rows count as reused whether the bulk or the editor model wrote
+/// them; a fresh `provider_rejected` row skips the article and leaves its
+/// triage absent. Articles with a reusable deep row are reused as well: they
+/// need no triage to be admitted.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     db: &Db,
     llm: &LlmClient,
+    fallback: Option<&LlmClient>,
     candidates: &mut [Candidate],
     pool: &HashSet<ArticleId>,
     batch_size: usize,
@@ -350,36 +379,46 @@ pub async fn run(
     profile_version: Option<i64>,
     assessed_at: Timestamp,
     temperature: f32,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<StageSummary> {
+    let positions = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.article.id, index))
+        .collect::<HashMap<_, _>>();
     let mut reusable_deep = HashSet::new();
+    let mut known_rejected = HashSet::new();
     if !rescore {
         let since = assessed_at - jiff::Span::new().hours(assessment_reuse_days.max(0) * 24);
+        let models = reusable_models(&llm.model, fallback);
         let rows = sqlx::query(
-            "SELECT article_id, stage, score, kind, rationale, assessed_at
+            "SELECT article_id, stage, model, score, kind, rationale, assessed_at
              FROM article_assessments
-             WHERE model = ? AND assessed_at >= ?
+             WHERE model IN (?, ?) AND assessed_at >= ?
                AND ((stage = 'triage' AND prompt_version = ?)
                  OR (stage = 'deep' AND prompt_version = ?))",
         )
-        .bind(&llm.model)
+        .bind(models[0])
+        .bind(models[1])
         .bind(fmt_ts(since))
         .bind(TRIAGE_PROMPT_VERSION)
         .bind(super::assess::DEEP_PROMPT_VERSION)
         .fetch_all(db.pool())
         .await?;
-        let pool_ids = pool;
-        let positions = candidates
-            .iter()
-            .enumerate()
-            .map(|(index, candidate)| (candidate.article.id, index))
-            .collect::<HashMap<_, _>>();
         for row in rows {
             let id = row.get::<i64, _>("article_id");
-            if !pool_ids.contains(&id) {
+            if !pool.contains(&id) {
                 continue;
             }
+            let rejected =
+                row.get::<Option<String>, _>("kind").as_deref() == Some(PROVIDER_REJECTED);
             if row.get::<String, _>("stage") == "deep" {
-                reusable_deep.insert(id);
+                if !rejected {
+                    reusable_deep.insert(id);
+                }
+                continue;
+            }
+            if rejected {
+                known_rejected.insert(id);
                 continue;
             }
             let Some(score) = row.get::<Option<f64>, _>("score") else {
@@ -398,7 +437,7 @@ pub async fn run(
                     why: row
                         .get::<Option<String>, _>("rationale")
                         .unwrap_or_default(),
-                    model: llm.model.clone(),
+                    model: row.get::<String, _>("model"),
                     prompt_version: TRIAGE_PROMPT_VERSION,
                     assessed_at: timestamp,
                 });
@@ -406,52 +445,51 @@ pub async fn run(
         }
     }
 
-    let pending = candidates
+    let in_pool = candidates
         .iter()
         .filter(|candidate| {
-            pool.contains(&candidate.article.id)
-                && candidate.excluded_reason.is_none()
-                && candidate.assessment.triage.is_none()
-                && !reusable_deep.contains(&candidate.article.id)
+            pool.contains(&candidate.article.id) && candidate.excluded_reason.is_none()
         })
         .collect::<Vec<_>>();
-    let prompts = pending
-        .chunks(batch_size.max(1))
-        .map(|batch| {
-            let allowed = batch
-                .iter()
-                .map(|candidate| candidate.article.id)
-                .collect::<HashSet<_>>();
-            (allowed, build_batch_prompt(batch))
-        })
-        .collect::<Vec<_>>();
-    let results = stream::iter(prompts)
-        .map(|(allowed, prompt)| async move {
-            if let Err(error) = llm.meter.check_budget() {
-                tracing::warn!(%error, "bulk budget tripped; skipping triage batch");
-                return Vec::new();
-            }
-            match llm.complete(&prompt, temperature, true).await {
-                Ok(raw) => parse_triage_response(&raw)
-                    .into_iter()
-                    .filter(|item| allowed.contains(&item.id))
-                    .collect(),
-                Err(error) => {
-                    tracing::warn!(%error, "triage batch failed; its articles remain untriaged");
-                    Vec::new()
-                }
-            }
-        })
-        .buffer_unordered(max_concurrent_requests.max(1))
-        .collect::<Vec<Vec<TriageItem>>>()
-        .await;
-    let positions = candidates
+    let pending = in_pool
         .iter()
-        .enumerate()
-        .map(|(index, candidate)| (candidate.article.id, index))
-        .collect::<HashMap<_, _>>();
-    let mut applied = 0;
-    for item in results.into_iter().flatten() {
+        .copied()
+        .filter(|candidate| {
+            candidate.assessment.triage.is_none()
+                && !reusable_deep.contains(&candidate.article.id)
+                && !known_rejected.contains(&candidate.article.id)
+        })
+        .collect::<Vec<_>>();
+    let known_rejected = in_pool
+        .iter()
+        .filter(|candidate| known_rejected.contains(&candidate.article.id))
+        .count();
+    let mut summary = StageSummary {
+        stage: "triage",
+        pool: in_pool.len(),
+        reused: in_pool.len() - pending.len() - known_rejected,
+        known_rejected,
+        requested: pending.len(),
+        ..StageSummary::default()
+    };
+    let batches = pending
+        .chunks(batch_size.max(1))
+        .map(<[&Candidate]>::to_vec)
+        .collect::<Vec<_>>();
+    summary.batches = batches.len();
+    let runner = BatchRunner {
+        llm,
+        fallback,
+        temperature,
+        build_prompt: &build_batch_prompt,
+        parse: &parse_triage_response,
+    };
+    summary.fallback_provider = runner.fallback_provider();
+    let outcome = run_batches(&runner, batches, max_concurrent_requests).await;
+    summary.rejected = outcome.rejected;
+    summary.recovered = outcome.recovered;
+
+    for Scored { item, model } in outcome.items {
         let Some(index) = positions.get(&item.id).copied() else {
             continue;
         };
@@ -459,7 +497,7 @@ pub async fn run(
             interest: item.interest,
             kind: item.kind,
             why: item.why,
-            model: llm.model.clone(),
+            model,
             prompt_version: TRIAGE_PROMPT_VERSION,
             assessed_at,
         };
@@ -486,7 +524,19 @@ pub async fn run(
         .execute(db.pool())
         .await?;
         candidates[index].assessment.triage = Some(triage);
-        applied += 1;
+        summary.applied += 1;
+    }
+    for rejection in &outcome.rejections {
+        write_rejection(
+            db,
+            "triage",
+            rejection,
+            &llm.model,
+            TRIAGE_PROMPT_VERSION,
+            profile_version,
+            assessed_at,
+        )
+        .await?;
     }
     for candidate in candidates
         .iter_mut()
@@ -494,18 +544,293 @@ pub async fn run(
     {
         candidate.stage = "triaged".into();
     }
-    Ok(applied)
+    tracing::info!("{}", summary.info_line());
+    Ok(summary)
+}
+
+/// Persist a `provider_rejected` row so the article is not sent again while
+/// the row is fresh (`score` and `fit` NULL; the rationale names the provider).
+pub async fn write_rejection(
+    db: &Db,
+    stage: &str,
+    rejection: &Rejection,
+    model: &str,
+    prompt_version: i64,
+    profile_version: Option<i64>,
+    assessed_at: Timestamp,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO article_assessments
+             (article_id, stage, model, prompt_version, profile_version, score, fit, kind,
+              facets_json, rationale, category, paywalled_guess, assessed_at)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, NULL, 0, ?)
+         ON CONFLICT(article_id, stage) DO UPDATE SET
+             model = excluded.model, prompt_version = excluded.prompt_version,
+             profile_version = excluded.profile_version, score = NULL, fit = NULL,
+             kind = excluded.kind, facets_json = NULL, rationale = excluded.rationale,
+             category = NULL, paywalled_guess = 0, assessed_at = excluded.assessed_at",
+    )
+    .bind(rejection.id)
+    .bind(stage)
+    .bind(model)
+    .bind(prompt_version)
+    .bind(profile_version)
+    .bind(PROVIDER_REJECTED)
+    .bind(rejection.rationale())
+    .bind(fmt_ts(assessed_at))
+    .execute(db.pool())
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ProviderConfig;
-    use crate::curate::llm::{MockBackend, PriceTable, UsageMeter};
+    use crate::curate::batch::tests::{FilterBackend, answer_for};
+    use crate::curate::llm::{ChatBackend, MockBackend, PriceTable, UsageMeter};
     use crate::curate::prefilter::tests::article;
     use crate::curate::signals::{Neighbour, TopInterest};
     use crate::types::TokenUsage;
     use std::sync::Arc;
+
+    fn client(provider: &str, model: &str, backend: Arc<dyn ChatBackend>) -> LlmClient {
+        LlmClient::with_backend_options(
+            provider,
+            model,
+            "SYSTEM".into(),
+            None,
+            UsageMeter::with_prices(PriceTable::from(&ProviderConfig::deepseek()), 10.0),
+            backend,
+        )
+    }
+
+    fn at() -> Timestamp {
+        "2026-09-02T05:30:00Z".parse().expect("timestamp")
+    }
+
+    async fn db_with_articles(ids: &[i64]) -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_and_migrate(&dir.path().join("triage.db"))
+            .await
+            .expect("db");
+        for id in ids {
+            sqlx::query(
+                "INSERT INTO articles (id, canonical_url, title, first_seen)
+                 VALUES (?, ?, 'A', '2026-09-02T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(format!("https://example.com/{id}"))
+            .execute(db.pool())
+            .await
+            .expect("article");
+        }
+        (dir, db)
+    }
+
+    fn pool_of(n: i64) -> (Vec<Candidate>, HashSet<ArticleId>) {
+        let candidates = (1..=n)
+            .map(|id| Candidate::new(article(id, &format!("Piece {id}"), 800), false))
+            .collect::<Vec<_>>();
+        (candidates, (1..=n).collect())
+    }
+
+    /// `run` with the defaults these tests share: batches of 4, a 3-day cache.
+    async fn triage(
+        db: &Db,
+        llm: &LlmClient,
+        fallback: Option<&LlmClient>,
+        candidates: &mut [Candidate],
+        pool: &HashSet<ArticleId>,
+        rescore: bool,
+        assessed_at: Timestamp,
+    ) -> StageSummary {
+        run(
+            db,
+            llm,
+            fallback,
+            candidates,
+            pool,
+            4,
+            4,
+            3,
+            rescore,
+            Some(1),
+            assessed_at,
+            0.3,
+        )
+        .await
+        .expect("triage never aborts the run")
+    }
+
+    async fn rejection_rows(db: &Db) -> Vec<(i64, String, String)> {
+        sqlx::query(
+            "SELECT article_id, model, rationale FROM article_assessments
+             WHERE stage = 'triage' AND kind = 'provider_rejected' AND score IS NULL
+             ORDER BY article_id",
+        )
+        .fetch_all(db.pool())
+        .await
+        .expect("rows")
+        .iter()
+        .map(|row| {
+            (
+                row.get::<i64, _>("article_id"),
+                row.get::<String, _>("model"),
+                row.get::<Option<String>, _>("rationale")
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn rejections_are_persisted_honoured_and_expire() {
+        let (_dir, db) = db_with_articles(&[1, 2, 3, 4]).await;
+        let backend = FilterBackend::new(&["Piece 3"], &[]);
+        let llm = client("deepseek", "deepseek-v4-flash", backend.clone());
+        let (mut candidates, pool) = pool_of(4);
+        let summary = triage(&db, &llm, None, &mut candidates, &pool, false, at()).await;
+        assert_eq!(backend.calls(), 5, "1 + 2 + 2 for one bad article in four");
+        assert_eq!(
+            (summary.pool, summary.requested, summary.batches),
+            (4, 4, 1)
+        );
+        assert_eq!((summary.rejected, summary.recovered), (1, 0));
+        assert_eq!(summary.applied, 3);
+        assert_eq!(summary.rejected_total(), 1);
+        assert_eq!(
+            summary.info_line(),
+            "triage: 4 in pool · 0 reused · 4 requested in 1 batches · 1 rejected"
+        );
+        assert!(candidates[2].assessment.triage.is_none());
+        assert_ne!(candidates[2].stage, "triaged");
+        assert!(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.article.id != 3)
+                .all(|candidate| candidate.assessment.triage.is_some())
+        );
+        let rows = rejection_rows(&db).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].0, rows[0].1.as_str()), (3, "deepseek-v4-flash"));
+        assert!(
+            rows[0].2.starts_with("deepseek: 400 Bad Request"),
+            "{}",
+            rows[0].2
+        );
+
+        // Next run inside the window: nothing is asked for 3, and 1, 2, 4 are reused.
+        let (mut cached, _) = pool_of(4);
+        let summary = triage(&db, &llm, None, &mut cached, &pool, false, at()).await;
+        assert_eq!(backend.calls(), 5, "no request at all");
+        assert_eq!((summary.reused, summary.known_rejected), (3, 1));
+        assert_eq!(summary.requested, 0);
+        assert_eq!(summary.rejected_total(), 1);
+        assert!(cached[2].assessment.triage.is_none());
+        assert!(
+            summary
+                .info_line()
+                .ends_with("0 rejected · 1 known rejected")
+        );
+
+        // `--rescore` ignores rejection rows like any other cached row.
+        let (mut rescored, _) = pool_of(4);
+        let summary = triage(&db, &llm, None, &mut rescored, &pool, true, at()).await;
+        assert_eq!(summary.requested, 4);
+        assert_eq!(summary.known_rejected, 0);
+        assert_eq!(backend.calls(), 10);
+        assert_eq!(rejection_rows(&db).await.len(), 1);
+
+        // An expired rejection row is retried.
+        sqlx::query(
+            "UPDATE article_assessments SET assessed_at = '2026-08-01T00:00:00Z'
+             WHERE article_id = 3",
+        )
+        .execute(db.pool())
+        .await
+        .expect("age the row");
+        let (mut expired, _) = pool_of(4);
+        let summary = triage(&db, &llm, None, &mut expired, &pool, false, at()).await;
+        assert_eq!(summary.requested, 1, "only the expired rejection");
+        assert_eq!(backend.calls(), 11);
+        assert_eq!(backend.requests()[10], vec![3]);
+        assert_eq!(rejection_rows(&db).await.len(), 1, "rejected again");
+    }
+
+    #[tokio::test]
+    async fn fallback_assessments_carry_the_editor_model_and_are_reused() {
+        let (_dir, db) = db_with_articles(&[1, 2]).await;
+        let backend = FilterBackend::new(&["Piece 2"], &[]);
+        let llm = client("deepseek", "deepseek-v4-flash", backend.clone());
+        let editor_backend = Arc::new(MockBackend::new());
+        editor_backend.push(answer_for(&[2]), TokenUsage::default());
+        let editor = client("gemini", "gemini-3.8-flash", editor_backend.clone());
+        let (mut candidates, pool) = pool_of(2);
+        let summary = triage(
+            &db,
+            &llm,
+            Some(&editor),
+            &mut candidates,
+            &pool,
+            false,
+            at(),
+        )
+        .await;
+        assert_eq!(editor_backend.calls(), 1);
+        assert_eq!((summary.rejected, summary.recovered), (1, 1));
+        assert_eq!(summary.rejected_total(), 0);
+        assert_eq!(
+            summary.info_line(),
+            "triage: 2 in pool · 0 reused · 2 requested in 1 batches · 1 rejected (1 recovered on gemini)"
+        );
+        let recovered = candidates[1].assessment.triage.as_ref().expect("recovered");
+        assert_eq!(recovered.model, "gemini-3.8-flash");
+        assert_eq!(candidates[1].stage, "triaged");
+        assert!(rejection_rows(&db).await.is_empty(), "no rejection row");
+        let stored: String = sqlx::query_scalar(
+            "SELECT model FROM article_assessments WHERE article_id = 2 AND stage = 'triage'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("row");
+        assert_eq!(stored, "gemini-3.8-flash");
+
+        // The editor's row is reusable while the editor is configured…
+        let (mut cached, _) = pool_of(2);
+        let summary = triage(&db, &llm, Some(&editor), &mut cached, &pool, false, at()).await;
+        assert_eq!(summary.reused, 2);
+        assert_eq!(backend.calls(), 3);
+        assert_eq!(
+            cached[1]
+                .assessment
+                .triage
+                .as_ref()
+                .map(|triage| triage.model.as_str()),
+            Some("gemini-3.8-flash")
+        );
+
+        // …and not otherwise: without an editor only bulk-model rows count.
+        let (mut alone, _) = pool_of(2);
+        let summary = triage(&db, &llm, None, &mut alone, &pool, false, at()).await;
+        assert_eq!((summary.reused, summary.requested), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn an_editor_on_the_bulk_provider_is_not_a_fallback() {
+        let (_dir, db) = db_with_articles(&[1, 2]).await;
+        let backend = FilterBackend::new(&["Piece 2"], &[]);
+        let llm = client("deepseek", "deepseek-v4-flash", backend.clone());
+        let same_backend = Arc::new(MockBackend::new());
+        same_backend.push(answer_for(&[2]), TokenUsage::default());
+        let same = client("deepseek", "deepseek-v4-flash", same_backend.clone());
+        let (mut candidates, pool) = pool_of(2);
+        let summary = triage(&db, &llm, Some(&same), &mut candidates, &pool, false, at()).await;
+        assert_eq!(same_backend.calls(), 0);
+        assert_eq!(summary.fallback_provider, None);
+        assert_eq!((summary.rejected, summary.recovered), (1, 0));
+        assert_eq!(rejection_rows(&db).await.len(), 1);
+    }
 
     const TRIAGE_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -597,6 +922,7 @@ mod tests {
         run(
             &db,
             &llm,
+            None,
             &mut first,
             &pool,
             25,
@@ -615,6 +941,7 @@ mod tests {
         run(
             &db,
             &llm,
+            None,
             &mut cached,
             &pool,
             25,
@@ -645,6 +972,7 @@ mod tests {
         run(
             &db,
             &llm,
+            None,
             &mut rescored,
             &pool,
             25,
