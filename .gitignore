@@ -3,3 +3,5 @@ target/
 *.sqlite
 out/
 .env
+dev/
+node_modules/
