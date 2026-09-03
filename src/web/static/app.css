@@ -73,7 +73,6 @@ pre.preview { white-space:pre-wrap; overflow-wrap:anywhere; font:.85rem/1.4 ui-m
 .versions pre.preview { max-height:6rem; border:0; padding:0; }
 .versions form { margin:0; }
 @media (max-width:60rem) { .profile-grid { display:block; } }
-||||||| 849231e
 /* step 3: dashboard reads (overview, runs, articles) */
 .dashboard h1 { font-size:1.5rem; margin:.5rem 0; }
 .dashboard h1 a { color:inherit; }
@@ -125,3 +124,16 @@ details.explain { margin:1rem 0; }
 .settings .add-provider { max-width:36rem; }
 .history pre { margin:0; white-space:pre-wrap; font-size:.8rem; }
 @media (max-width:40rem) { .setting { display:block; } }
+||||||| d36f203
+/* step 6: jobs and stats */
+.sparklines { display:grid; grid-template-columns:repeat(auto-fit,minmax(16rem,1fr)); gap:1rem 1.5rem; margin:1rem 0; }
+.spark-figure { margin:0; min-width:0; } .spark-figure figcaption { font-size:.9rem; margin-bottom:.2rem; }
+.spark { display:block; width:100%; max-width:26rem; height:auto; border-bottom:1px solid var(--rule); }
+.spark .s0 { fill:var(--good); } .spark .s1 { fill:var(--loved); } .spark .s2 { fill:var(--down); } .spark .s3 { fill:var(--accent); } .spark .s4 { fill:var(--muted); } .spark .s5 { fill:var(--fg); }
+.spark .line { stroke:var(--accent); }
+.spark-axis { display:flex; justify-content:space-between; max-width:26rem; font-size:.75rem; }
+.spark-legend { list-style:none; padding:0; margin:.3rem 0 0; display:flex; flex-wrap:wrap; gap:.2rem .8rem; font-size:.8rem; }
+.spark-legend svg { vertical-align:middle; }
+.job-cards form.inline { margin:.4rem 0 0; } .job-cards label { display:inline-grid; }
+td.message,dd.message { overflow-wrap:anywhere; max-width:32rem; }
+pre.journal { max-height:40rem; }

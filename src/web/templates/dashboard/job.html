@@ -1,0 +1,32 @@
+{% extends "layout.html" %}{% block content %}<section class="dashboard"{% if refresh %} data-refresh="5"{% endif %}>
+<h1><a href="/dashboard/jobs">Jobs</a> › Job {{ job.id }} · {{ job.name }} <span class="badge {{ job.status }}">{{ job.status }}</span></h1>
+{% if !description.is_empty() %}<p class="muted">{{ description }}</p>{% endif %}
+<div class="cards">
+<section class="card"><h2>Job</h2>
+<dl class="kv">
+<dt>Unit</dt><dd><code>{{ unit }}</code></dd>
+<dt>Requested</dt><dd>{{ job.requested }} · {{ job.requested_by }}</dd>
+<dt>Started</dt><dd>{{ job.started }}</dd>
+<dt>Finished</dt><dd>{{ job.finished }} · {{ job.duration }}</dd>
+<dt>Status</dt><dd><span class="badge {{ job.status }}">{{ job.status }}</span></dd>
+{% if let Some(message) = job.message %}<dt>Message</dt><dd class="message">{{ message }}</dd>{% endif %}
+{% if let Some(run_id) = job.run_id %}<dt>Run</dt><dd><a href="/dashboard/runs/{{ run_id }}">Run {{ run_id }}</a></dd>{% endif %}
+</dl>
+{% if refresh %}<p class="muted">This page reloads every 5 seconds while the job is requested or running.</p>{% endif %}
+</section>
+<section class="card"><h2>Unit</h2>
+{% if let Some(status) = status %}<dl class="kv">
+<dt>Active</dt><dd>{{ status.active_state }}{% if !status.sub_state.is_empty() %} ({{ status.sub_state }}){% endif %}</dd>
+<dt>Result</dt><dd>{{ status.result }}{% if let Some(code) = status.exit_status %} · exit status {{ code }}{% endif %}</dd>
+{% if let Some(started) = status.started %}<dt>Main started</dt><dd>{{ started }}</dd>{% endif %}
+{% if let Some(exited) = status.exited %}<dt>Main exited</dt><dd>{{ exited }}</dd>{% endif %}
+</dl>{% endif %}
+{% if let Some(error) = status_error %}<p class="error">Unit status unavailable: {{ error }}</p>{% endif %}
+<p class="muted">From <code>systemctl show {{ unit }}</code>.</p>
+</section>
+</div>
+<h2>Log</h2>
+{% if let Some(error) = log_error %}<p class="error">Journal unavailable: {{ error }}</p>{% endif %}
+<p class="muted">Last {{ log_lines }} lines of <code>journalctl -u {{ unit }}</code>.</p>
+<pre class="preview journal">{{ log }}</pre>
+</section>{% endblock %}

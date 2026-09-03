@@ -32,7 +32,8 @@
 <p><a href="/dashboard/settings">Settings</a></p>
 </section>{% endif %}
 </div>
-<!-- step 6: sparklines (cost per run, selected per run, generation seconds; last 30 non-dry runs) -->
+<h2>Last 30 runs</h2>
+<div class="sparklines">{% for item in sparklines %}{% let spark = item %}{% include "dashboard/_sparkline.html" %}{% endfor %}</div>
 <h2>Unrated picks</h2>
 {% if unrated.is_empty() %}<p class="muted">Every pick from the last three issues has a verdict.</p>{% else %}<p class="muted">Picks from the last three issues without a verdict yet.</p>
 <ul class="picks">{% for pick in unrated %}<li><a href="{{ pick.issue_href }}">{{ pick.title }}</a> <span class="muted">· {{ pick.feed }} · {{ pick.issue_date }}</span>

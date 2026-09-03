@@ -1,0 +1,69 @@
+# The Daily EPUB — one operator job (dashboard plan §14): an instance of this
+# template runs `daily-epub job run <name>` for a catalogue name such as
+# `generate`, `generate-2026-09-03`, `dry-run`, `profile-rebuild`,
+# `features-backfill`, `backfill-social` or `features-prune`. The Jobs page
+# starts instances through systemd + polkit (systemd/50-daily-epub.rules); by
+# hand: `sudo systemctl start daily-epub-job@features-prune`.
+#
+# Install: sudo install -m0644 systemd/daily-epub-job@.service /etc/systemd/system/
+#          (same binary, config and env file as daily-epub.service).
+# Logs: journalctl -u daily-epub-job@<name> -f
+
+[Unit]
+Description=The Daily EPUB job %i
+Documentation=https://github.com/thallada/the-daily-epub
+After=network-online.target miniflux.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=daily-epub
+Group=daily-epub
+ExecStart=/usr/local/bin/daily-epub --config /etc/daily-epub/config.toml job run %i
+EnvironmentFile=-/etc/daily-epub/env
+Environment=RUST_LOG=info,sqlx=warn,hyper=warn
+# Same ceiling as the timer-driven generate unit: a generate job is the same
+# network-bound run, and nothing else in the catalogue takes longer.
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=idle
+
+# --- state + writable paths ---------------------------------------------
+StateDirectory=daily-epub
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/daily-epub
+# The publish dirs from [publish] in config.toml — keep these in sync.
+# Every path listed here must exist at start, or the unit fails with 226/NAMESPACE.
+ReadWritePaths=/home/thallada/bookorbit/books/daily-epub /var/lib/daily-epub/xtc
+
+# --- hardening (spec §3.15) ---------------------------------------------
+ProtectSystem=strict
+# read-only (not yes): the BookOrbit publish dir lives under /home, and
+# ProtectHome=yes would mask it even with the ReadWritePaths entry above.
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+# No MemoryDenyWriteExecute here: this unit spawns Node (epub-to-xtc-converter),
+# whose JIT needs W+X pages (§3.11).
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0027
+
+# Template instances are normally started on demand by the dashboard.
+
+[Install]
+WantedBy=multi-user.target

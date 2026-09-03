@@ -23,6 +23,8 @@ Wants=network-online.target
 Type=exec
 User=daily-epub
 Group=daily-epub
+# The Jobs page reads `journalctl -u daily-epub-job@<name>` (dashboard plan §14.3).
+SupplementaryGroups=systemd-journal
 ExecStart=/usr/local/bin/daily-epub --config /etc/daily-epub/config.toml serve
 EnvironmentFile=-/etc/daily-epub/env
 Environment=RUST_LOG=info,sqlx=warn,hyper=warn

@@ -1,0 +1,28 @@
+{% extends "layout.html" %}{% block content %}<section class="dashboard">
+<h1>Jobs</h1>
+{% if jobs_enabled %}<p class="muted">Each job starts <code>daily-epub-job@&lt;name&gt;.service</code> through systemd; the unit runs <code>daily-epub job run &lt;name&gt;</code> and records itself here. Jobs that take the run lock wait for nothing: a second <code>generate</code> while one is running fails immediately.</p>{% else %}<p class="notice">Jobs are disabled on this server (<code>server.jobs_enabled = false</code>); run the commands by hand instead.</p>{% endif %}
+<div class="cards job-cards">{% for card in cards %}<section class="card">
+<h2>{{ card.name }}</h2>
+<p>{{ card.description }}</p>
+{% if let Some(lock) = card.lock %}<p class="muted">Takes the <code>{{ lock }}</code> lock.</p>{% endif %}
+<form method="post" action="/dashboard/jobs/{{ card.name }}" class="inline"{% if card.dangerous %} data-confirm="Start {{ card.name }}? This republishes the issue of that date."{% endif %}>
+{% if card.dated %}<label>Date <input type="date" name="date" value="{{ today }}"></label>{% endif %}
+<button type="submit"{% if !jobs_enabled %} disabled{% endif %}>Start</button>
+</form>
+</section>{% endfor %}</div>
+<h2>History</h2>
+{% if jobs.is_empty() %}<p class="muted">No jobs recorded yet.</p>{% else %}<div class="scroll-x"><table data-filter>
+<thead><tr><th>job</th><th>name</th><th>requested by</th><th>requested</th><th>started</th><th>finished</th><th class="num">duration</th><th>status</th><th>message</th><th>run</th></tr></thead>
+<tbody>{% for job in jobs %}<tr>
+<td><a href="/dashboard/jobs/{{ job.id }}">{{ job.id }}</a></td>
+<td>{{ job.name }}</td>
+<td>{{ job.requested_by }}</td>
+<td>{{ job.requested }}</td>
+<td>{{ job.started }}</td>
+<td>{{ job.finished }}</td>
+<td class="num">{{ job.duration }}</td>
+<td><span class="badge {{ job.status }}">{{ job.status }}</span></td>
+<td class="message">{% if let Some(message) = job.message %}{{ message }}{% endif %}</td>
+<td>{% if let Some(run_id) = job.run_id %}<a href="/dashboard/runs/{{ run_id }}">{{ run_id }}</a>{% endif %}</td>
+</tr>{% endfor %}</tbody></table></div>{% endif %}
+</section>{% endblock %}
