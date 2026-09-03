@@ -9,7 +9,9 @@ already be complete.
 The deployed binary does not require Node. For UI development, edit
 `src/web/tailwind.css`, the templates, or `src/web/static/app.js`, then run
 `npm run css` and commit the regenerated `src/web/static/app.css` alongside the
-source. CI and release preparation should run `npm run css:check` to detect
+source. The `/static/*.css|js` URLs carry a hash of the embedded assets
+(`web::ASSET_VERSION`), so a new build busts browser caches on its own — no
+hard refresh and no version bump needed. CI and release preparation should run `npm run css:check` to detect
 stylesheet drift.
 
 ```sh

@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ page.title }} · The Daily EPUB</title>
-  <script src="/static/theme.js?v={{ page.version }}"></script>
+  <script src="/static/theme.js?v={{ page.asset_version }}"></script>
   <link rel="preload" href="/static/Newsreader.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="/static/app.css?v={{ page.version }}">
+  <link rel="stylesheet" href="/static/app.css?v={{ page.asset_version }}">
   <link rel="alternate" type="application/atom+xml" title="The Daily EPUB" href="/feed.xml">
   <link rel="icon" href="/static/favicon.svg">
 </head>
@@ -47,6 +47,6 @@
   {% match page.flash %}{% when Some with (flash) %}<div class="mx-auto max-w-7xl px-4 sm:px-6"><div class="flash {{ flash.kind }}" role="status">{{ flash.text }}</div></div>{% when None %}{% endmatch %}
   <main id="content" class="min-h-[68vh]">{% block content %}{% endblock %}</main>
   <footer class="mx-auto mt-16 flex max-w-7xl flex-wrap justify-between gap-2 border-t border-rule px-4 py-6 font-sans text-[0.72rem] uppercase tracking-[0.1em] text-muted sm:px-6"><span>The Daily EPUB</span><span>daily-epub {{ page.version }}</span></footer>
-  <script src="/static/app.js?v={{ page.version }}"></script>
+  <script src="/static/app.js?v={{ page.asset_version }}"></script>
 </body>
 </html>

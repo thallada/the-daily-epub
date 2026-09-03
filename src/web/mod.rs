@@ -6,7 +6,7 @@ pub mod session;
 pub mod users;
 
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::SystemTime;
 
 use askama::Template;
@@ -204,7 +204,20 @@ pub struct Page {
     pub flash: Option<Flash>,
     pub active_nav: String,
     pub version: &'static str,
+    /// Cache-busting token for `/static/*.css|js` URLs: a content hash, so
+    /// any stylesheet or script change reaches browsers that cached the
+    /// previous build (they are served with a one-day `max-age`).
+    pub asset_version: &'static str,
 }
+
+/// First 12 hex digits of the SHA-256 over the embedded CSS and JS assets.
+pub static ASSET_VERSION: LazyLock<String> = LazyLock::new(|| {
+    let mut hasher = Sha256::new();
+    hasher.update(include_str!("static/app.css"));
+    hasher.update(include_str!("static/app.js"));
+    hasher.update(include_str!("static/theme.js"));
+    hex::encode(hasher.finalize())[..12].to_string()
+});
 
 impl Page {
     pub fn new(title: impl Into<String>, viewer: Option<Viewer>, active_nav: &str) -> Self {
@@ -214,6 +227,7 @@ impl Page {
             flash: None,
             active_nav: active_nav.to_string(),
             version: crate::VERSION,
+            asset_version: ASSET_VERSION.as_str(),
         }
     }
 
@@ -993,6 +1007,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn asset_urls_carry_a_content_hash_not_the_crate_version() {
+        let page = Page::new("t", None, "latest");
+        assert_eq!(page.asset_version.len(), 12);
+        assert!(page.asset_version.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(page.asset_version, crate::VERSION);
+        let html = ErrorTemplate {
+            page,
+            heading: "h".into(),
+            message: "m".into(),
+        }
+        .render()
+        .unwrap();
+        let expected = format!("/static/app.css?v={}", ASSET_VERSION.as_str());
+        assert!(html.contains(&expected), "{html}");
+        assert!(!html.contains(&format!("/static/app.css?v={}", crate::VERSION)));
     }
 
     #[tokio::test]
