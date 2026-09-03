@@ -1,3 +1,4 @@
+pub mod dashboard;
 pub mod issue;
 pub mod public;
 pub mod rate;
@@ -367,7 +368,7 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
         ))
         .route_layer(from_fn(map_forbidden));
     let dashboard = axum::Router::new()
-        .route("/dashboard", get(dashboard_stub))
+        .merge(dashboard::router())
         .route("/rate", post(rate::post))
         .route_layer(permission_required!(
             session::Backend,
@@ -388,20 +389,6 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
         .merge(account)
         .merge(full_issues)
         .merge(dashboard)
-}
-
-#[derive(Template)]
-#[template(path = "dashboard/overview.html")]
-struct OverviewTemplate {
-    page: Page,
-}
-
-async fn dashboard_stub(auth: session::AuthSession) -> Result<Response, WebError> {
-    let viewer = auth.user().await.map(session::Viewer::from);
-    Ok(Html(OverviewTemplate {
-        page: Page::new("Overview", viewer, "dashboard"),
-    })
-    .into_response())
 }
 
 async fn map_forbidden(request: Request, next: Next) -> Response {

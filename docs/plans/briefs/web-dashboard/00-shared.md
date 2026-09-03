@@ -41,3 +41,26 @@ tests, rustfmt defaults, no `unwrap()` outside tests, tracing spans).
 - When you finish, write a short handoff at
   `docs/plans/briefs/web-dashboard/handoff-step<N>.md`: what landed, deviations
   from the plan and why, anything left for the next step, test counts.
+
+## Parallel steps (added after step 2)
+
+From step 3 on, steps may run **in parallel in separate git worktrees**, so
+file ownership matters:
+
+- `src/web/dashboard/mod.rs` already declares one submodule per page group
+  (`runs`, `articles`, `ratings`, `profile`, `settings`, `jobs`, `stats`,
+  `users`), each exposing `routes() -> Router<AppState>` that the dashboard
+  router merges under the admin layer. Put your routes in **your** submodule's
+  `routes()`; do not touch `web::router` in `src/web/mod.rs` for dashboard
+  routes. Only step 3 edits the `overview` handler in `dashboard/mod.rs`.
+- You own: your `src/web/dashboard/<group>.rs` files, your templates under
+  `src/web/templates/dashboard/`, partials you introduce, your tests.
+- Shared files you may touch **additively only** (no reformatting, reordering
+  or renaming of existing code): `src/web/mod.rs` (helpers), `src/db.rs` (new
+  query helpers appended inside `impl Db`), `src/main.rs`, `src/lib.rs`,
+  `Cargo.toml`, `src/web/static/app.css` and `app.js` (append a block at the
+  end under a `/* step N: … */` comment), `src/web/templates/layout.html`.
+  Keep such edits small so merges stay trivial.
+- If your worktree is on its own branch, finish by committing **one** commit
+  on that branch (message `Web dashboard step N: …`); the orchestrator merges.
+  If you are on `web-dashboard` itself, do not commit.
