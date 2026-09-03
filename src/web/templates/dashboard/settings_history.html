@@ -1,0 +1,18 @@
+{% extends "layout.html" %}{% block content %}<section class="dashboard">
+<h1>Settings history</h1>
+<p class="meta"><a href="/dashboard/settings">Settings</a> · every change made through the dashboard, newest first.</p>
+{% if changes.is_empty() %}<p>No settings have been changed through the dashboard yet.</p>{% else %}<div class="scroll-x"><table class="history">
+<thead><tr><th>When</th><th>Who</th><th>Key</th><th>Before</th><th>After</th></tr></thead>
+<tbody>{% for change in changes %}<tr>
+<td>{{ change.changed_at }}</td>
+<td>{% match change.username %}{% when Some with (name) %}{{ name }}{% when None %}<em>removed user</em>{% endmatch %}</td>
+<td><code>{{ change.key }}</code></td>
+<td>{% match change.old_value %}{% when Some with (value) %}<pre>{{ value }}</pre>{% when None %}<em>absent</em>{% endmatch %}</td>
+<td>{% match change.new_value %}{% when Some with (value) %}<pre>{{ value }}</pre>{% when None %}<em>removed</em>{% endmatch %}</td>
+</tr>{% endfor %}</tbody>
+</table></div>
+{% include "_pagination.html" %}
+{% if pagination.page < pagination.pages() %}<p><a href="/dashboard/settings/history?page={{ pagination.page + 1 }}">Older</a></p>{% endif %}
+{% if pagination.page > 1 %}<p><a href="/dashboard/settings/history?page={{ pagination.page - 1 }}">Newer</a></p>{% endif %}
+{% endif %}
+</section>{% endblock %}
