@@ -251,6 +251,19 @@
   .save-bar { @apply sticky bottom-0 z-20 -mx-4 mt-6 flex flex-wrap items-center justify-end gap-x-4 gap-y-2 border-t border-rule bg-paper px-4 py-3 sm:-mx-6 sm:px-6; box-shadow:0 -10px 18px -14px color-mix(in oklab, var(--ink) 55%, transparent); }
   .save-bar .meta { @apply mr-auto text-xs; }
 
+  /* step 4: table-of-contents sidebar */
+  .toc-progress { @apply block h-0.5 w-full appearance-none border-0 p-0 align-middle; background:var(--rule); }
+  .toc-progress::-webkit-progress-bar { background:var(--rule); }
+  .toc-progress::-webkit-progress-value { background:var(--accent); transition:width 150ms linear; }
+  .toc-progress::-moz-progress-bar { background:var(--accent); }
+  /* While JS drives the bar from scroll position it must track the finger exactly. */
+  .toc-progress[data-live]::-webkit-progress-value { transition:none; }
+  @media (prefers-reduced-motion: reduce) { .toc-progress::-webkit-progress-value { transition:none; } }
+  [data-toc-panel] { scrollbar-width:thin; scrollbar-color:var(--rule) transparent; }
+  /* Without JS the panel is simply visible under the bar; `has-js` is set in the head. */
+  @media (width < 64rem) {
+    .has-js [data-toc-panel]:not([data-open="true"]) { display:none; }
+  }
   @media (max-width:40rem) {
     .kv { @apply block; } .kv dt { @apply mt-2; }
     .rating { @apply items-stretch; } .rating-prompt, .rating-note { @apply basis-full; } .rating-prompt { @apply mb-2; }

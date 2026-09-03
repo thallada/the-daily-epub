@@ -139,6 +139,17 @@ pub fn display_date(date: Date) -> String {
     format!("{weekday}, {month} {}, {}", date.day(), date.year())
 }
 
+/// "Fri, Aug 15" — the same dateline abbreviated for narrow screens (web only).
+pub fn short_display_date(date: Date) -> String {
+    const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let weekday = WEEKDAYS[(date.weekday().to_monday_zero_offset() as usize).min(6)];
+    let month = MONTHS[(date.month() as usize).clamp(1, 12) - 1];
+    format!("{weekday}, {month} {}", date.day())
+}
+
 /// Materialize the [`Issue`] the EPUB builder consumes (§3.10).
 ///
 /// Pure: every count is derived from the lineup, so the same inputs always give
