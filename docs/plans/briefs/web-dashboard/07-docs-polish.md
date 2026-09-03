@@ -32,3 +32,17 @@ acceptance criteria), the README, `config.example.toml`,
 8. Tests: the users page under the admin guard; a smoke test that every
    template referenced by a route renders with the fixture data (extend the
    existing router tests rather than duplicating setup).
+
+## Follow-ups collected during the orchestrator's reviews of steps 1–6
+
+- Download buttons on the full issue page show raw byte counts; render them
+  human-readable (KB/MB).
+- The `/files/*` deviation: with no Basic auth configured the files stay
+  public (see handoff-step1 review notes); document that in the README's route
+  table and the rollout runbook.
+- The settings page cannot remove a shipped provider (handoff-step5); mention
+  it in the README settings section.
+- Every step left a handoff in this directory; fold their "left for later"
+  items into the acceptance walk-through and list anything still open.
+- Two Codex review documents exist under `docs/reviews/` for this plan; leave
+  them as they are.
