@@ -57,3 +57,20 @@ thead { position:sticky; top:0; background:var(--bg); }
 .rating-prompt { margin-right:.25rem; }
 .rating-note { flex-basis:100%; }
 @media (max-width:40rem) { .masthead { font-size:1.55rem; } .kv { display:block; } }
+/* step 5: settings */
+.settings .card { border:1px solid var(--rule); padding:.75rem 1rem; margin:1rem 0; }
+.settings .card h2 { margin:.2rem 0 .6rem; font-size:1.1rem; font-family:ui-monospace,monospace; }
+.settings-form { display:block; }
+.setting { display:grid; grid-template-columns:minmax(14rem,1fr) 2fr; gap:.5rem 1rem; padding:.5rem 0; border-top:1px solid var(--rule); }
+.setting .help,.setting .default,.settings .meta { color:var(--muted); font-size:.85rem; margin:.2rem 0; }
+.setting-input input,.setting-input select,.setting-input textarea { width:100%; max-width:36rem; }
+.setting-input textarea { min-height:5rem; font-family:ui-monospace,monospace; }
+.setting-input input:disabled,.setting-input textarea:disabled { opacity:.6; }
+.setting .lines { white-space:pre-line; }
+.settings .banner { padding:.6rem .8rem; border:1px solid var(--down); margin:1rem 0; }
+.settings .reset,.settings .danger { font:inherit; font-size:.85rem; border:0; background:transparent; color:var(--accent); text-decoration:underline; padding:0; cursor:pointer; }
+.settings .actions { position:sticky; bottom:0; background:var(--bg); padding:.7rem 0; border-top:1px solid var(--rule); }
+.settings form.inline { display:none; }
+.settings .add-provider { max-width:36rem; }
+.history pre { margin:0; white-space:pre-wrap; font-size:.8rem; }
+@media (max-width:40rem) { .setting { display:block; } }

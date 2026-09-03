@@ -39,3 +39,11 @@ document.querySelectorAll("details[id]").forEach((details) => {
     details.addEventListener("toggle", () => localStorage.setItem(key, details.open ? "open" : "closed"));
   } catch (_) {}
 });
+/* step 5: settings — "reset to default" fills the field with its default */
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-reset]");
+  if (!button) return;
+  const input = document.getElementById(button.dataset.reset);
+  if (!input) return;
+  input.value = button.dataset.default;
+});

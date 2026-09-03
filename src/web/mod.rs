@@ -105,6 +105,42 @@ impl fmt::Debug for WebState {
     }
 }
 
+impl WebState {
+    /// Config reload on mtime (dashboard plan §4.2): when `config_path`'s
+    /// modification time differs from the cached one, re-run `Config::load`
+    /// and swap the live config. Returns `Ok(true)` when a reload happened,
+    /// `Ok(false)` when nothing changed or no file is configured, and the
+    /// load error when the file on disk no longer loads — the previous
+    /// config stays live and the cached mtime is left alone so the next call
+    /// tries again. Called by the settings page and by job starts.
+    pub fn reload_if_changed(
+        state: &crate::server::AppState,
+    ) -> Result<bool, crate::config::ConfigError> {
+        let Some(path) = state.config_path.as_deref() else {
+            return Ok(false);
+        };
+        let mtime = std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        let mut cached = state
+            .web
+            .config_mtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *cached == mtime {
+            return Ok(false);
+        }
+        let config = crate::config::Config::load(Some(path))?;
+        match state.config.write() {
+            Ok(mut live) => *live = std::sync::Arc::new(config),
+            Err(poisoned) => *poisoned.into_inner() = std::sync::Arc::new(config),
+        }
+        *cached = mtime;
+        tracing::info!(path = %path.display(), "reloaded configuration from disk");
+        Ok(true)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Flash {
     pub kind: String,

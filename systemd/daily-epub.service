@@ -36,9 +36,10 @@ TimeoutStopSec=20s
 StateDirectory=daily-epub
 StateDirectoryMode=0750
 WorkingDirectory=/var/lib/daily-epub
-# The publish dirs from [publish] in config.toml — keep these in sync.
+# The publish dirs from [publish] in config.toml — keep these in sync — plus
+# /etc/daily-epub so the dashboard settings page can rewrite config.toml.
 # Every path listed here must exist at start, or the unit fails with 226/NAMESPACE.
-ReadWritePaths=/home/thallada/bookorbit/books/daily-epub /var/lib/daily-epub/xtc
+ReadWritePaths=/home/thallada/bookorbit/books/daily-epub /var/lib/daily-epub/xtc /etc/daily-epub
 
 # --- hardening (spec §3.15) ---------------------------------------------
 ProtectSystem=strict

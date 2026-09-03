@@ -1,0 +1,41 @@
+{% extends "layout.html" %}{% block content %}<section class="dashboard settings">
+<h1>Settings</h1>
+<p class="meta">{% match config_path %}{% when Some with (path) %}Editing <code>{{ path }}</code>. Saved settings apply to the next run; a hand edit on disk shows up on the next page view.{% when None %}No config file is configured; start the server with <code>--config</code> to edit settings here. The values below are the built-in defaults plus the environment.{% endmatch %} · <a href="/dashboard/settings/history">History</a></p>
+{% match load_error %}{% when Some with (error) %}<p class="error banner">! config.toml on disk does not load: {{ error }} — the previous configuration stays live.</p>{% when None %}{% endmatch %}
+{% if !errors.is_empty() %}<ul class="error banner">{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+<form method="post" action="/dashboard/settings" class="settings-form" id="settings-form">
+{% for group in groups %}<section class="card" id="{{ group.id }}">
+<h2>{{ group.title }}</h2>
+{% match group.provider %}{% when Some with (provider) %}<p class="meta">Key: <code>{{ crate::config::ProviderConfig::api_key_env_var(provider.name) }}</code> in the env file. {% if provider.removable() %}Not named by any <code>[llm]</code> role. <button type="submit" form="remove-{{ provider.name }}" class="danger">Remove provider</button>{% else if provider.built_in %}Built in: declared by the defaults, so it can be edited and left unreferenced but not removed.{% else %}Named by <code>llm.{{ provider.roles() }}</code>; reassign the role before removing it.{% endif %}</p>{% when None %}{% endmatch %}
+{% if group.is_weights() %}<p class="meta">Weights need not sum to 1; they are renormalized over the signals present for each article.</p>{% endif %}
+{% for field in group.fields %}<div class="setting kind-{{ field.kind_name() }}">
+<div class="setting-label"><label for="{{ field.input_id() }}"><code>{{ field.key }}</code></label>{% if field.restart_required %} <span class="badge">restart</span>{% endif %}{% match field.help %}{% when Some with (help) %}<p class="help">{{ help }}</p>{% when None %}{% endmatch %}</div>
+<div class="setting-input">
+{% if field.is_secret() %}<p class="secret">{% if field.is_set() %}set{% if field.is_env() %} (from <code>{{ field.env_var() }}</code>){% else if field.is_file() %} (in the config file — move it to the env file){% endif %}{% else %}not set — set <code>{{ field.env_var() }}</code> in the env file{% endif %}</p>
+{% else if field.is_env() %}{% if field.is_text_list() %}<textarea id="{{ field.input_id() }}" disabled>{{ field.current }}</textarea>{% else %}<input id="{{ field.input_id() }}" type="text" value="{{ field.current }}" disabled>{% endif %}<p class="help">locked by <code>{{ field.env_var() }}</code> in the env file</p>
+{% else if field.is_bool() %}<select id="{{ field.input_id() }}" name="{{ field.path }}"><option value="true"{% if field.current == "true" %} selected{% endif %}>true</option><option value="false"{% if field.current == "false" %} selected{% endif %}>false</option></select>
+{% else if field.is_enum() %}<select id="{{ field.input_id() }}" name="{{ field.path }}">{% for option in field.options() %}<option value="{{ option }}"{% if field.current == option.as_str() %} selected{% endif %}>{% if option.is_empty() %}(none){% else %}{{ option }}{% endif %}</option>{% endfor %}</select>
+{% else if field.is_text_list() %}<textarea id="{{ field.input_id() }}" name="{{ field.path }}" rows="4" spellcheck="false">{{ field.current }}</textarea>
+{% else if field.is_number() %}<input id="{{ field.input_id() }}" name="{{ field.path }}" type="number" step="{% if field.is_integer() %}1{% else %}any{% endif %}" value="{{ field.current }}">
+{% else %}<input id="{{ field.input_id() }}" name="{{ field.path }}" type="text" value="{{ field.current }}" spellcheck="false">
+{% endif %}
+{% if !field.is_secret() && !field.is_env() %}<p class="default">default: {% if field.default.is_empty() %}<em>unset</em>{% else if field.is_text_list() %}<code class="lines">{{ field.default }}</code>{% else %}<code>{{ field.default }}</code>{% endif %}{% if field.current != field.default %} <button type="button" class="reset" data-reset="{{ field.input_id() }}" data-default="{{ field.default }}">reset to default</button>{% endif %}</p>{% endif %}
+</div>
+</div>
+{% endfor %}
+</section>
+{% endfor %}
+<div class="actions">{% match config_path %}{% when Some with (_path) %}<button type="submit">Save settings</button>{% when None %}<button type="submit" disabled>Save settings</button>{% endmatch %}</div>
+</form>
+{% for group in groups %}{% match group.provider %}{% when Some with (provider) %}{% if provider.removable() %}<form method="post" action="/dashboard/settings/providers" id="remove-{{ provider.name }}" class="inline" data-confirm="Remove [providers.{{ provider.name }}] from config.toml?"><input type="hidden" name="action" value="remove"><input type="hidden" name="name" value="{{ provider.name }}"></form>{% endif %}{% when None %}{% endmatch %}{% endfor %}
+<section class="card" id="add-provider">
+<h2>Add provider</h2>
+<form method="post" action="/dashboard/settings/providers" class="add-provider">
+<input type="hidden" name="action" value="add">
+<label>Name <input name="name" type="text" pattern="[a-z0-9_]+" placeholder="mistral" required{% if config_path.is_none() %} disabled{% endif %}></label>
+<label>Kind <select name="kind">{% for kind in provider_kinds %}<option value="{{ kind }}">{{ kind }}</option>{% endfor %}</select></label>
+<p class="help">Inserts <code>[providers.&lt;name&gt;]</code> with placeholder <code>base_url</code> and <code>model</code>; edit them above afterwards and put <code>DAILY_EPUB_PROVIDERS__&lt;NAME&gt;__API_KEY</code> in the env file.</p>
+<button type="submit"{% if config_path.is_none() %} disabled{% endif %}>Add provider</button>
+</form>
+</section>
+</section>{% endblock %}
