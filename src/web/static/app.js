@@ -39,3 +39,21 @@ document.querySelectorAll("details[id]").forEach((details) => {
     details.addEventListener("toggle", () => localStorage.setItem(key, details.open ? "open" : "closed"));
   } catch (_) {}
 });
+/* step 3: filter-as-you-type on tables with data-filter (this page's rows only) */
+document.querySelectorAll("table[data-filter]").forEach((table) => {
+  const rows = table.querySelectorAll("tbody tr");
+  if (rows.length < 2) return;
+  const input = document.createElement("input");
+  input.type = "search";
+  input.className = "table-filter";
+  input.placeholder = "Filter rows on this page";
+  input.setAttribute("aria-label", "Filter rows on this page");
+  const host = table.closest(".scroll-x") || table;
+  host.parentNode.insertBefore(input, host);
+  input.addEventListener("input", () => {
+    const needle = input.value.trim().toLowerCase();
+    rows.forEach((row) => {
+      row.hidden = needle !== "" && !row.textContent.toLowerCase().includes(needle);
+    });
+  });
+});

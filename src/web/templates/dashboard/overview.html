@@ -1,1 +1,40 @@
-{% extends "layout.html" %}{% block content %}<section class="dashboard"><h1>Overview</h1><p>The dashboard foundation is ready. Run and article views land in the next dashboard step.</p></section>{% endblock %}
+{% extends "layout.html" %}{% block content %}<section class="dashboard">
+<h1>Overview</h1>
+<div class="cards">
+<section class="card"><h2>Last run</h2>
+{% if let Some(run) = last_run %}<p><a href="/dashboard/runs/{{ run.id }}">Run {{ run.id }}</a> · {{ run.date }} · <span class="badge {{ run.status }}">{{ run.status }}</span></p>
+<p class="muted">Started {{ run.started }} · {{ run.duration }}</p>
+<pre class="block">{% for line in run.lines %}{{ line }}
+{% endfor %}</pre>
+{% if run.warnings > 0 %}<p><a href="/dashboard/runs/{{ run.id }}#warnings">{{ run.warnings }} warning{% if run.warnings != 1 %}s{% endif %}</a></p>{% endif %}
+{% if let Some(error) = run.error %}<p class="error">{{ error }}</p>{% endif %}
+{% else %}<p class="muted">No runs recorded yet.</p>{% endif %}
+</section>
+<section class="card"><h2>Budget today</h2>
+{% if budget.is_empty() %}<p class="muted">No providers configured.</p>{% else %}<dl class="kv budget">
+{% for line in budget %}<dt>{{ line.provider }}</dt><dd><meter value="{{ line.value }}" max="{{ line.max }}"{% if line.over %} class="over"{% endif %}></meter> {{ line.spent }} of {{ line.ceiling }}{% if line.over %} <strong class="error">ceiling reached</strong>{% endif %}</dd>
+{% endfor %}</dl>{% endif %}
+<p class="muted">Spend on the current UTC day across every recorded run.</p>
+</section>
+<section class="card"><h2>Ratings this week</h2>
+{% if ratings.is_empty() %}<p class="muted">No explicit ratings in the last seven days.</p>{% else %}<p>{{ ratings_total }} verdict{% if ratings_total != 1 %}s{% endif %}: {% for count in ratings %}<span class="badge {{ count.label }}">{{ count.label }}</span> {{ count.count }}{% if !loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+<p><a href="/dashboard/ratings">Rating history</a></p>
+</section>
+<section class="card"><h2>Jobs</h2>
+{% if active_jobs.is_empty() && finished_jobs.is_empty() %}<p class="muted">No jobs recorded.</p>{% else %}
+{% if !active_jobs.is_empty() %}<ul class="jobs">{% for job in active_jobs %}<li><a href="/dashboard/jobs/{{ job.id }}">{{ job.name }}</a> <span class="badge {{ job.status }}">{{ job.status }}</span> <span class="muted">requested {{ job.requested }}</span></li>{% endfor %}</ul>{% endif %}
+{% if !finished_jobs.is_empty() %}<p class="muted">Recently finished</p><ul class="jobs">{% for job in finished_jobs %}<li><a href="/dashboard/jobs/{{ job.id }}">{{ job.name }}</a> <span class="badge {{ job.status }}">{{ job.status }}</span> <span class="muted">{{ job.finished }}</span>{% if let Some(message) = job.message %} <span class="muted">— {{ message }}</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
+{% endif %}
+<p><a href="/dashboard/jobs">All jobs</a></p>
+</section>
+{% if !config_warnings.is_empty() %}<section class="card"><h2>Config on disk</h2>
+<ul class="warnings">{% for line in config_warnings %}<li class="error">{{ line }}</li>{% endfor %}</ul>
+<p><a href="/dashboard/settings">Settings</a></p>
+</section>{% endif %}
+</div>
+<!-- step 6: sparklines (cost per run, selected per run, generation seconds; last 30 non-dry runs) -->
+<h2>Unrated picks</h2>
+{% if unrated.is_empty() %}<p class="muted">Every pick from the last three issues has a verdict.</p>{% else %}<p class="muted">Picks from the last three issues without a verdict yet.</p>
+<ul class="picks">{% for pick in unrated %}<li><a href="{{ pick.issue_href }}">{{ pick.title }}</a> <span class="muted">· {{ pick.feed }} · {{ pick.issue_date }}</span>
+{% let widget = pick.widget %}{% include "_rating_widget.html" %}</li>{% endfor %}</ul>{% endif %}
+</section>{% endblock %}

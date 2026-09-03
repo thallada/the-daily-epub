@@ -1,0 +1,56 @@
+{% extends "layout.html" %}{% block content %}<section class="dashboard">
+<h1>Run {{ run.id }} · {{ run.date }} <span class="badge {{ run.status }}">{{ run.status }}</span>{% if run.dry_run %} <span class="muted">dry run</span>{% endif %}</h1>
+<p class="muted">Started {{ run.started }} · finished {{ run.finished }} · {{ run.duration }} · {{ run.total_cost }}</p>
+<nav class="run-nav">{% if let Some(prev) = run.prev_id %}<a href="/dashboard/runs/{{ prev }}">← Run {{ prev }}</a>{% endif %}{% if let Some(href) = run.issue_href %}<a href="{{ href }}">Issue {{ run.date }}</a>{% else %}<span class="muted">No issue for {{ run.date }}</span>{% endif %}{% if let Some(next) = run.next_id %}<a href="/dashboard/runs/{{ next }}">Run {{ next }} →</a>{% endif %}</nav>
+{% if let Some(error) = run.error %}<p class="error">{{ error }}</p>{% endif %}
+
+<h2>Funnel</h2>
+<div class="scroll-x"><table class="funnel-table">
+<thead><tr><th>stage</th><th>reached</th><th class="num">reached</th><th class="num">stopped here</th><th>why</th></tr></thead>
+<tbody>{% for stage in funnel %}<tr>
+<td><span class="badge {{ stage.stage }}">{{ stage.stage }}</span></td>
+<td class="funnel-cell"><div class="funnel"><svg width="{{ stage.percent }}%" height="12" role="img" aria-label="{{ stage.reached }} reached"></svg></div></td>
+<td class="num">{{ stage.reached }}</td>
+<td class="num">{{ stage.stopped }}</td>
+<td class="reasons">{% for reason in stage.reasons %}{{ reason.reason }} {{ reason.count }}{% if !loop.last %} · {% endif %}{% endfor %}</td>
+</tr>{% endfor %}</tbody></table></div>
+
+{% if has_report %}<div class="cards">
+<section class="card"><h2>Admission mix</h2>{% if admission.is_empty() %}<p class="muted">Nothing admitted.</p>{% else %}<dl class="kv">{% for line in admission %}<dt>{{ line.name }}</dt><dd>{{ line.count }}</dd>{% endfor %}</dl>{% endif %}</section>
+<section class="card"><h2>Preference state</h2><dl class="kv">
+<dt>rated with embeddings</dt><dd>{{ preference.rated_with_embeddings }}</dd>
+<dt>knn gate</dt><dd>{{ preference.knn_gate }}</dd>
+<dt>feed gate</dt><dd>{{ preference.feed_gate }}</dd>
+<dt>verdicts in prompt</dt><dd>{{ preference.verdicts_in_prompt }}</dd>
+</dl></section>
+<section class="card"><h2>Timings</h2><div class="scroll-x"><table><thead><tr><th>stage</th><th class="num">seconds</th></tr></thead><tbody>{% for line in timings %}<tr><td>{{ line.stage }}</td><td class="num">{{ line.seconds }}</td></tr>{% endfor %}<tr><th>total</th><th class="num">{{ timings_total }}</th></tr></tbody></table></div></section>
+<section class="card"><h2>Provider usage</h2><div class="scroll-x"><table><thead><tr><th>provider</th><th class="num">in</th><th class="num">cached</th><th class="num">cache write</th><th class="num">out</th><th class="num">cost</th></tr></thead><tbody>{% for line in providers %}<tr><td>{{ line.provider }}</td><td class="num">{{ line.input }}</td><td class="num">{{ line.cached }}</td><td class="num">{{ line.cache_write }}</td><td class="num">{{ line.output }}</td><td class="num">{{ line.cost }}</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="card" id="warnings"><h2>Warnings</h2>{% if warnings.is_empty() %}<p class="muted">None.</p>{% else %}<ul>{% for warning in warnings %}<li>{{ warning }}</li>{% endfor %}</ul>{% endif %}</section>
+<section class="card"><h2>Feeds (top {{ feeds.len() }})</h2><div class="scroll-x"><table><thead><tr><th>feed</th><th class="num">entries</th></tr></thead><tbody>{% for line in feeds %}<tr><td>{{ line.name }}</td><td class="num">{{ line.count }}</td></tr>{% endfor %}</tbody></table></div></section>
+</div>{% else %}<p class="muted">This run has no stored report; only the funnel and candidates are available.</p>{% endif %}
+
+<h2>Config diff</h2>
+{% if let Some(against) = diff_against %}{% if config_diff.is_empty() %}<p class="muted">No settings changed since <a href="/dashboard/runs/{{ against }}">run {{ against }}</a>.</p>{% else %}<p class="muted">Against the previous non-dry run, <a href="/dashboard/runs/{{ against }}">run {{ against }}</a>.</p>
+<div class="scroll-x"><table class="diff"><thead><tr><th>key</th><th>before</th><th>after</th></tr></thead><tbody>{% for row in config_diff %}<tr><td><code>{{ row.key }}</code></td><td class="before">{{ row.before }}</td><td class="after">{{ row.after }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}{% else %}<p class="muted">No earlier non-dry run to compare against.</p>{% endif %}
+
+<h2>Near misses</h2>
+{% if near_misses.is_empty() %}<p class="muted">None recorded.</p>{% else %}<div class="scroll-x"><table>
+<thead><tr><th>#</th><th class="num">score</th><th>title</th><th>feed</th><th class="num">quality</th><th class="num">fit</th><th>stage</th><th>reason</th></tr></thead>
+<tbody>{% for miss in near_misses %}<tr><td>{{ loop.index }}</td><td class="num">{{ miss.score }}</td><td><a href="{{ miss.href }}">{{ miss.title }}</a></td><td>{{ miss.feed }}</td><td class="num">{{ miss.quality }}</td><td class="num">{{ miss.fit }}</td><td><span class="badge {{ miss.stage }}">{{ miss.stage }}</span></td><td>{% if let Some(reason) = miss.reason %}{{ reason }}{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+
+<h2>Candidates</h2>
+<form class="filters" method="get" action="/dashboard/runs/{{ run.id }}">
+<label>Stage <select name="stage"><option value="">any</option>{% for name in stages %}<option value="{{ name }}"{% if let Some(current) = filters.stage %}{% if current.as_str() == *name %} selected{% endif %}{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<label>Reason <select name="reason"><option value="">any</option>{% for name in reasons %}<option value="{{ name }}"{% if let Some(current) = filters.reason %}{% if current.as_str() == *name %} selected{% endif %}{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<label>Admitted by <select name="admitted_by"><option value="">any</option>{% for name in retrievers %}<option value="{{ name }}"{% if let Some(current) = filters.admitted_by %}{% if current.as_str() == *name %} selected{% endif %}{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<label>Flag <select name="flag"><option value="">any</option><option value="exploration"{% if let Some(current) = filters.flag %}{% if current == "exploration" %} selected{% endif %}{% endif %}>exploration</option><option value="auto"{% if let Some(current) = filters.flag %}{% if current == "auto" %} selected{% endif %}{% endif %}>auto-include</option></select></label>
+<label>Title <input type="search" name="q" value="{% if let Some(q) = filters.q %}{{ q }}{% endif %}"></label>
+<label>Sort <select name="sort">{% for name in sorts %}<option value="{{ name }}"{% if filters.sort == *name %} selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<button type="submit">Apply</button> <a href="/dashboard/runs/{{ run.id }}">Reset</a>
+</form>
+{% include "dashboard/_pager.html" %}
+<div class="scroll-x"><table class="candidates" data-filter>
+<thead><tr><th>title</th><th>feed</th><th class="num">words</th><th>stage</th><th>reason</th><th>admitted by</th><th class="num">utility</th><th class="num">rank</th><th class="num">cluster</th><th class="num">triage</th><th class="num">quality</th><th class="num">fit</th><th>flags</th><th>editor</th></tr></thead>
+<tbody>{% for candidate in candidates %}{% include "_candidate_row.html" %}{% endfor %}</tbody></table></div>
+{% include "dashboard/_pager.html" %}
+</section>{% endblock %}

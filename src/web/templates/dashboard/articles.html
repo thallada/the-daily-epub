@@ -1,0 +1,34 @@
+{% extends "layout.html" %}{% block content %}<section class="dashboard">
+<h1>Articles</h1>
+<form class="filters" method="get" action="/dashboard/articles">
+<label>Title or URL <input type="search" name="q" value="{% if let Some(q) = filters.q %}{{ q }}{% endif %}"></label>
+<label>Feed id <input type="number" name="feed" value="{{ feed_value }}" min="1"></label>
+<label>Stage <select name="stage"><option value="">any</option>{% for name in stages %}<option value="{{ name }}"{% if let Some(current) = filters.stage %}{% if current.as_str() == *name %} selected{% endif %}{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<label>Reason <select name="reason"><option value="">any</option>{% for name in reasons %}<option value="{{ name }}"{% if let Some(current) = filters.reason %}{% if current.as_str() == *name %} selected{% endif %}{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<label>Rated <select name="rated"><option value="">all</option>{% for name in rated %}<option value="{{ name }}"{% if let Some(current) = filters.rated %}{% if current.as_str() == *name %} selected{% endif %}{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<label>Published <select name="published"><option value="">all</option><option value="yes"{% if let Some(current) = filters.published %}{% if current == "yes" %} selected{% endif %}{% endif %}>yes</option><option value="no"{% if let Some(current) = filters.published %}{% if current == "no" %} selected{% endif %}{% endif %}>no</option></select></label>
+<label>First seen from <input type="date" name="from" value="{% if let Some(from) = filters.from %}{{ from }}{% endif %}"></label>
+<label>to <input type="date" name="to" value="{% if let Some(to) = filters.to %}{{ to }}{% endif %}"></label>
+<label>Triage kind <select name="kind"><option value="">any</option>{% for name in kinds %}<option value="{{ name }}"{% if let Some(current) = filters.kind %}{% if current.as_str() == *name %} selected{% endif %}{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<label>Sort <select name="sort">{% for name in sorts %}<option value="{{ name }}"{% if filters.sort == *name %} selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+<button type="submit">Apply</button> <a href="/dashboard/articles">Reset</a>
+</form>
+{% include "dashboard/_pager.html" %}
+<div class="scroll-x"><table class="articles" data-filter>
+<thead><tr><th>first seen</th><th>title</th><th>feed</th><th class="num">words</th><th>last stage</th><th>reason</th><th class="num">utility</th><th class="num">triage</th><th class="num">quality</th><th class="num">fit</th><th>rating</th><th>published</th></tr></thead>
+<tbody>{% for article in articles %}<tr>
+<td>{{ article.first_seen }}</td>
+<td><a href="{{ article.href }}">{{ article.title }}</a></td>
+<td>{% if let Some(feed_id) = article.feed_id %}<a href="/dashboard/articles?feed={{ feed_id }}">{{ article.feed }}</a>{% else %}{{ article.feed }}{% endif %}</td>
+<td class="num">{{ article.words }}</td>
+<td>{% if let Some(stage) = article.stage %}<span class="badge {{ stage }}">{{ stage }}</span>{% if let Some(run_id) = article.run_id %} <a class="muted" href="/dashboard/runs/{{ run_id }}">{% if let Some(date) = article.run_date %}{{ date }}{% else %}run {{ run_id }}{% endif %}</a>{% endif %}{% else %}<span class="muted">never considered</span>{% endif %}</td>
+<td>{% if let Some(reason) = article.reason %}{{ reason }}{% endif %}</td>
+<td class="num">{{ article.utility }}</td>
+<td class="num">{{ article.triage }}</td>
+<td class="num">{{ article.quality }}</td>
+<td class="num">{{ article.fit }}</td>
+<td>{% if let Some(rating) = article.rating %}<span class="badge {{ article.rating_class }}">{{ rating }}</span>{% endif %}</td>
+<td>{% if let Some(date) = article.published %}<a href="/issues/{{ date }}">{{ date }}</a>{% endif %}</td>
+</tr>{% endfor %}</tbody></table></div>
+{% include "dashboard/_pager.html" %}
+</section>{% endblock %}
