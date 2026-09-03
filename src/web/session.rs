@@ -54,6 +54,22 @@ fn store_error(error: impl std::fmt::Display) -> session_store::Error {
 
 #[async_trait]
 impl SessionStore for SqliteSessionStore {
+    /// Insert a brand-new record, drawing a fresh id on the (astronomically
+    /// unlikely) collision with an existing row instead of overwriting it.
+    async fn create(&self, record: &mut Record) -> session_store::Result<()> {
+        loop {
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE id = ?")
+                .bind(record.id.to_string())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(store_error)?;
+            if exists == 0 {
+                return self.save(record).await;
+            }
+            record.id = Id::default();
+        }
+    }
+
     async fn save(&self, record: &Record) -> session_store::Result<()> {
         let data = serde_json::to_string(&record.data).map_err(store_error)?;
         let user_id = record
