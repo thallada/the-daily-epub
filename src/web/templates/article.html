@@ -1,20 +1,6 @@
-{% extends "layout.html" %}{% block content %}<article class="reading article-page">
-<header class="article-header">
-<h1><a href="{{ source_url }}">{{ title }}</a></h1>
-{% match byline %}{% when Some with (byline) %}<p class="byline">{{ byline }}</p>{% when None %}{% endmatch %}
-<p class="meta">{{ meta_line }}</p>
-{% match why %}{% when Some with (why) %}<p class="why"><em>Why it's here: {{ why }}</em></p>{% when None %}{% endmatch %}
-{% match social_line %}{% when Some with (social) %}<p class="social">{{ social }}</p>{% when None %}{% endmatch %}
-{% match summary %}{% when Some with (summary) %}<p class="summary">{{ summary }}</p>{% when None %}{% endmatch %}
-{% if excerpt_only %}<p class="notice">(excerpt only — read online)</p>{% endif %}
-</header>
-<hr class="rule">
-<div class="article-body">{{ body_html|safe }}</div>
-{% match discussion_html %}{% when Some with (discussion) %}<section class="discussion"><h2>Discussion</h2>{{ discussion|safe }}</section>{% when None %}{% endmatch %}
-<footer class="article-footer">
-{% match rating %}{% when Some with (widget) %}{% include "_rating_widget.html" %}{% when None %}{% endmatch %}
-<p><a href="{{ read_online_url }}">Read online ↗</a></p>
-<nav class="prev-next">{% match previous %}{% when Some with (previous) %}<a rel="prev" href="{{ previous.href }}">← {{ previous.title }}</a>{% when None %}<span></span>{% endmatch %}{% match next %}{% when Some with (next) %}<a rel="next" href="{{ next.href }}">{{ next.title }} →</a>{% when None %}{% endmatch %}</nav>
-<p><a href="{{ issue_href }}">← Back to this issue</a></p>
-</footer>
+{% extends "layout.html" %}{% block ears %}<span>From this issue</span>{% endblock %}{% block content %}<article class="mx-auto mt-10 max-w-[68ch] px-4 sm:mt-14 sm:px-6">
+  <header><p class="font-sans text-[0.72rem] uppercase tracking-[0.12em] text-muted">Article</p><h1 class="mt-3 text-4xl font-semibold leading-[1.1] tracking-[-0.01em] sm:text-5xl"><a class="text-ink no-underline hover:text-accent" href="{{ source_url }}">{{ title }}</a></h1>{% match byline %}{% when Some with (byline) %}<p class="mt-5 font-sans text-sm font-medium text-ink-2">{{ byline }}</p>{% when None %}{% endmatch %}<p class="mt-1 font-sans text-sm text-muted">{{ meta_line }}</p>{% match why %}{% when Some with (why) %}<p class="mt-6 border-l-2 border-accent pl-3 italic text-ink-2">Why it's here: {{ why }}</p>{% when None %}{% endmatch %}{% match social_line %}{% when Some with (social) %}<p class="mt-4 font-sans text-sm text-muted">{{ social }}</p>{% when None %}{% endmatch %}{% match summary %}{% when Some with (summary) %}<p class="mt-7 text-xl italic leading-relaxed text-ink-2">{{ summary }}</p>{% when None %}{% endmatch %}{% if excerpt_only %}<p class="notice mt-6">Excerpt only — continue reading at the original site.</p>{% endif %}</header>
+  <div class="prose-body mt-10 border-t border-rule pt-8">{{ body_html|safe }}</div>
+  {% match discussion_html %}{% when Some with (discussion) %}<section class="discussion prose-body mt-12 border-t border-rule pt-6 [&_.comment-meta]:font-sans [&_.comment-meta]:text-sm [&_.comment-meta]:text-muted [&_blockquote.reply]:ml-6"><h2 class="mb-6 border-0 pt-0 text-2xl">Discussion</h2>{{ discussion|safe }}</section>{% when None %}{% endmatch %}
+  <footer class="mt-12 border-t border-rule pt-6">{% match rating %}{% when Some with (widget) %}{% include "_rating_widget.html" %}{% when None %}{% endmatch %}<p class="mt-6"><a class="btn" href="{{ read_online_url }}">Read online ↗</a></p><nav class="mt-10 grid grid-cols-1 gap-3 font-sans sm:grid-cols-2" aria-label="Adjacent articles">{% match previous %}{% when Some with (previous) %}<a class="group min-h-24 border border-rule p-4 text-ink no-underline hover:border-accent" rel="prev" href="{{ previous.href }}"><span class="block text-[0.68rem] uppercase tracking-[0.12em] text-muted">Previous</span><span class="mt-2 block leading-snug group-hover:text-accent">← {{ previous.title }}</span></a>{% when None %}{% endmatch %}{% match next %}{% when Some with (next) %}<a class="group min-h-24 border border-rule p-4 text-right text-ink no-underline hover:border-accent sm:col-start-2" rel="next" href="{{ next.href }}"><span class="block text-[0.68rem] uppercase tracking-[0.12em] text-muted">Next</span><span class="mt-2 block leading-snug group-hover:text-accent">{{ next.title }} →</span></a>{% when None %}{% endmatch %}</nav><p class="mt-8 font-sans text-sm"><a href="{{ issue_href }}">← Back to this issue</a></p></footer>
 </article>{% endblock %}

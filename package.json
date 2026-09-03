@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "scripts": {
+    "css": "tailwindcss -i src/web/tailwind.css -o src/web/static/app.css --minify",
+    "css:watch": "tailwindcss -i src/web/tailwind.css -o src/web/static/app.css --watch",
+    "css:check": "tmp=$(mktemp) && trap 'rm -f \"$tmp\"' EXIT && tailwindcss -i src/web/tailwind.css -o \"$tmp\" --minify && diff -u src/web/static/app.css \"$tmp\""
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.3",
+    "tailwindcss": "4.3.3"
+  }
+}

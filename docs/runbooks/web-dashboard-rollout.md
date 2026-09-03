@@ -6,7 +6,15 @@ already be complete.
 
 ## 1. Build and install
 
+The deployed binary does not require Node. For UI development, edit
+`src/web/tailwind.css`, the templates, or `src/web/static/app.js`, then run
+`npm run css` and commit the regenerated `src/web/static/app.css` alongside the
+source. CI and release preparation should run `npm run css:check` to detect
+stylesheet drift.
+
 ```sh
+npm ci
+npm run css:check
 cargo test
 cargo build --release
 sudo install -m0755 target/release/daily-epub /usr/local/bin/daily-epub
@@ -134,4 +142,3 @@ Candidate and assessment history is pruned after
 `curation.ranking.telemetry_retention_days` (180 by default). Raise it now if the dashboard
 should retain a longer article/run history, then reload `/dashboard/settings` and verify the
 effective value. This changes future pruning only; it cannot restore rows already deleted.
-

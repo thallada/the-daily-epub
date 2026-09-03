@@ -502,16 +502,34 @@ async fn static_asset(
     axum::extract::Path(file): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let asset = match file.as_str() {
-        "app.css" => ("text/css; charset=utf-8", include_str!("static/app.css")),
+    let asset: (&str, &'static [u8]) = match file.as_str() {
+        "app.css" => (
+            "text/css; charset=utf-8",
+            include_str!("static/app.css").as_bytes(),
+        ),
         "app.js" => (
             "application/javascript; charset=utf-8",
-            include_str!("static/app.js"),
+            include_str!("static/app.js").as_bytes(),
         ),
-        "favicon.svg" => ("image/svg+xml", include_str!("static/favicon.svg")),
+        "theme.js" => (
+            "application/javascript; charset=utf-8",
+            include_str!("static/theme.js").as_bytes(),
+        ),
+        "favicon.svg" => (
+            "image/svg+xml",
+            include_str!("static/favicon.svg").as_bytes(),
+        ),
+        "Newsreader.woff2" => (
+            "font/woff2",
+            include_bytes!("static/fonts/Newsreader.woff2"),
+        ),
+        "Newsreader-italic.woff2" => (
+            "font/woff2",
+            include_bytes!("static/fonts/Newsreader-italic.woff2"),
+        ),
         _ => return WebError::NotFound.into_response(),
     };
-    let etag = format!("\"{}\"", hex::encode(Sha256::digest(asset.1.as_bytes())));
+    let etag = format!("\"{}\"", hex::encode(Sha256::digest(asset.1)));
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())

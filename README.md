@@ -111,6 +111,13 @@ cargo test                      # everything is offline; no keys needed
 sudo install -m0755 target/release/daily-epub /usr/local/bin/
 ```
 
+The web UI uses Tailwind CSS v4, but Node is only a development dependency: the
+compiled stylesheet is committed and embedded in the Rust binary. After editing
+`src/web/tailwind.css`, a web template, or `src/web/static/app.js`, run
+`npm install` once and then `npm run css`. Commit both the source changes and
+`src/web/static/app.css`; `npm run css:check` verifies that the committed output
+is current.
+
 ### Commands
 
 ```

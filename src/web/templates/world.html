@@ -1,5 +1,1 @@
-{% extends "layout.html" %}{% block content %}<article class="reading world-briefing">
-<h1>World Briefing</h1>{% match display_date %}{% when Some with (date) %}<p class="dateline">{{ date }}</p>{% when None %}{% endmatch %}<hr class="rule">
-<div class="world-body">{{ body_html|safe }}</div>
-<p><a href="{{ issue_href }}">← Back to this issue</a></p>
-</article>{% endblock %}
+{% extends "layout.html" %}{% block ears %}{% match display_date %}{% when Some with (date) %}<span>{{ date }}</span>{% when None %}<span>World Briefing</span>{% endmatch %}{% endblock %}{% block content %}<article class="mx-auto mt-10 max-w-[68ch] px-4 sm:mt-14 sm:px-6"><header class="mb-9">{% match display_date %}{% when Some with (date) %}<p class="font-sans text-[0.72rem] uppercase tracking-[0.12em] text-muted">{{ date }}</p>{% when None %}{% endmatch %}<h1 class="mt-2 text-4xl font-semibold leading-[1.1] tracking-[-0.01em] sm:text-5xl">World Briefing</h1></header><div class="prose-body border-t border-rule pt-7">{{ body_html|safe }}</div><p class="mt-10 border-t border-rule pt-5 font-sans text-sm"><a href="{{ issue_href }}">← Back to this issue</a></p></article>{% endblock %}

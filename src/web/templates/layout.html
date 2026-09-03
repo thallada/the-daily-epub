@@ -4,17 +4,49 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ page.title }} · The Daily EPUB</title>
+  <script src="/static/theme.js?v={{ page.version }}"></script>
+  <link rel="preload" href="/static/Newsreader.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/app.css?v={{ page.version }}">
   <link rel="alternate" type="application/atom+xml" title="The Daily EPUB" href="/feed.xml">
   <link rel="icon" href="/static/favicon.svg">
 </head>
 <body>
-  <header class="masthead"><a href="/">The Daily EPUB</a></header>
-  <nav class="primary" aria-label="Site"><a href="/">Latest</a><a href="/issues">Archive</a><a href="/feed.xml">Feed</a>{% match page.viewer %}{% when Some with (viewer) %}<a href="/account">{{ viewer.username }}</a>{% when None %}<a href="/login">Sign in</a>{% endmatch %}</nav>
-  {% if page.is_admin() %}<nav class="admin" aria-label="Dashboard"><a href="/dashboard">Overview</a><a href="/dashboard/runs">Runs</a><a href="/dashboard/articles">Articles</a><a href="/dashboard/ratings">Ratings</a><a href="/dashboard/profile">Profile</a><a href="/dashboard/stats">Stats</a><a href="/dashboard/jobs">Jobs</a><a href="/dashboard/settings">Settings</a><a href="/dashboard/users">Users</a></nav>{% endif %}
-  {% match page.flash %}{% when Some with (flash) %}<div class="flash {{ flash.kind }}" role="status">{{ flash.text }}</div>{% when None %}{% endmatch %}
-  <main>{% block content %}{% endblock %}</main>
-  <footer>daily-epub {{ page.version }}</footer>
+  <a class="fixed left-3 top-3 z-50 -translate-y-20 bg-ink px-3 py-2 font-sans text-sm text-paper no-underline focus:translate-y-0" href="#content">Skip to content</a>
+  <header class="mx-auto max-w-7xl px-4 pt-4 sm:px-6 sm:pt-6">
+    <div class="mb-2 flex min-h-8 items-center justify-between gap-4 border-b border-rule pb-2 font-sans text-[0.72rem] uppercase tracking-[0.12em] text-muted">
+      <div>{% block ears %}<span>Morning edition</span>{% endblock %}</div>
+      <div class="flex items-center gap-3 normal-case tracking-normal">
+        <button class="flex min-h-10 items-center gap-1.5 border-0 bg-transparent px-1.5 py-1 text-xs text-muted hover:text-ink" type="button" data-theme-toggle aria-label="Theme: system">
+          <svg data-theme-icon="system" aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4 fill-none stroke-current" stroke-width="1.75"><path d="M4 5.5h16v11H4zM9 20h6M12 16.5V20"/></svg>
+          <svg data-theme-icon="light" aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4 fill-none stroke-current" stroke-width="1.75" hidden><circle cx="12" cy="12" r="3.5"/><path d="M12 2v2.2M12 19.8V22M4.93 4.93l1.56 1.56M17.51 17.51l1.56 1.56M2 12h2.2M19.8 12H22M4.93 19.07l1.56-1.56M17.51 6.49l1.56-1.56"/></svg>
+          <svg data-theme-icon="dark" aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4 fill-none stroke-current" stroke-width="1.75" hidden><path d="M20 15.1A8.5 8.5 0 0 1 8.9 4a8.5 8.5 0 1 0 11.1 11.1Z"/></svg>
+          <span data-theme-label>System</span>
+        </button>
+        {% match page.viewer %}{% when Some with (viewer) %}<a class="text-ink no-underline hover:text-accent" href="/account">{{ viewer.username }}</a>{% when None %}<a class="text-ink no-underline hover:text-accent" href="/login">Sign in</a>{% endmatch %}
+      </div>
+    </div>
+    <div class="border-b-[3px] border-double border-ink py-3 text-center sm:py-4"><a class="font-serif text-3xl font-semibold leading-none tracking-[-0.02em] text-ink no-underline hover:text-ink sm:text-5xl" href="/">The Daily EPUB</a></div>
+    <nav class="flex min-h-11 flex-wrap items-center justify-center gap-x-6 gap-y-1 border-b border-rule font-sans text-[0.72rem] font-medium uppercase tracking-[0.12em]" aria-label="Site">
+      <a class="flex min-h-11 items-center border-b-2 {% if page.active_nav == "latest" %}border-accent text-ink{% else %}border-transparent text-muted{% endif %} no-underline hover:text-ink" href="/"{% if page.active_nav == "latest" %} aria-current="page"{% endif %}>Latest</a>
+      <a class="flex min-h-11 items-center border-b-2 {% if page.active_nav == "archive" %}border-accent text-ink{% else %}border-transparent text-muted{% endif %} no-underline hover:text-ink" href="/issues"{% if page.active_nav == "archive" %} aria-current="page"{% endif %}>Archive</a>
+      <a class="flex min-h-11 items-center border-b-2 border-transparent text-muted no-underline hover:text-ink" href="/feed.xml">Feed</a>
+      {% match page.viewer %}{% when Some with (_) %}<a class="flex min-h-11 items-center border-b-2 {% if page.active_nav == "account" %}border-accent text-ink{% else %}border-transparent text-muted{% endif %} no-underline hover:text-ink" href="/account"{% if page.active_nav == "account" %} aria-current="page"{% endif %}>Account</a>{% when None %}<a class="flex min-h-11 items-center border-b-2 {% if page.active_nav == "login" %}border-accent text-ink{% else %}border-transparent text-muted{% endif %} no-underline hover:text-ink" href="/login"{% if page.active_nav == "login" %} aria-current="page"{% endif %}>Sign in</a>{% endmatch %}
+    </nav>
+    {% if page.is_admin() %}<nav class="flex flex-wrap items-center justify-center gap-x-4 border-b border-rule py-1 font-sans text-[0.68rem] uppercase tracking-[0.1em]" aria-label="Dashboard">
+      <a class="py-2 no-underline {% if page.active_nav == "dashboard" %}text-accent{% else %}text-muted{% endif %}" href="/dashboard"{% if page.active_nav == "dashboard" %} aria-current="page"{% endif %}>Overview</a>
+      <a class="py-2 no-underline {% if page.active_nav == "runs" %}text-accent{% else %}text-muted{% endif %}" href="/dashboard/runs"{% if page.active_nav == "runs" %} aria-current="page"{% endif %}>Runs</a>
+      <a class="py-2 no-underline {% if page.active_nav == "articles" %}text-accent{% else %}text-muted{% endif %}" href="/dashboard/articles"{% if page.active_nav == "articles" %} aria-current="page"{% endif %}>Articles</a>
+      <a class="py-2 no-underline {% if page.active_nav == "ratings" %}text-accent{% else %}text-muted{% endif %}" href="/dashboard/ratings"{% if page.active_nav == "ratings" %} aria-current="page"{% endif %}>Ratings</a>
+      <a class="py-2 no-underline {% if page.active_nav == "profile" %}text-accent{% else %}text-muted{% endif %}" href="/dashboard/profile"{% if page.active_nav == "profile" %} aria-current="page"{% endif %}>Profile</a>
+      <a class="py-2 no-underline {% if page.active_nav == "stats" %}text-accent{% else %}text-muted{% endif %}" href="/dashboard/stats"{% if page.active_nav == "stats" %} aria-current="page"{% endif %}>Stats</a>
+      <a class="py-2 no-underline {% if page.active_nav == "jobs" %}text-accent{% else %}text-muted{% endif %}" href="/dashboard/jobs"{% if page.active_nav == "jobs" %} aria-current="page"{% endif %}>Jobs</a>
+      <a class="py-2 no-underline {% if page.active_nav == "settings" %}text-accent{% else %}text-muted{% endif %}" href="/dashboard/settings"{% if page.active_nav == "settings" %} aria-current="page"{% endif %}>Settings</a>
+      <a class="py-2 no-underline {% if page.active_nav == "users" %}text-accent{% else %}text-muted{% endif %}" href="/dashboard/users"{% if page.active_nav == "users" %} aria-current="page"{% endif %}>Users</a>
+    </nav>{% endif %}
+  </header>
+  {% match page.flash %}{% when Some with (flash) %}<div class="mx-auto max-w-7xl px-4 sm:px-6"><div class="flash {{ flash.kind }}" role="status">{{ flash.text }}</div></div>{% when None %}{% endmatch %}
+  <main id="content" class="min-h-[68vh]">{% block content %}{% endblock %}</main>
+  <footer class="mx-auto mt-16 flex max-w-7xl flex-wrap justify-between gap-2 border-t border-rule px-4 py-6 font-sans text-[0.72rem] uppercase tracking-[0.1em] text-muted sm:px-6"><span>The Daily EPUB</span><span>daily-epub {{ page.version }}</span></footer>
   <script src="/static/app.js?v={{ page.version }}"></script>
 </body>
 </html>

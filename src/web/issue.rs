@@ -639,6 +639,7 @@ struct FullEntry {
     href: String,
     source: String,
     reading_minutes: i64,
+    is_lead: bool,
     summary: String,
     why: Option<String>,
     rating: Option<RatingWidget>,
@@ -771,6 +772,7 @@ pub async fn render_full(
                     href: article_href(date, pick.article.id),
                     source: pick.article.feed_title.clone(),
                     reading_minutes: pick.article.reading_minutes(),
+                    is_lead: pick.is_lead,
                     summary: summary_for(&view.issue, pick)
                         .unwrap_or_default()
                         .to_string(),
@@ -1646,7 +1648,7 @@ mod tests {
         assert_eq!(world.status(), StatusCode::OK);
         let world = response_text(world).await;
         assert!(world.contains("Something happened somewhere"));
-        assert_eq!(world.matches("World Briefing").count(), 2); // page title + chapter heading
+        assert!(world.matches("World Briefing").count() >= 2); // page title + chapter heading
 
         let behind = app
             .oneshot(
@@ -1702,7 +1704,8 @@ mod tests {
             .unwrap();
         assert_eq!(issue.status(), StatusCode::OK);
         let issue = response_text(issue).await;
-        assert!(issue.contains("431 from n/a feeds"));
+        assert!(issue.contains("<dd>431</dd>"));
+        assert!(!issue.contains("n/a feeds"));
         assert!(issue.contains("120"));
         assert!(!issue.contains("0 from 0 feeds"));
         assert!(issue.contains(&format!("/issues/{}/behind", source.meta.date)));

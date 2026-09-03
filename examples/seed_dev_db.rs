@@ -371,13 +371,23 @@ async fn seed_near_misses(db: &Db, run_id: i64) -> anyhow::Result<()> {
 fn write_config(dir: &Path) -> anyhow::Result<PathBuf> {
     let path = dir.join("config.toml");
     let dir = dir.canonicalize()?;
+    // The profile lives inside the throwaway directory: saving it from
+    // /dashboard/profile must never rewrite the repository's data/profile.md.
+    let profile = dir.join("profile.md");
     let toml = format!(
-        "database_path = \"{db}\"\n\n[publish]\nepub_dir = \"{epubs}\"\nxtc_dir = \"{xtc}\"\n\n[server]\nbind = \"127.0.0.1:3599\"\npublic_url = \"http://127.0.0.1:3599\"\njobs_enabled = false\n",
+        "database_path = \"{db}\"\nprofile_path = \"{profile}\"\n\n[publish]\nepub_dir = \"{epubs}\"\nxtc_dir = \"{xtc}\"\n\n[server]\nbind = \"127.0.0.1:3599\"\npublic_url = \"http://127.0.0.1:3599\"\njobs_enabled = false\n",
         db = dir.join("daily-epub.db").display(),
+        profile = profile.display(),
         epubs = dir.join("epubs").display(),
         xtc = dir.join("xtc").display(),
     );
     std::fs::write(&path, toml)?;
+    if !profile.exists() {
+        let shipped = Path::new("data/profile.md");
+        let body = std::fs::read_to_string(shipped)
+            .unwrap_or_else(|_| "# Reader profile\n\n## Who he is\n\nA developer.\n".to_string());
+        std::fs::write(&profile, body)?;
+    }
     std::fs::create_dir_all(dir.join("epubs"))?;
     std::fs::create_dir_all(dir.join("xtc"))?;
     Ok(path)
