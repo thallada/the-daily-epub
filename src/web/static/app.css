@@ -39,7 +39,7 @@ label { display:grid; gap:.25rem; }
 input,textarea,button { font:inherit; padding:.45rem; }
 .error { color:var(--down); }
 .dashboard { max-width:1200px; margin:2rem auto; font-family:system-ui,sans-serif; }
-.scroll-x { overflow-x:auto; }
+.scroll-x { max-width:100%; overflow-x:auto; overscroll-behavior-inline:contain; }
 table { width:100%; border-collapse:collapse; font:0.9rem/1.35 system-ui,sans-serif; }
 th,td { border-bottom:1px solid var(--rule); padding:.35rem .5rem; text-align:left; }
 thead { position:sticky; top:0; background:var(--bg); }
@@ -106,7 +106,6 @@ details.explain { margin:1rem 0; }
 .picks li { border-bottom:1px solid var(--rule); padding:.5rem 0; }
 .budget meter { width:60%; max-width:14rem; height:.8rem; vertical-align:middle; margin-right:.5rem; }
 .table-filter { margin:.5rem 0; padding:.3rem; width:20rem; max-width:100%; }
-||||||| 849231e
 /* step 5: settings */
 .settings .card { border:1px solid var(--rule); padding:.75rem 1rem; margin:1rem 0; }
 .settings .card h2 { margin:.2rem 0 .6rem; font-size:1.1rem; font-family:ui-monospace,monospace; }
@@ -124,7 +123,6 @@ details.explain { margin:1rem 0; }
 .settings .add-provider { max-width:36rem; }
 .history pre { margin:0; white-space:pre-wrap; font-size:.8rem; }
 @media (max-width:40rem) { .setting { display:block; } }
-||||||| d36f203
 /* step 6: jobs and stats */
 .sparklines { display:grid; grid-template-columns:repeat(auto-fit,minmax(16rem,1fr)); gap:1rem 1.5rem; margin:1rem 0; }
 .spark-figure { margin:0; min-width:0; } .spark-figure figcaption { font-size:.9rem; margin-bottom:.2rem; }
@@ -137,3 +135,23 @@ details.explain { margin:1rem 0; }
 .job-cards form.inline { margin:.4rem 0 0; } .job-cards label { display:inline-grid; }
 td.message,dd.message { overflow-wrap:anywhere; max-width:32rem; }
 pre.journal { max-height:40rem; }
+/* step 7: dark-mode and narrow-screen polish */
+.primary,.admin { display:flex; flex-wrap:wrap; justify-content:center; gap:.35rem 1rem; }
+.masthead { line-height:1.15; overflow-wrap:anywhere; }
+.scroll-x > table { min-width:max-content; }
+input,textarea,select,button { max-width:100%; border-color:var(--rule); background:var(--bg); color:var(--fg); }
+button { border-style:solid; }
+input:focus-visible,textarea:focus-visible,select:focus-visible,button:focus-visible,a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+code,pre,.message { overflow-wrap:anywhere; }
+.prev-next a { overflow-wrap:anywhere; }
+@media (max-width:40rem) {
+  body { padding-inline:.75rem; }
+  .masthead { margin-top:.75rem; padding-inline:.25rem; }
+  .primary,.admin { gap:.25rem .75rem; line-height:1.35; }
+  .dashboard,.reading { margin-block:1.25rem; }
+  .cards { grid-template-columns:minmax(0,1fr); }
+  .card { padding:.65rem .75rem; }
+  .prev-next { display:flex; flex-wrap:wrap; justify-content:space-between; }
+  .rating { align-items:stretch; }
+  .rating-prompt,.rating-note { flex-basis:100%; }
+}

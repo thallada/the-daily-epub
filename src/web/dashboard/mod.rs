@@ -1185,4 +1185,45 @@ pub(crate) mod tests {
         assert!(body.contains("2 runs · max $0.11"), "{body}");
         assert!(!body.contains("style=\""), "no inline styles under the CSP");
     }
+
+    #[tokio::test]
+    async fn every_dashboard_route_template_renders_with_fixture_data() {
+        let seed = seed().await;
+        sqlx::query(
+            "INSERT INTO jobs
+             (id, name, unit, requested_at, started_at, finished_at, status, message, run_id)
+             VALUES (99, 'features-prune', 'daily-epub-job@features-prune.service',
+                     '2026-09-02T06:00:00Z', '2026-09-02T06:00:01Z',
+                     '2026-09-02T06:00:02Z', 'ok', 'pruned fixture rows', ?)",
+        )
+        .bind(seed.run_id)
+        .execute(seed.db.pool())
+        .await
+        .unwrap();
+        let app = app_with_users(&seed.db).await;
+        let admin = login_cookie(&app, "admin", "correct horse battery").await;
+        let routes = vec![
+            "/dashboard".to_string(),
+            "/dashboard/runs".to_string(),
+            format!("/dashboard/runs/{}", seed.run_id),
+            "/dashboard/articles".to_string(),
+            "/dashboard/articles/1".to_string(),
+            "/dashboard/ratings".to_string(),
+            "/dashboard/ratings?tab=events".to_string(),
+            "/dashboard/profile".to_string(),
+            "/dashboard/stats?days=14".to_string(),
+            "/dashboard/settings".to_string(),
+            "/dashboard/settings/history".to_string(),
+            "/dashboard/jobs".to_string(),
+            "/dashboard/jobs/99".to_string(),
+            "/dashboard/users".to_string(),
+        ];
+        for uri in routes {
+            let response = get(&app, &uri, Some(&admin)).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = response_text(response).await;
+            assert!(body.contains("<!doctype html>"), "{uri}: {body}");
+            assert!(body.contains("The Daily EPUB"), "{uri}: {body}");
+        }
+    }
 }

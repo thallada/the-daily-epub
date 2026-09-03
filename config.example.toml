@@ -208,14 +208,15 @@ format = "xtch"                      # xtc (1-bit) | xtch (grayscale)
 settings = "/etc/daily-epub/xtc-settings.json"
 
 [server]
-bind = "127.0.0.1:3499"
-public_url = "https://daily.hallada.net"
-session_days = 30
-login_attempts = 10
-login_window_minutes = 15
-jobs_enabled = true
-journal_lines = 300
+bind = "127.0.0.1:3499"              # listen address; keep loopback when trusting proxy IP headers
+public_url = "https://daily.hallada.net" # base URL for EPUB rating links and same-origin checks
+session_days = 30                    # sliding lifetime for web login sessions
+login_attempts = 10                  # login POSTs allowed per client IP in one throttle window
+login_window_minutes = 15            # length of the login throttle window
+jobs_enabled = true                  # let the dashboard start daily-epub-job@<name>.service
+journal_lines = 300                  # job-page journal tail; valid range 10..=5000
 # hmac_secret via DAILY_EPUB_SERVER__HMAC_SECRET env (32+ random bytes)
-# Optional Basic auth for the XTC OPDS feed and file downloads:
+# Optional Basic auth for /opds/* and /files/*; without it those existing
+# routes remain public. A signed-in web user can download without Basic auth.
 # basic_auth_user = "daily"
 # basic_auth_pass = "..."

@@ -221,3 +221,59 @@ implementer needs that are easy to get wrong:
   `assessment_reuse_days`, `--rescore` ignores it, and `admit::hygiene` never treats it as a low
   score. Because a recovered article's row carries the editor's model, reuse accepts rows whose
   `model` is either configured model (`triage::reusable_models`).
+
+## Web dashboard (2026-09-03)
+
+Verified on the production host and against the implemented dependency graph on 2026-09-03:
+
+- **Host authorization and units:** polkit 124 supports JavaScript rules. The installed rule must
+  grant user `daily-epub` only `org.freedesktop.systemd1.manage-units`, verb `start`, for units
+  matching `^daily-epub-job@[a-z0-9-]+\.service$`. `daily-epub.service` now needs
+  `SupplementaryGroups=systemd-journal` to read job logs and `/etc/daily-epub` in
+  `ReadWritePaths` to atomically replace `config.toml`. The job template deliberately omits
+  `MemoryDenyWriteExecute` because generate jobs can launch Node's JIT; the server retains it.
+- **Settings writes:** direct `toml_edit 0.25` performs typed, comment/order-preserving updates.
+  A candidate file is loaded through `Config::load` before its permissions are copied and it is
+  renamed over the original. The process therefore needs write access to the containing
+  directory, not only the file. Every changed dotted key is written to `config_changes`.
+- **Authentication stack:** `axum-login` is pinned to git revision
+  `151c72d7a1b4646830f86b4332e6bd6e34d719a7`, whose graph contains `tower-sessions 0.15`.
+  The local `SqliteSessionStore` uses this crate's existing sqlx 0.9 pool because the published
+  tower SQLx store is incompatible. `password-auth 1.0` supplies Argon2id PHC hashes;
+  `tower_governor 0.8` throttles login POSTs. Its smart IP extractor trusts forwarded headers,
+  so production must bind to loopback and accept traffic only from the configured reverse proxy.
+- **Test environment:** router tests use `tower::ServiceExt::oneshot`, temp SQLite databases and
+  `MockRunner`; they do not bind or invoke systemd. This sandbox forbids loopback listeners, so
+  the four `curate::llm::tests::anthropic_*` tests, the three OpenAI tests using the same fake
+  listener, `extract::tests::relative_urls_resolve_against_the_url_we_landed_on`, the five
+  listener-based `server::tests::*`, and `tests/m7_server.rs` are filtered only for sandbox runs.
+  The complete suite is expected to run outside the sandbox.
+
+Implementation-time decisions recorded while landing dashboard steps 1–7:
+
+- `/files/*` remains public when Basic auth is not configured, preserving existing OPDS
+  acquisition behavior. With Basic auth configured, either valid Basic credentials or any valid
+  web session authorizes a download. This intentionally resolves the plan's conflicting request
+  to redirect unauthenticated downloads in favor of its compatibility acceptance criterion.
+- Final reports are attached to an issue after `finish_run`, when publish timing and status are
+  complete. Issue snapshots omit article bodies and rehydrate them from `articles`; old rows use
+  the reduced fallback renderer. The CLI password prompt uses `rpassword` after it became
+  available to the orchestrator.
+- Flash handlers extract the exact tower session installed by the auth layer through
+  `Extension<Session>`. Dashboard `down` forms persist the established `not_for_me` label.
+  Ratings-page feed credit includes rating decay because that is what `signals::feed_rates`
+  actually uses; the stored prompt verdict count is inferred from the prompt text because
+  `TasteProfile.verdicts` is not persisted.
+- Dynamic list SQL is assembled only from fixed fragments and allow-listed sort/filter names,
+  wrapped in sqlx 0.9's `AssertSqlSafe`; all user values remain bound parameters. Funnel bars
+  count rows that reached each stage because a row stores the stage where it stopped. SVG/meter
+  attributes replace inline styles under the CSP. Article pages omit the nominal extract method
+  because database reconstruction currently hard-codes it and would display misleading data.
+- Shipped providers cannot be removed: deleting one would cause `Config::default()` to restore
+  it. They remain editable and may be unreferenced; custom providers are removable. An absent
+  setting already equal to its submitted default stays absent. Settings that are captured while
+  building the server, session, or throttle layers carry restart notices.
+- A job start reloads a hand-edited config before inserting and starting the unit, retaining the
+  last-good config if reload fails. The offline lifecycle test uses `features-prune`; generate
+  run-id linkage is covered separately. CLI duration statistics retain finished dry runs for
+  byte-identical output, while dashboard run series and overview sparklines exclude them.

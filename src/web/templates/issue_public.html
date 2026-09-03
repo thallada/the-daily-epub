@@ -2,6 +2,6 @@
 {% if empty %}<h1>No issue yet</h1><p>The first issue has not been published.</p>{% else %}
 <p class="dateline">{{ issue.display_date }} · No. {{ issue.issue_number }}</p><p class="stats">{{ issue.stats_line }}</p>
 <p class="strap">A personal morning paper, assembled daily; the selection is the reader's, the words are the authors'.</p>
-{% if !downloads.is_empty() %}<p class="downloads">{% for download in downloads %}<a href="{{ download.href }}">{{ download.label }} ({{ download.size_bytes }} bytes)</a>{% endfor %}</p>{% endif %}
+{% if !downloads.is_empty() %}<p class="downloads">{% for download in downloads %}<a href="{{ download.href }}">{{ download.label }} ({{ download.size }})</a>{% endfor %}</p>{% endif %}
 {% for section in issue.sections %}<section><h2>{{ section.name }}</h2>{% for entry in section.entries %}<article{% if entry.is_lead %} class="lead"{% endif %}><h3><a href="{{ entry.url }}">{{ entry.title }}</a></h3><p class="byline">{% match entry.author %}{% when Some with (author) %}{{ author }} · {% when None %}{% endmatch %}{{ entry.source }} ({{ entry.domain }}) · {{ entry.reading_minutes }} min · {{ entry.word_count }} words</p>{% if !entry.comment_links.is_empty() %}<p class="comments">{% for link in entry.comment_links %}<a rel="noopener" target="_blank" href="{{ link.url }}">{{ link.label }}{% if !link.meta.is_empty() %}: {{ link.meta }}{% endif %}</a>{% endfor %}</p>{% endif %}</article>{% endfor %}</section>{% endfor %}
 <p><a href="/issues">Browse the archive</a></p>{% endif %}</article>{% endblock %}

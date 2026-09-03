@@ -25,6 +25,7 @@ pub struct Download {
     pub label: String,
     pub href: String,
     pub size_bytes: u64,
+    pub size: String,
 }
 
 #[derive(Debug, Clone)]
@@ -192,7 +193,24 @@ fn download(
         label: label.to_string(),
         href: format!("/files/{kind}/{}", crate::web::encode_component(name)),
         size_bytes: metadata.len(),
+        size: format_file_size(metadata.len()),
     })
+}
+
+fn format_file_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let bytes_float = bytes as f64;
+    if bytes_float >= GB {
+        format!("{:.1} GB", bytes_float / GB)
+    } else if bytes_float >= MB {
+        format!("{:.1} MB", bytes_float / MB)
+    } else if bytes_float >= KB {
+        format!("{:.1} KB", bytes_float / KB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 #[derive(Debug)]
@@ -1072,7 +1090,7 @@ mod tests {
             Edition::Standard,
             "epub",
         ));
-        std::fs::write(&standard, b"epub").unwrap();
+        std::fs::write(&standard, vec![0; 2 * 1024]).unwrap();
         let mut config = crate::config::Config::default();
         config.publish.epub_dir = epub_dir;
         let app = crate::server::router(crate::server::AppState::new(db, config, None));
@@ -1089,8 +1107,17 @@ mod tests {
             .unwrap();
         let issue = response_text(issue).await;
         assert!(issue.contains("Download EPUB"));
+        assert!(issue.contains("2.0 KB"));
+        assert!(!issue.contains("2048 bytes"));
         assert!(!issue.contains("Download X4 EPUB"));
         assert!(!issue.contains("Download XTC"));
+    }
+
+    #[test]
+    fn file_sizes_are_human_readable() {
+        assert_eq!(format_file_size(42), "42 B");
+        assert_eq!(format_file_size(1536), "1.5 KB");
+        assert_eq!(format_file_size(5 * 1024 * 1024), "5.0 MB");
     }
 
     #[tokio::test]

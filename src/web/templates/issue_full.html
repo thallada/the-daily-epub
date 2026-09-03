@@ -4,7 +4,7 @@
 <hr class="rule">
 <h1 class="kicker">The Brief</h1>
 <div class="editorial">{{ front_page_html|safe }}</div>
-{% if !downloads.is_empty() %}<p class="downloads">{% for download in downloads %}<a class="button" href="{{ download.href }}">Download {{ download.label }} <small>({{ download.size_bytes }} bytes)</small></a>{% endfor %}</p>{% endif %}
+{% if !downloads.is_empty() %}<p class="downloads">{% for download in downloads %}<a class="button" href="{{ download.href }}">Download {{ download.label }} <small>({{ download.size }})</small></a>{% endfor %}</p>{% endif %}
 <hr class="rule">
 <h1>In This Issue</h1>
 {% for section in sections %}<section><h2>{{ section.name }}</h2><ul class="index-list">{% for entry in section.entries %}<li class="index-entry">

@@ -56,7 +56,7 @@ document.querySelectorAll("table[data-filter]").forEach((table) => {
       row.hidden = needle !== "" && !row.textContent.toLowerCase().includes(needle);
     });
   });
-||||||| 849231e
+});
 /* step 5: settings — "reset to default" fills the field with its default */
 document.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-reset]");

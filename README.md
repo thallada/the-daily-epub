@@ -30,6 +30,7 @@ Gemini (or anything OpenAI-compatible) is a config line plus an API key.
 
 - Full design: [`docs/plans/2026-08-15-the-daily-epub.md`](docs/plans/2026-08-15-the-daily-epub.md)
 - Implementation decisions: [`docs/plans/2026-08-15-implementation-notes.md`](docs/plans/2026-08-15-implementation-notes.md)
+- Web dashboard rollout: [`docs/runbooks/web-dashboard-rollout.md`](docs/runbooks/web-dashboard-rollout.md)
 
 ---
 
@@ -114,7 +115,7 @@ sudo install -m0755 target/release/daily-epub /usr/local/bin/
 
 ```
 daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm] [--skip-embeddings] [--rescore]
-daily-epub serve                # rating endpoints + OPDS catalog + downloads
+daily-epub serve                # public site, private dashboard, OPDS, ratings, downloads
 daily-epub profile rebuild      # regenerate learned profile adjustments
 daily-epub ratings list [--days 90] [--label loved|good|down|cleared]
 daily-epub ratings set --article 42 --label loved --note "excellent"
@@ -134,6 +135,7 @@ daily-epub users disable USER
 daily-epub users enable USER
 daily-epub users list
 daily-epub users logout USER    # revoke all of USER's sessions
+daily-epub job run NAME         # systemd job-unit entry point; normally not run by hand
 ```
 
 `--dry-run` does everything except deliver: it still ingests, persists entries and
@@ -184,19 +186,58 @@ start with `!`. It exits non-zero only on a validation error — a missing key o
 file is a warning, since the run degrades rather than fails — and never opens
 the database or takes the lock, so it is safe to run next to a live `generate`.
 
+## Web site and dashboard
+
+The server is both the public newspaper index and the private operator UI. An
+anonymous visitor sees only titles, authors, sources, metadata and outbound
+comment links; generated and scraped text stays private. A signed-in `user`
+sees complete issues and article chapters and can download artifacts. An
+`admin` can additionally rate articles and use every `/dashboard/*` page,
+including settings and jobs. Personalization is shared across accounts for now.
+
+Accounts are deliberately managed on the host, not in the browser. Usernames
+are case-insensitive and passwords must be 12–1024 characters. Bootstrap with
+`daily-epub users add <username> --admin`; use `users passwd`, `role`,
+`disable`/`enable`, `list`, and `logout` for later administration. Password
+changes and disabling a user revoke that user's sessions. `/dashboard/users`
+is a read-only view of roles, status, login times, and open sessions.
+
+The Jobs page starts only the fixed job catalogue as
+`daily-epub-job@<name>.service`; the web server never runs the pipeline inside
+its own process. Install `systemd/daily-epub-job@.service` and the narrowly
+scoped `systemd/50-daily-epub.rules` polkit rule, and put the server user in
+`systemd-journal` so the page can show status and its configured journal tail.
+Set `server.jobs_enabled = false` to make starts unavailable.
+
+The Settings page derives its fields from `Config`, rewrites `config.toml` in
+place with `toml_edit`, preserves comments/order and file permissions, validates
+before an atomic rename, and records attributed history. It re-reads hand edits
+on the next view. `DAILY_EPUB_*` overrides appear locked, and secrets are shown
+only as present or absent. Shipped providers (`deepseek`, `anthropic`,
+`gemini`) cannot be removed because defaults would restore them; leave one
+unreferenced or edit it. Custom providers can be removed after no `[llm]` role
+references them. The service needs `/etc/daily-epub` in `ReadWritePaths` for
+these writes.
+
 ### Web routes
 
 | Route | Access | Purpose |
 |---|---|---|
-| `GET /` | Public | Latest issue as a source-link-only index. |
-| `GET /issues` | Public | Issue archive. |
-| `GET /issues/{date}` | Public | One source-link-only issue index. |
-| `GET /feed.xml` | Public | Atom feed carrying the same public issue content. |
-| `GET /robots.txt`, `/static/{file}` | Public | Crawler policy and embedded site assets. |
-| `GET/POST /login`, `POST /logout`, `GET /account` | Session | Sign in, sign out, and account management. |
-| `GET /dashboard` | Admin | Private operator dashboard. |
-| `GET /files/epub/{name}`, `/files/xtc/{name}` | Session or Basic auth | Published downloads; existing OPDS clients continue to use Basic auth. |
-| `GET /opds/daily.xml`, `/healthz`, `/issues.json`, `/r/...` | Existing policy | OPDS, health, reports, and signed rating links. |
+| `GET /`, `/issues`, `/issues/{date}`, `/feed.xml` | Public | Latest issue, archive, stripped issue index, and equivalent Atom feed. Signed-in issue views expand to the complete issue. |
+| `GET /issues/{date}/articles/{id}`, `/world`, `/behind` | User or admin | Private article, World Briefing, and Behind the paper chapters. |
+| `GET /robots.txt`, `/static/{file}` | Public | Crawler policy and embedded CSS, JavaScript, and favicon. |
+| `GET/POST /login`, `POST /logout` | Public/session | Sign in and out; login attempts are throttled per client IP. |
+| `GET /account`, `POST /account/password`, `/account/logout-all` | User or admin | Change the current password or revoke sessions. |
+| `POST /rate` | Admin | Append an attributed dashboard rating event. |
+| `GET /dashboard` | Admin | Run, budget, rating, job, and config overview. |
+| `GET /dashboard/runs[/{id}]`, `/articles[/{id}]`, `/ratings`, `/stats` | Admin | Pipeline history, article explanations, rating contributions/history, and evaluation stats. |
+| `GET/POST /dashboard/profile`, `POST /dashboard/profile/restore` | Admin | Edit `profile.md`, inspect prompts/adjustments, and restore a version. |
+| `GET/POST /dashboard/settings`, `POST /dashboard/settings/providers`, `GET /dashboard/settings/history` | Admin | Edit validated configuration and inspect its audit log. |
+| `GET /dashboard/jobs`, `GET /dashboard/jobs/{id}`, `POST /dashboard/jobs/{name}` | Admin | Start fixed systemd jobs and inspect status and logs. |
+| `GET /dashboard/users` | Admin | Read-only users and open-session list; edits use the CLI. |
+| `GET /files/epub/{name}`, `/files/xtc/{name}` | Public if Basic auth is unset; otherwise session or Basic auth | Published downloads. Keeping them public when Basic auth is absent preserves existing OPDS acquisition links. |
+| `GET /opds`, `/opds/`, `/opds/daily.xml` | Existing optional Basic auth | OPDS acquisition feed. |
+| `GET /r/...`, `/healthz`, `/issues.json` | Existing policy | HMAC rating links, health, and issue reports. |
 
 ---
 
@@ -387,15 +428,21 @@ sudo setfacl -m u:daily-epub:rwx /srv/bookorbit/libraries/daily-epub   # or chow
 
 # units
 sudo install -m0644 systemd/daily-epub.service systemd/daily-epub-generate.service \
-                    systemd/daily-epub-generate.timer /etc/systemd/system/
+                    systemd/daily-epub-generate.timer systemd/daily-epub-job@.service \
+                    /etc/systemd/system/
+sudo install -m0644 systemd/50-daily-epub.rules /etc/polkit-1/rules.d/
 sudo systemctl daemon-reload
 sudo systemctl enable --now daily-epub.service daily-epub-generate.timer
 ```
 
-> **Keep `ReadWritePaths` in sync.** Both units run under `ProtectSystem=strict`
-> and list the publish directories explicitly:
+> **Keep `ReadWritePaths` in sync.** The units run under `ProtectSystem=strict`
+> and list the publish directories explicitly; the server additionally lists
+> `/etc/daily-epub` so Settings can replace `config.toml`:
 > ```
+> # generate and job units
 > ReadWritePaths=/home/thallada/bookorbit/books/daily-epub /var/lib/daily-epub/xtc
+> # server unit
+> ReadWritePaths=/home/thallada/bookorbit/books/daily-epub /var/lib/daily-epub/xtc /etc/daily-epub
 > ```
 > If you change `publish.epub_dir` or `publish.xtc_dir` in the config, change
 > these lines too and `systemctl daemon-reload`, or publishing fails with
@@ -727,5 +774,6 @@ From spec §7, plus what implementation turned up:
   `triage:` / `assess:` log lines (`… 3 rejected (2 recovered on gemini)`), the
   ` · N rejected` suffix on the `curation:` line, or
   `sqlite3 /var/lib/daily-epub/daily-epub.db "select stage, count(*) from article_assessments where kind = 'provider_rejected' group by stage"`.
-- **One reader, one issue per day.** There is no multi-user support and no
-  weekly/retrospective edition (spec §6).
+- **One shared reader profile, one issue per day.** Multiple login accounts and
+  `user`/`admin` roles are supported, but they share one personalization model;
+  there is no per-user issue or weekly/retrospective edition (spec §6).

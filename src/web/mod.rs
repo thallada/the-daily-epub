@@ -244,7 +244,11 @@ impl<T: Template> IntoResponse for Html<T> {
                 .into_response(),
             Err(error) => {
                 tracing::error!(%error, "rendering web template failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error").into_response()
+                error_page_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Server error",
+                    "The request could not be completed.",
+                )
             }
         }
     }
@@ -274,6 +278,22 @@ struct ErrorTemplate {
     page: Page,
     heading: String,
     message: String,
+}
+
+fn error_page_response(status: StatusCode, heading: &str, message: &str) -> Response {
+    let rendered = ErrorTemplate {
+        page: Page::new(heading, None, ""),
+        heading: heading.to_string(),
+        message: message.to_string(),
+    }
+    .render()
+    .unwrap_or_else(|_| message.to_string());
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        rendered,
+    )
+        .into_response()
 }
 
 impl IntoResponse for WebError {
@@ -317,19 +337,7 @@ impl IntoResponse for WebError {
             }
             Self::Unauthenticated { .. } => unreachable!(),
         };
-        let rendered = ErrorTemplate {
-            page: Page::new(heading, None, ""),
-            heading: heading.to_string(),
-            message: message.to_string(),
-        }
-        .render()
-        .unwrap_or_else(|_| message.to_string());
-        (
-            status,
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            rendered,
-        )
-            .into_response()
+        error_page_response(status, heading, message)
     }
 }
 
@@ -475,6 +483,7 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
         .merge(account)
         .merge(full_issues)
         .merge(dashboard)
+        .fallback(|| async { WebError::NotFound })
 }
 
 async fn map_forbidden(request: Request, next: Next) -> Response {
@@ -999,5 +1008,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn not_found_and_server_error_pages_use_the_site_layout() {
+        let (_dir, state) = test_state(Config::default()).await;
+        let app = router(state);
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/no-such-page")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let missing = response_text(missing).await;
+        assert!(missing.contains("<!doctype html>"), "{missing}");
+        assert!(missing.contains("The Daily EPUB"), "{missing}");
+        assert!(missing.contains("That page does not exist"), "{missing}");
+
+        let failed = WebError::Internal(anyhow::anyhow!("fixture failure")).into_response();
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let failed = response_text(failed).await;
+        assert!(failed.contains("<!doctype html>"), "{failed}");
+        assert!(failed.contains("The Daily EPUB"), "{failed}");
+        assert!(
+            failed.contains("The request could not be completed"),
+            "{failed}"
+        );
+        assert!(!failed.contains("fixture failure"), "{failed}");
     }
 }
