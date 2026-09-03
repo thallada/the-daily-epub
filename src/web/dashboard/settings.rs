@@ -1834,16 +1834,10 @@ mod tests {
             env_name("providers.gemini.api_key"),
             ProviderConfig::api_key_env_var("gemini")
         );
-        let previous = std::env::var_os(name);
-        // SAFETY: the variable is unique to this test, holds the default
-        // value so a concurrent `Config::load` sees no change, and is
-        // restored before the assertions.
-        unsafe { std::env::set_var(name, "180") };
-        let groups = schema(&Config::default(), None);
-        match previous {
-            Some(value) => unsafe { std::env::set_var(name, value) },
-            None => unsafe { std::env::remove_var(name) },
-        }
+        // Never mutate the process environment here: other tests load the
+        // shipped config through figment concurrently and would see the
+        // variable. The probe is injected instead.
+        let groups = schema_with_env(&Config::default(), None, &|var| var == name);
         assert_eq!(
             field(&groups, "curation.ranking.telemetry_retention_days").source,
             Source::Env(name.to_string())
