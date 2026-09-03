@@ -15,7 +15,7 @@
 
 <h2>Funnel</h2>
 <div class="scroll-x"><table class="funnel-table">
-<thead><tr><th>stage</th><th>reached</th><th class="num">reached</th><th class="num">stopped here</th><th>why</th></tr></thead>
+<thead><tr><th>stage</th><th>share</th><th class="num">reached</th><th class="num">stopped here</th><th>why</th></tr></thead>
 <tbody>{% for stage in funnel %}<tr>
 <td class="cell-tight align-middle"><span class="badge {{ stage.stage }}">{{ stage.stage }}</span></td>
 <td class="funnel-cell"><div class="funnel"><svg width="{{ stage.percent }}%" height="12" role="img" aria-label="{{ stage.reached }} reached"></svg></div></td>
