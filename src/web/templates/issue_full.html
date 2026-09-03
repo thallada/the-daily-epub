@@ -22,12 +22,12 @@
 <dt>Bulk model</dt><dd>{{ colophon.bulk_model }}</dd>
 <dt>Editor model</dt><dd>{{ colophon.editor_model }}</dd>
 <dt>Summaries model</dt><dd>{{ colophon.summaries_model }}</dd>
-<dt>Entries considered</dt><dd>{{ colophon.entries_fetched }} from {{ colophon.feeds_seen }} feeds</dd>
-<dt>Candidates scored</dt><dd>{{ colophon.candidates }}</dd>
+<dt>Entries considered</dt><dd>{% match colophon.entries_fetched %}{% when Some with (entries) %}{{ entries }}{% match colophon.feeds_seen %}{% when Some with (feeds) %} from {{ feeds }} feeds{% when None %} from n/a feeds{% endmatch %}{% when None %}n/a{% endmatch %}</dd>
+<dt>Candidates scored</dt><dd>{% match colophon.candidates %}{% when Some with (candidates) %}{{ candidates }}{% when None %}n/a{% endmatch %}</dd>
 <dt>Articles selected</dt><dd>{{ colophon.article_count }} across {{ colophon.section_count }} sections</dd>
 <dt>Words</dt><dd>{{ colophon.total_words }} · ~{{ colophon.reading_minutes }} min read</dd>
 {% for cost in colophon.provider_costs %}<dt>{{ cost.provider }} cost</dt><dd>{{ cost.cost }}</dd>{% endfor %}
-<dt>Total token cost</dt><dd>{{ colophon.cost_usd }}</dd>
+<dt>Total token cost</dt><dd>{% match colophon.cost_usd %}{% when Some with (cost) %}{{ cost }}{% when None %}n/a{% endmatch %}</dd>
 <dt>Generator</dt><dd>{{ colophon.generator_version }}</dd>
 </dl></footer>
 </article>{% endblock %}

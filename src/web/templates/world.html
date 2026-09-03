@@ -1,5 +1,5 @@
 {% extends "layout.html" %}{% block content %}<article class="reading world-briefing">
-<h1>World Briefing</h1><p class="dateline">{{ display_date }}</p><hr class="rule">
+<h1>World Briefing</h1>{% match display_date %}{% when Some with (date) %}<p class="dateline">{{ date }}</p>{% when None %}{% endmatch %}<hr class="rule">
 <div class="world-body">{{ body_html|safe }}</div>
 <p><a href="{{ issue_href }}">← Back to this issue</a></p>
 </article>{% endblock %}

@@ -19,7 +19,7 @@ These are settled. Do not reopen them during implementation.
 | Frontend | Server-rendered **askama** templates plus one hand-written CSS file and a few hundred lines of plain JavaScript. No node build, no SPA, no framework; assets are embedded in the binary with `include_str!`. |
 | Auth | Username + password, sessions in a SQLite table, one `HttpOnly; Secure; SameSite=Lax` cookie. Users are created from the CLI (`daily-epub users add`). No third-party identity, no passkeys. **Use the ecosystem, not hand-rolled code**: `axum-login` over `tower-sessions` for login/logout/session lifecycle and route guards, `password-auth` for argon2 hashing, `tower_governor` for the login throttle. axum-login is taken from **git at the pinned rev `151c72d7a1b4646830f86b4332e6bd6e34d719a7`** (`main`, 2026-05-07: tower-sessions 0.15 and the finalized `Require` API), not from the 0.18.0 crates.io release; §2 records why and what was verified. The only auth code we write is a ~60-line `SessionStore` over our own sqlx pool (the official store pins sqlx 0.8; we are on 0.9) and the `AuthnBackend` glue (§6). |
 | Roles | `user` and `admin`. **Signed-in users of either role** see every issue in full HTML (Brief, summaries, article bodies, discussions, World Briefing, Behind the paper) and can download the EPUB/XTC files. **Admins** additionally rate, browse the dashboard, edit settings and the profile, and start jobs. |
-| Copyright boundary | Anonymous visitors never see generated or scraped text: no Brief, no summaries, no `why` lines, no article bodies, no comments, no World Briefing. Sections, reading time and word count are fine. The public renderer takes a dedicated `PublicIssue` type that cannot carry the private fields. |
+| Copyright boundary | Anonymous visitors see titles, metadata, AI summaries and `why` lines, but never the Brief, article bodies, comments or World Briefing. The public renderer takes a dedicated `PublicIssue` type that cannot carry those private fields. |
 | Personalization | One shared algorithm for now. `rating_events` gains a nullable `user_id` so a per-user algorithm is possible later; nothing else is per user. HMAC links from the EPUB stay unattributed (`user_id NULL`, `source = 'epub'`). |
 | Settings | Every key of `config.toml`, grouped by table, editable from the UI and written back **in place with comments preserved** (`toml_edit`). A key overridden by a `DAILY_EPUB_*` environment variable is shown locked. API keys and the HMAC secret are shown as present/absent only. The page re-reads the file on every view, so hand edits show up. `data/profile.md` gets an editor with version history. |
 | Actions | A Jobs page starts pipeline work through **systemd**: `systemctl start daily-epub-job@<name>.service`, permitted by a polkit rule for the `daily-epub` user. The server never runs the pipeline in-process (its unit has `MemoryDenyWriteExecute=yes`, which the XTC converter's Node JIT cannot live with). |
@@ -438,12 +438,15 @@ pub struct PublicEntry {
     pub source: String,                            // feed_title
     pub domain: String,                            // host of `url`, "www." stripped
     pub reading_minutes: i64, pub word_count: i64,
+    pub summary: Option<String>, pub why: Option<String>,
     pub comment_links: Vec<CommentLink>,           // {label, url, meta}
     pub is_lead: bool,
 }
 ```
 
-`PublicIssue::from(&Issue)` is the only constructor, and it copies exactly these fields. There is deliberately no `summary`, `why`, `body`, `brief`, or `world` field, so the template cannot render them. Test `public_issue_carries_no_generated_text` (§17) renders the fixture issue publicly and asserts that the Brief, every summary, every `why`, every article body sentence and every comment string are absent from the HTML.
+`PublicIssue::from(&Issue)` is the only constructor, and it copies exactly these fields. There is deliberately no `body`, `brief`, or `world` field, so the template cannot render them. Test `public_issue_shows_summaries_and_why_but_no_bodies` (§17) renders the fixture issue publicly and asserts that summaries and `why` lines are present while the Brief, every article body sentence and every comment string are absent from the HTML.
+
+**2026-09-03:** the operator chose to publish summaries and why lines; bodies/Brief/World/comments remain private.
 
 `comment_links`: one per `SocialRef` with an `item_url` — label `Hacker News` / `Lobsters` / `Reddit`, meta `"342 points · 210 comments"` — plus `Comments` for `entries.comments_url` when it is set and differs from the article URL. Links carry `rel="noopener"` and `target="_blank"`; article title links are plain `<a href>` (the aggregator's purpose is to send readers to the source, so no `nofollow`).
 
@@ -461,12 +464,12 @@ Public pages send `Cache-Control: public, max-age=300` only when no session cook
 
 ## 8. Full issue views for signed-in users
 
-`web::issue::load(state, date) -> Result<Option<IssueView>>` (§5.2). `IssueView { issue: Issue, downloads: Vec<Download>, from_json: bool }` where `Download { label, href, size_bytes }` lists the standard EPUB, the X4 EPUB and the XTC file **only when the file at `issues.*_path` (or `publish::issue_filename` in `epub_dir`) exists**; `href` is the existing `/files/epub/{name}` or `/files/xtc/{name}`.
+`web::issue::load(state, date) -> Result<Option<IssueView>>` (§5.2). `IssueView` carries the reconstructed `Issue`, downloads, snapshot provenance, and an optional trusted World Briefing HTML fragment recovered from a legacy EPUB. `Download { label, href, size_bytes }` lists the standard EPUB, the X4 EPUB and the XTC file **only when the file at `issues.*_path` (or `publish::issue_filename` in `epub_dir`) exists**; `href` is the existing `/files/epub/{name}` or `/files/xtc/{name}`.
 
 - `GET /issues/{date}` (signed in) — `issue_full.html`: masthead and dateline; **The Brief** (`editorial.front_page_html`, already sanitized XHTML, rendered `|safe`); download buttons; the index exactly like the EPUB's In-this-issue page: per section, title (→ `/issues/{date}/articles/{id}`), `source · N min read`, summary, `Why it's here`, the rating widget for admins; then links to World Briefing and Behind the paper; the colophon facts (models, cost, counts) in a footer block.
 - `GET /issues/{date}/articles/{article_id}` — `article.html`: `article-header` (title linking to the source, byline, meta line `feed · 1,850 words · ~8 min`, `Why it's here`, social line via `chapters::social_line`, summary), the body (`ammonia::clean(articles.content_html)` — reuse the same ammonia configuration the EPUB uses; do **not** run `to_xhtml`; `<img>` tags keep their remote `src` and get `loading="lazy" referrerpolicy="no-referrer"`), the discussion (`comments::render_xhtml(discussion, title)` when `pick.discussion` is present; it is XHTML and renders fine as HTML), prev/next links in issue order, "Read online ↗", and the rating widget for admins. 404 when the article is not in that issue.
-- `GET /issues/{date}/world` — `world::render_xhtml` in the layout; 404 when the issue has no briefing (fallback issues).
-- `GET /issues/{date}/behind` — the same lines as the EPUB chapter (`chapters::behind_*_line`, near misses linking to `/dashboard/articles/{id}` for admins).
+- `GET /issues/{date}/world` — `world::render_xhtml` in the layout for snapshots, or trusted `OEBPS/world.xhtml` body content recovered from our own sanitized legacy EPUB; 404 when neither source has a briefing.
+- `GET /issues/{date}/behind` — the same lines as the EPUB chapter (`chapters::behind_*_line`, near misses linking to `/dashboard/articles/{id}` for admins), reconstructed from the stored report/run for legacy issues.
 
 `/files/epub/{name}` and `/files/xtc/{name}`: `serve_file` accepts either a valid session (any role) **or** the existing Basic auth; when neither is present and Basic auth is configured, it challenges as today; when Basic auth is not configured it redirects HTML clients to `/login?next=` and returns 401 to others. OPDS clients are unaffected.
 
@@ -716,7 +719,7 @@ New dependencies: `axum-login = { git = "https://github.com/maxcountryman/axum-l
 - Login: `tower_governor` per-IP limit on `POST /login` (§6.5); equal-timing dummy verification for unknown users; no username enumeration in messages ("invalid username or password").
 - Authorization: `login_required!`/`permission_required!` route layers on whole sub-routers (§6.3), so a forgotten check in one handler still redirects or 403s; `POST /rate` sits under the admin layer.
 - Headers on every app response (via a `tower-http` `SetResponseHeader` layer or a small middleware): `Content-Security-Policy: default-src 'self'; img-src * data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; form-action 'self'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. (`img-src *` because article pages show remote images for signed-in users.) nginx keeps adding its own.
-- All user text is escaped by askama; the only `|safe` inputs are `front_page_html` (already sanitized by the pipeline), `ammonia::clean` output, `comments::render_xhtml` and `world::render_xhtml` (built from sanitized comment/portal HTML), and the server-rendered SVG sparklines.
+- All user text is escaped by askama; the only `|safe` inputs are `front_page_html` (already sanitized by the pipeline), `ammonia::clean` output, `comments::render_xhtml`, `world::render_xhtml` (built from sanitized comment/portal HTML), a recovered World Briefing body read from our own sanitized EPUB XHTML, and the server-rendered SVG sparklines.
 - Settings: secrets never rendered, never written; validation through `Config::load` before rename; permissions preserved; every change attributed. `Path` fields are written as given — the operator is the admin, and the config validates paths on load.
 - Jobs: unit names come only from the fixed catalogue regex; the polkit rule allows `start` only, on that regex only, for that user only.
 - Files: `safe_join` unchanged. `robots.txt` disallows private paths. Public caching only without a cookie.
@@ -735,8 +738,8 @@ No test touches the network or systemd. Router-level tests use `tower::ServiceEx
 - **Guards**: anonymous `/dashboard` → 302 `/login?next=/dashboard`; signed-in `user` role → 403 site page; admin → 200; `POST /rate` follows the same three outcomes.
 - **Origin check**: POST with `Sec-Fetch-Site: cross-site` → 403; absent fetch metadata and a foreign `Origin` → 403; same-origin passes; the HMAC rating route (GET) is untouched.
 - **Throttle**: with a test governor config of burst 3, the fourth `POST /login` from one address → 429; another address still passes.
-- **Public rendering**: `public_issue_carries_no_generated_text` (§7.1); comment links built from social refs and `comments_url`; the World Briefing is absent publicly; the feed validates as XML, has one entry per issue, and its content is the public list; `robots.txt` content; `Cache-Control` public without a cookie, `no-store` with one.
-- **Full rendering**: signed-in `/issues/{date}` contains the Brief, summaries and `why`; article page contains the body and the discussion; the fallback loader (no `issue_json`) renders an issue from rows with no world/discussion links; downloads listed only for files that exist; `/files/epub` accepts a session, still challenges Basic auth when configured and no session.
+- **Public rendering**: `public_issue_shows_summaries_and_why_but_no_bodies` (§7.1); comment links built from social refs and `comments_url`; the Brief, article bodies, comments and World Briefing are absent publicly; the feed validates as XML, has one entry per issue, and its content is the public list with summaries and why lines; `robots.txt` content; `Cache-Control` public without a cookie, `no-store` with one.
+- **Full rendering**: signed-in `/issues/{date}` contains the Brief, summaries and `why`; article page contains the body and the discussion; the fallback loader (no `issue_json`) reconstructs colophon/Behind facts and recovers the World chapter from an available EPUB while discussion links remain unavailable; downloads listed only for files that exist; `/files/epub` accepts a session, still challenges Basic auth when configured and no session.
 - **issue_json**: `record_issue` writes it with empty bodies; the loader rehydrates bodies; `runs.report_json` and `issues.report_json` written; `/issues.json` returns real reports.
 - **Rating**: `POST /rate` as admin appends a `dashboard` event with `user_id`; as user → 403; anonymous → redirect/401; `cleared` writes value 0; JSON and form variants; `next` validated.
 - **Dashboard queries**: funnel counts match a seeded `candidate_runs` set; candidate filters and sorts are allow-listed (an unknown sort falls back, never errors); config diff finds changed dotted keys and ignores unchanged; articles list filters; article detail shows assessments, run history and rating events.
@@ -806,6 +809,7 @@ Each step is a shippable commit or small series; `cargo fmt --check`, `cargo cli
 | Search over article bodies (FTS5) | Title/URL `LIKE` feels slow or insufficient. |
 | Live log streaming (SSE) on the job page | The 5-second refresh feels slow. |
 | Passkeys / WebAuthn | A second admin or a phishing concern. |
-| Public per-article "why" lines | The operator decides the second-person tone reads fine publicly (one field added to `PublicEntry`, one template line, one test change). |
 | Backfilling `issue_json` for old issues from the EPUB files on disk | Only the last `retention_days` of EPUBs exist; the fallback renderer covers the rest. |
 | Charts beyond sparklines | `stats` grows a question the tables cannot answer. |
+
+**2026-09-03:** the operator chose to publish summaries and why lines; bodies/Brief/World/comments remain private. Public per-article why lines are therefore no longer deferred.

@@ -16,10 +16,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use daily_epub::config::Config;
+use daily_epub::curate::telemetry::{self, CandidateRun};
 use daily_epub::db::Db;
 use daily_epub::epub::fixtures;
-use daily_epub::report::{RunReport, RunStatus};
-use daily_epub::types::{Article, Entry, Issue, Pick};
+use daily_epub::report::{ProviderUsage, RunReport};
+use daily_epub::types::{Article, Edition, Entry, Issue, Pick, TokenUsage};
 use daily_epub::web::users;
 use jiff::Timestamp;
 use jiff::civil::Date;
@@ -116,7 +118,7 @@ fn story_article(index: usize, story: &(&str, &str, &str, &str, &str, i64)) -> A
         source.feed_id = article.feed_id;
     }
     article.content_html = body_html(title, words);
-    if index % 3 != 0 {
+    if !index.is_multiple_of(3) {
         article.social.clear();
     }
     if index == 4 {
@@ -198,7 +200,12 @@ fn dev_issue(date: Date, issue_number: i64, generated_at: Timestamp) -> Issue {
     issue
 }
 
-async fn seed_issue(db: &Db, issue: &mut Issue, with_snapshot: bool) -> anyhow::Result<()> {
+async fn seed_issue(
+    db: &Db,
+    issue: &mut Issue,
+    with_snapshot: bool,
+    epub_path: Option<&Path>,
+) -> anyhow::Result<i64> {
     for pick in &mut issue.lineup.picks {
         let article = &pick.article;
         db.upsert_entry(&Entry {
@@ -232,12 +239,13 @@ async fn seed_issue(db: &Db, issue: &mut Issue, with_snapshot: bool) -> anyhow::
             serde_json::to_string(&snapshot)
         })
         .transpose()?;
-    let run_id = db
-        .start_run(issue.meta.date, issue.meta.generated_at)
-        .await?;
-    let mut report = RunReport::new(issue.meta.date, issue.meta.generated_at);
-    report.finished_at = Some(issue.meta.generated_at);
-    report.status = RunStatus::Ok;
+    let started_at = issue
+        .meta
+        .generated_at
+        .checked_sub(jiff::Span::new().minutes(22))
+        .unwrap_or(issue.meta.generated_at);
+    let run_id = db.start_run(issue.meta.date, started_at).await?;
+    let mut report = RunReport::new(issue.meta.date, started_at);
     report.counts.entries_fetched = issue.colophon.entries_fetched;
     report.counts.feeds_seen = issue.colophon.feeds_seen;
     report.counts.articles = issue.behind.considered;
@@ -252,17 +260,37 @@ async fn seed_issue(db: &Db, issue: &mut Issue, with_snapshot: bool) -> anyhow::
     report.counts.knn_gate = issue.behind.knn_gate;
     report.counts.feed_gate = issue.behind.feed_gate;
     report.counts.embedded = 300;
-    report.cost_usd = issue.colophon.cost_usd;
+    report.provider_costs = issue
+        .colophon
+        .provider_costs
+        .iter()
+        .map(|(provider, cost_usd)| {
+            (
+                provider.clone(),
+                ProviderUsage {
+                    usage: TokenUsage::default(),
+                    cost_usd: *cost_usd,
+                },
+            )
+        })
+        .collect();
     report.config_json = serde_json::json!({
-        "llm": {"bulk": {"model": issue.colophon.models.bulk}, "editor": {"model": issue.colophon.models.editor}},
-        "voyage": {"model": "voyage-4"},
+        "models": {
+            "bulk": issue.colophon.models.bulk,
+            "editor": issue.colophon.models.editor,
+            "embedding": issue.behind.embedding_model,
+        },
+        "editorial": {"summary_model": "editor"},
+        "voyage": {"model": issue.behind.embedding_model},
     });
+    report.finish(issue.meta.generated_at);
     db.finish_run(run_id, &report).await?;
+    let epub_path = epub_path.map(|path| path.to_string_lossy().into_owned());
     db.upsert_issue(
         issue.meta.date,
         issue.meta.issue_number,
         issue.meta.generated_at,
-        None,
+        epub_path.as_deref(),
         None,
         None,
         Some(&issue.editorial.front_page_html),
@@ -272,6 +300,71 @@ async fn seed_issue(db: &Db, issue: &mut Issue, with_snapshot: bool) -> anyhow::
     .await?;
     db.replace_issue_articles(issue.meta.date, &issue.lineup.picks)
         .await?;
+    Ok(run_id)
+}
+
+async fn seed_near_misses(db: &Db, run_id: i64) -> anyhow::Result<()> {
+    for (index, title, quality, fit, utility) in [
+        (
+            0,
+            "The Database Migration That Almost Made the Cut",
+            8.4,
+            7.2,
+            81.5,
+        ),
+        (
+            1,
+            "An Oral History of the First E-Ink Hackers",
+            7.7,
+            8.1,
+            79.8,
+        ),
+        (2, "A Very Good Essay About Municipal Trees", 8.0, 6.8, 76.2),
+    ] {
+        let mut article = fixtures::article(0, 9001 + index, title);
+        article.feed_title = "The Near-Miss Review".into();
+        let entry = Entry {
+            id: article.best_entry_id,
+            feed_id: article.feed_id,
+            feed_title: Some(article.feed_title.clone()),
+            category: article.category.clone(),
+            title: article.title.clone(),
+            url: article.url.clone(),
+            canonical_url: Some(article.canonical_url.clone()),
+            author: article.author.clone(),
+            published_at: article.published_at,
+            comments_url: article.comments_url.clone(),
+            raw_content: article.content_html.clone(),
+            fetched_at: article.first_seen,
+        };
+        db.upsert_entry(&entry).await?;
+        let article_id = db.upsert_article(&article).await?;
+        let signals = serde_json::json!({
+            "v": 1,
+            "raw": {"quality": quality, "fit": fit},
+            "norm": {"quality": quality / 10.0, "fit": fit / 10.0},
+            "present": {"quality": true, "fit": true},
+            "weights": {"quality": 0.6, "fit": 0.4},
+        })
+        .to_string();
+        telemetry::write(
+            db,
+            &CandidateRun {
+                run_id,
+                article_id,
+                stage: "shortlisted",
+                excluded_reason: Some("not_selected"),
+                admitted_by: Some("[\"blend\"]"),
+                signals_json: &signals,
+                utility: Some(utility),
+                rank_utility: Some(index + 10),
+                cluster_id: Some(index),
+                cluster_rank: Some(1),
+                editor_why: None,
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -310,10 +403,20 @@ async fn main() -> anyhow::Result<()> {
     // Legacy issue: published before `issue_json` existed, so the site must
     // rebuild the colophon and back matter from the run instead.
     let mut legacy = dev_issue("2026-09-01".parse()?, 18, "2026-09-01T05:31:00Z".parse()?);
-    seed_issue(&db, &mut legacy, false).await?;
+    let mut epub_config = Config::default();
+    epub_config.publish.epub_dir = dir.join("epubs");
+    let legacy_epub = daily_epub::epub::build_edition_with_images(
+        &legacy,
+        Edition::Standard,
+        &epub_config,
+        &epub_config.publish.epub_dir,
+        &[],
+    )?;
+    let legacy_run = seed_issue(&db, &mut legacy, false, Some(&legacy_epub.path)).await?;
+    seed_near_misses(&db, legacy_run).await?;
 
     let mut latest = dev_issue("2026-09-02".parse()?, 19, "2026-09-02T05:29:00Z".parse()?);
-    seed_issue(&db, &mut latest, true).await?;
+    seed_issue(&db, &mut latest, true, None).await?;
 
     println!("seeded {}", db_path.display());
     println!(

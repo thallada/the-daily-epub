@@ -38,6 +38,8 @@ pub struct PublicEntry {
     pub domain: String,
     pub reading_minutes: i64,
     pub word_count: i64,
+    pub summary: Option<String>,
+    pub why: Option<String>,
     pub comment_links: Vec<CommentLink>,
     pub is_lead: bool,
 }
@@ -102,6 +104,20 @@ impl From<&Issue> for PublicIssue {
                                 domain: domain(&article.canonical_url),
                                 reading_minutes: article.reading_minutes(),
                                 word_count: article.word_count,
+                                summary: pick
+                                    .summary
+                                    .as_deref()
+                                    .or_else(|| {
+                                        issue
+                                            .editorial
+                                            .summaries
+                                            .get(&article.id)
+                                            .map(String::as_str)
+                                    })
+                                    .map(str::trim)
+                                    .filter(|summary| !summary.is_empty())
+                                    .map(str::to_string),
+                                why: pick.why.clone(),
                                 comment_links,
                                 is_lead: pick.is_lead,
                             }
@@ -356,16 +372,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn public_issue_carries_no_generated_text() {
+    fn public_issue_shows_summaries_and_why_but_no_bodies() {
         let source = crate::epub::fixtures::issue();
         let public = PublicIssue::from(&source);
         let html = FeedEntryTemplate { issue: &public }.render().unwrap();
         assert!(html.contains("The Lead Story"));
         assert!(html.contains("Hacker News"));
+        assert!(html.contains("What it argues, and why it is worth the time."));
+        assert!(html.contains("A short abstract for the second piece."));
+        assert!(html.contains("The systems story with enough operational detail to matter"));
+        assert!(html.contains("A small-scene delight outside the usual technical orbit"));
         for private in [
             "Two stories today",
-            "What it argues",
-            "systems story",
             "Body of",
             "write path",
             "Agreed",

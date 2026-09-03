@@ -189,8 +189,9 @@ the database or takes the lock, so it is safe to run next to a live `generate`.
 ## Web site and dashboard
 
 The server is both the public newspaper index and the private operator UI. An
-anonymous visitor sees only titles, authors, sources, metadata and outbound
-comment links; generated and scraped text stays private. A signed-in `user`
+anonymous visitor sees titles, authors, sources, metadata, AI summaries, why
+lines and outbound comment links; article bodies, the Brief, the World Briefing
+and comments stay private. A signed-in `user`
 sees complete issues and article chapters and can download artifacts. An
 `admin` can additionally rate articles and use every `/dashboard/*` page,
 including settings and jobs. Personalization is shared across accounts for now.

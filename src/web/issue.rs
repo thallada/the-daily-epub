@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path as FsPath, PathBuf};
 
 use anyhow::Context;
@@ -14,7 +15,7 @@ use crate::epub::chapters;
 use crate::pipeline::display_date;
 use crate::server::AppState;
 use crate::types::{
-    ArticleId, BehindThePaper, Colophon, Edition, Editorial, Issue, IssueMeta, Lineup, Pick,
+    ArticleId, BehindThePaper, Colophon, Edition, Editorial, Issue, IssueMeta, Lineup, Models, Pick,
 };
 use crate::web::rate::{self, RatingWidget};
 use crate::web::session::{AuthSession, Viewer};
@@ -33,6 +34,42 @@ pub struct IssueView {
     pub issue: Issue,
     pub downloads: Vec<Download>,
     pub from_json: bool,
+    pub world_html: Option<String>,
+    has_behind: bool,
+    legacy_counts: Option<LegacyColophonCounts>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LegacyColophonCounts {
+    entries_fetched: Option<i64>,
+    feeds_seen: Option<i64>,
+    candidates: Option<i64>,
+    cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Default)]
+struct LegacyFacts {
+    has_source: bool,
+    run_id: Option<i64>,
+    entries_fetched: Option<i64>,
+    feeds_seen: Option<i64>,
+    considered: Option<i64>,
+    eligible: Option<i64>,
+    triaged: Option<i64>,
+    assessed: Option<i64>,
+    shortlisted: Option<i64>,
+    candidates: Option<i64>,
+    selected: Option<i64>,
+    admitted_by: BTreeMap<String, i64>,
+    rated_with_embeddings: Option<i64>,
+    knn_gate: Option<f64>,
+    feed_gate: Option<f64>,
+    embedded: Option<i64>,
+    provider_costs: BTreeMap<String, f64>,
+    cost_usd: Option<f64>,
+    config_json: Option<serde_json::Value>,
+    started_at: Option<jiff::Timestamp>,
+    finished_at: Option<jiff::Timestamp>,
 }
 
 pub async fn load(
@@ -42,6 +79,11 @@ pub async fn load(
 ) -> anyhow::Result<Option<IssueView>> {
     let Some(row) = db.issue_by_date(date).await? else {
         return Ok(None);
+    };
+    let legacy = if row.issue_json.is_none() {
+        Some(load_legacy_facts(db, date, row.report_json.as_deref()).await?)
+    } else {
+        None
     };
     let (mut issue, from_json) = if let Some(raw) = row.issue_json.as_deref() {
         let mut issue: Issue = serde_json::from_str(raw).context("decoding issues.issue_json")?;
@@ -114,6 +156,33 @@ pub async fn load(
         let total_words = picks.iter().map(|pick| pick.article.word_count).sum();
         let article_count = picks.len() as i64;
         let section_count = section_order.len() as i64;
+        let Some(facts) = legacy.as_ref() else {
+            return Err(anyhow::anyhow!("legacy issue facts were not loaded"));
+        };
+        let (models, embedding_model, models_from_current_config) =
+            legacy_models(facts.config_json.as_ref(), facts.embedded, config);
+        let near_misses = if let Some(run_id) = facts.run_id {
+            match crate::curate::telemetry::paper_near_misses(db, run_id, 10).await {
+                Ok(near_misses) => near_misses,
+                Err(error) => {
+                    tracing::debug!(%error, %date, run_id, "could not recover legacy near misses");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let generation_secs = facts
+            .started_at
+            .zip(facts.finished_at)
+            .map(|(started, finished)| (finished.as_second() - started.as_second()).max(0))
+            .unwrap_or(0);
+        let generator_version = if models_from_current_config {
+            "not recorded (issue predates snapshots; model names from the current configuration)"
+                .to_string()
+        } else {
+            "not recorded (issue predates snapshots)".to_string()
+        };
         (
             Issue {
                 meta: IssueMeta {
@@ -132,17 +201,47 @@ pub async fn load(
                     section_order,
                 },
                 editorial: Editorial {
-                    front_page_html: row.front_page_html.unwrap_or_default(),
+                    front_page_html: row.front_page_html.clone().unwrap_or_default(),
                     summaries,
                 },
                 world_briefing: None,
-                colophon: Colophon::default(),
-                behind: BehindThePaper::default(),
+                colophon: Colophon {
+                    provider_costs: facts.provider_costs.clone(),
+                    models: models.clone(),
+                    entries_fetched: facts.entries_fetched.unwrap_or(0),
+                    feeds_seen: facts.feeds_seen.unwrap_or(0),
+                    candidates: facts.candidates.unwrap_or(0),
+                    cost_usd: facts.cost_usd.unwrap_or(0.0),
+                    generator_version,
+                },
+                behind: BehindThePaper {
+                    considered: facts.considered.unwrap_or(0),
+                    feeds_seen: facts.feeds_seen.unwrap_or(0),
+                    eligible: facts.eligible.unwrap_or(0),
+                    triaged: facts.triaged.unwrap_or(0),
+                    read_closely: facts.assessed.unwrap_or(0),
+                    shortlisted: facts.shortlisted.unwrap_or(0),
+                    selected: facts.selected.unwrap_or(article_count),
+                    admitted_by: facts.admitted_by.clone(),
+                    rated_with_embeddings: facts.rated_with_embeddings.unwrap_or(0),
+                    knn_gate: facts.knn_gate.unwrap_or(0.0),
+                    feed_gate: facts.feed_gate.unwrap_or(0.0),
+                    near_misses,
+                    models,
+                    embedding_model,
+                    cost_usd: facts.cost_usd.unwrap_or(0.0),
+                    generation_secs,
+                },
             },
             false,
         )
     };
     issue.meta.article_count = issue.lineup.picks.len() as i64;
+    let world_html = if from_json || issue.world_briefing.is_some() {
+        None
+    } else {
+        recover_world_html(&row, config)
+    };
     let downloads = [
         (
             "EPUB",
@@ -173,7 +272,328 @@ pub async fn load(
         issue,
         downloads,
         from_json,
+        world_html,
+        has_behind: from_json || legacy.as_ref().is_some_and(|facts| facts.has_source),
+        legacy_counts: legacy.map(|facts| LegacyColophonCounts {
+            entries_fetched: facts.entries_fetched,
+            feeds_seen: facts.feeds_seen,
+            candidates: facts.candidates,
+            cost_usd: facts.cost_usd,
+        }),
     }))
+}
+
+async fn load_legacy_facts(
+    db: &Db,
+    date: Date,
+    issue_report_json: Option<&str>,
+) -> anyhow::Result<LegacyFacts> {
+    let issue_report =
+        issue_report_json.and_then(|raw| parse_legacy_json(raw, "issues.report_json"));
+    let report_started_at = issue_report
+        .as_ref()
+        .and_then(|report| report.get("started_at"))
+        .and_then(serde_json::Value::as_str);
+    let run = if let Some(started_at) = report_started_at {
+        sqlx::query(
+            "SELECT id, started_at, finished_at, entries_fetched, candidates, selected,
+                    cost_usd, provider_costs_json, config_json, report_json
+             FROM runs
+             WHERE date = ? AND started_at = ? AND finished_at IS NOT NULL
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(date.to_string())
+        .bind(started_at)
+        .fetch_optional(db.pool())
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT id, started_at, finished_at, entries_fetched, candidates, selected,
+                    cost_usd, provider_costs_json, config_json, report_json
+             FROM runs
+             WHERE date = ? AND finished_at IS NOT NULL
+             ORDER BY finished_at DESC, id DESC LIMIT 1",
+        )
+        .bind(date.to_string())
+        .fetch_optional(db.pool())
+        .await?
+    };
+    let run_report = run
+        .as_ref()
+        .and_then(|row| row.get::<Option<String>, _>("report_json"))
+        .as_deref()
+        .and_then(|raw| parse_legacy_json(raw, "runs.report_json"));
+    let report = issue_report.as_ref().or(run_report.as_ref());
+
+    let run_config = run
+        .as_ref()
+        .and_then(|row| row.get::<Option<String>, _>("config_json"))
+        .as_deref()
+        .and_then(|raw| parse_legacy_json(raw, "runs.config_json"));
+    let config_json = report
+        .and_then(|value| value.get("config_json"))
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or(run_config);
+
+    let run_provider_costs = run
+        .as_ref()
+        .and_then(|row| row.get::<Option<String>, _>("provider_costs_json"))
+        .as_deref()
+        .and_then(|raw| parse_legacy_json(raw, "runs.provider_costs_json"))
+        .as_ref()
+        .map(provider_costs)
+        .unwrap_or_default();
+    let report_provider_costs = report
+        .and_then(|value| value.get("provider_costs"))
+        .map(provider_costs)
+        .unwrap_or_default();
+
+    let report_timestamp = |name: &str| {
+        report
+            .and_then(|value| value.get(name))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|raw| raw.parse().ok())
+    };
+    let run_timestamp = |name: &str| {
+        run.as_ref()
+            .and_then(|row| row.get::<Option<String>, _>(name))
+            .and_then(|raw| raw.parse().ok())
+    };
+    let run_i64 = |name: &str| run.as_ref().map(|row| row.get::<i64, _>(name));
+    let run_f64 = |name: &str| run.as_ref().map(|row| row.get::<f64, _>(name));
+
+    Ok(LegacyFacts {
+        has_source: issue_report_json.is_some() || run.is_some(),
+        run_id: run.as_ref().map(|row| row.get("id")),
+        entries_fetched: report_count(report, "entries_fetched")
+            .or_else(|| run_i64("entries_fetched")),
+        feeds_seen: report_count(report, "feeds_seen"),
+        considered: report_count(report, "articles"),
+        eligible: report_count(report, "eligible"),
+        triaged: report_count(report, "triaged"),
+        assessed: report_count(report, "assessed"),
+        shortlisted: report_count(report, "shortlisted"),
+        candidates: report_count(report, "candidates").or_else(|| run_i64("candidates")),
+        selected: report_count(report, "selected").or_else(|| run_i64("selected")),
+        admitted_by: report
+            .and_then(|value| value.pointer("/counts/admitted_by"))
+            .and_then(serde_json::Value::as_object)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|(name, count)| count.as_i64().map(|count| (name.clone(), count)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        rated_with_embeddings: report_count(report, "rated_with_embeddings"),
+        knn_gate: report_count_f64(report, "knn_gate"),
+        feed_gate: report_count_f64(report, "feed_gate"),
+        embedded: report_count(report, "embedded"),
+        provider_costs: if report_provider_costs.is_empty() {
+            run_provider_costs
+        } else {
+            report_provider_costs
+        },
+        cost_usd: report
+            .and_then(|value| value.get("cost_usd"))
+            .and_then(serde_json::Value::as_f64)
+            .or_else(|| run_f64("cost_usd")),
+        config_json,
+        started_at: report_timestamp("started_at").or_else(|| run_timestamp("started_at")),
+        finished_at: report_timestamp("finished_at").or_else(|| run_timestamp("finished_at")),
+    })
+}
+
+fn parse_legacy_json(raw: &str, column: &str) -> Option<serde_json::Value> {
+    match serde_json::from_str(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::debug!(%error, column, "could not decode legacy issue metadata");
+            None
+        }
+    }
+}
+
+fn report_count(report: Option<&serde_json::Value>, name: &str) -> Option<i64> {
+    report
+        .and_then(|value| value.get("counts"))
+        .and_then(|counts| counts.get(name))
+        .and_then(serde_json::Value::as_i64)
+}
+
+fn report_count_f64(report: Option<&serde_json::Value>, name: &str) -> Option<f64> {
+    report
+        .and_then(|value| value.get("counts"))
+        .and_then(|counts| counts.get(name))
+        .and_then(serde_json::Value::as_f64)
+}
+
+fn provider_costs(value: &serde_json::Value) -> BTreeMap<String, f64> {
+    value
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(provider, usage)| {
+            usage
+                .as_f64()
+                .or_else(|| usage.get("cost_usd").and_then(serde_json::Value::as_f64))
+                .map(|cost| (provider.clone(), cost))
+        })
+        .collect()
+}
+
+fn legacy_models(
+    stored: Option<&serde_json::Value>,
+    embedded: Option<i64>,
+    config: &crate::config::Config,
+) -> (Models, String, bool) {
+    let stored_model = |role: &str| {
+        stored
+            .and_then(|value| value.pointer(&format!("/models/{role}")))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                stored
+                    .and_then(|value| value.pointer(&format!("/llm/{role}/model")))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                let provider = stored
+                    .and_then(|value| value.pointer(&format!("/llm/{role}")))
+                    .and_then(serde_json::Value::as_str)?;
+                stored
+                    .and_then(|value| value.pointer(&format!("/providers/{provider}/model")))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+    };
+
+    let current_bulk = || {
+        config
+            .bulk_provider()
+            .map(|(_, provider)| provider.model.clone())
+            .unwrap_or_else(|| "none".into())
+    };
+    let mut used_current = false;
+    let bulk = stored_model("bulk").unwrap_or_else(|| {
+        used_current = true;
+        current_bulk()
+    });
+    let stored_editor = stored_model("editor");
+    let editor = match stored_editor.as_deref() {
+        Some("disabled") | Some("none") => format!("{bulk} (bulk fallback)"),
+        Some(editor) => editor.to_string(),
+        None => {
+            used_current = true;
+            config
+                .editor_provider()
+                .map(|(_, provider)| provider.model.clone())
+                .unwrap_or_else(|| format!("{bulk} (bulk fallback)"))
+        }
+    };
+    let summary_role = stored
+        .and_then(|value| value.pointer("/editorial/summary_model"))
+        .and_then(serde_json::Value::as_str);
+    let summaries = match summary_role {
+        Some("bulk") => bulk.clone(),
+        Some("editor") => match stored_editor.as_deref() {
+            Some("disabled") | Some("none") => bulk.clone(),
+            _ => editor.clone(),
+        },
+        _ => {
+            used_current = true;
+            match config.editorial.summary_model {
+                crate::config::SummaryModel::Editor if config.editor_provider().is_some() => config
+                    .editor_provider()
+                    .map(|(_, provider)| provider.model.clone())
+                    .unwrap_or_else(|| bulk.clone()),
+                _ => bulk.clone(),
+            }
+        }
+    };
+    let configured_embedding = stored
+        .and_then(|value| value.pointer("/models/embedding"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            stored
+                .and_then(|value| value.pointer("/voyage/model"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            used_current = true;
+            if config.voyage.enabled {
+                config.voyage.model.clone()
+            } else {
+                "disabled".into()
+            }
+        });
+    let embedding = if embedded == Some(0) {
+        "none".to_string()
+    } else {
+        configured_embedding
+    };
+    (
+        Models {
+            bulk,
+            editor,
+            summaries,
+        },
+        embedding,
+        used_current,
+    )
+}
+
+fn recover_world_html(row: &crate::db::IssueRow, config: &crate::config::Config) -> Option<String> {
+    let fallback = config.publish.epub_dir.join(crate::publish::issue_filename(
+        row.date,
+        Edition::Standard,
+        "epub",
+    ));
+    let path = row
+        .epub_path
+        .as_deref()
+        .map(FsPath::new)
+        .filter(|path| path.is_file())
+        .map(FsPath::to_path_buf)
+        .or_else(|| fallback.is_file().then_some(fallback))?;
+    match read_world_html(&path) {
+        Ok(html) => Some(html),
+        Err(error) => {
+            tracing::debug!(%error, path = %path.display(), "could not recover legacy World Briefing");
+            None
+        }
+    }
+}
+
+fn read_world_html(path: &FsPath) -> anyhow::Result<String> {
+    let file = std::fs::File::open(path).context("opening legacy EPUB")?;
+    let mut archive = zip::ZipArchive::new(file).context("opening legacy EPUB archive")?;
+    let mut chapter = archive
+        .by_name("OEBPS/world.xhtml")
+        .context("reading OEBPS/world.xhtml")?;
+    let mut xhtml = String::new();
+    chapter
+        .read_to_string(&mut xhtml)
+        .context("decoding OEBPS/world.xhtml")?;
+    world_body_without_heading(&xhtml).context("finding the World Briefing body")
+}
+
+fn world_body_without_heading(xhtml: &str) -> Option<String> {
+    let body_start = xhtml.find("<body")?;
+    let content_start = crate::html::tag_end(xhtml, body_start)?;
+    let content_end = xhtml[content_start..].rfind("</body>")? + content_start;
+    let mut body = xhtml[content_start..content_end].to_string();
+    if let Some(heading_start) = body.find("<h1")
+        && let Some(heading_open_end) = crate::html::tag_end(&body, heading_start)
+        && let Some(relative_end) = body[heading_open_end..].find("</h1>")
+    {
+        let heading_end = heading_open_end + relative_end + "</h1>".len();
+        body.replace_range(heading_start..heading_end, "");
+    }
+    Some(body.trim().to_string()).filter(|body| !body.is_empty())
 }
 
 fn download(
@@ -243,14 +663,14 @@ struct ColophonView {
     editor_model: String,
     summaries_model: String,
     provider_costs: Vec<CostLine>,
-    entries_fetched: i64,
-    feeds_seen: i64,
-    candidates: i64,
+    entries_fetched: Option<i64>,
+    feeds_seen: Option<i64>,
+    candidates: Option<i64>,
     article_count: i64,
     section_count: i64,
     total_words: String,
     reading_minutes: i64,
-    cost_usd: String,
+    cost_usd: Option<String>,
     generator_version: String,
 }
 
@@ -301,7 +721,7 @@ struct ArticleTemplate {
 #[template(path = "world.html")]
 struct WorldTemplate {
     page: Page,
-    display_date: String,
+    display_date: Option<String>,
     body_html: String,
     issue_href: String,
 }
@@ -368,7 +788,7 @@ pub async fn render_full(
             name,
         })
         .collect();
-    let colophon = colophon_view(&view.issue);
+    let colophon = colophon_view(&view.issue, view.legacy_counts.as_ref());
     let mut page = Page::new(format!("Issue {date}"), Some(viewer), "latest");
     page.flash = take_flash(session).await?;
     Ok(Html(IssueFullTemplate {
@@ -379,8 +799,8 @@ pub async fn render_full(
         front_page_html: view.issue.editorial.front_page_html.clone(),
         downloads: view.downloads,
         sections,
-        has_world: view.issue.world_briefing.is_some(),
-        has_behind: view.from_json,
+        has_world: view.issue.world_briefing.is_some() || view.world_html.is_some(),
+        has_behind: view.has_behind,
         date,
         colophon,
     })
@@ -489,15 +909,22 @@ pub async fn world(
     let Some(view) = load(&state.db, &state.config(), date).await? else {
         return Err(WebError::NotFound);
     };
-    let Some(briefing) = view.issue.world_briefing else {
+    let (display_date, body_html) = if let Some(briefing) = view.issue.world_briefing {
+        (
+            Some(display_date(briefing.date)),
+            crate::world::render_xhtml(&briefing),
+        )
+    } else if let Some(body_html) = view.world_html {
+        (None, body_html)
+    } else {
         return Err(WebError::NotFound);
     };
     let mut page = Page::new("World Briefing", Some(viewer), "latest");
     page.flash = take_flash(&session).await?;
     Ok(Html(WorldTemplate {
         page,
-        display_date: display_date(briefing.date),
-        body_html: crate::world::render_xhtml(&briefing),
+        display_date,
+        body_html,
         issue_href: format!("/issues/{date}"),
     })
     .into_response())
@@ -519,7 +946,7 @@ pub async fn behind(
     let Some(view) = load(&state.db, &state.config(), date).await? else {
         return Err(WebError::NotFound);
     };
-    if !view.from_json {
+    if !view.has_behind {
         return Err(WebError::NotFound);
     }
     let behind = &view.issue.behind;
@@ -561,8 +988,21 @@ fn summary_for<'a>(issue: &'a Issue, pick: &'a Pick) -> Option<&'a str> {
         .filter(|summary| !summary.trim().is_empty())
 }
 
-fn colophon_view(issue: &Issue) -> ColophonView {
+fn colophon_view(issue: &Issue, legacy_counts: Option<&LegacyColophonCounts>) -> ColophonView {
     let colophon = &issue.colophon;
+    let entries_fetched = legacy_counts
+        .map(|counts| counts.entries_fetched)
+        .unwrap_or(Some(colophon.entries_fetched));
+    let feeds_seen = legacy_counts
+        .map(|counts| counts.feeds_seen)
+        .unwrap_or(Some(colophon.feeds_seen));
+    let candidates = legacy_counts
+        .map(|counts| counts.candidates)
+        .unwrap_or(Some(colophon.candidates));
+    let cost_usd = legacy_counts
+        .map(|counts| counts.cost_usd)
+        .unwrap_or(Some(colophon.cost_usd))
+        .map(|cost| format!("${cost:.4}"));
     ColophonView {
         generated_at: issue.meta.generated_at.to_string(),
         bulk_model: colophon.models.bulk.clone(),
@@ -576,14 +1016,14 @@ fn colophon_view(issue: &Issue) -> ColophonView {
                 cost: format!("${cost:.4}"),
             })
             .collect(),
-        entries_fetched: colophon.entries_fetched,
-        feeds_seen: colophon.feeds_seen,
-        candidates: colophon.candidates,
+        entries_fetched,
+        feeds_seen,
+        candidates,
         article_count: issue.meta.article_count,
         section_count: issue.meta.section_count,
         total_words: thousands(issue.meta.total_words),
         reading_minutes: issue.meta.reading_minutes,
-        cost_usd: format!("${:.4}", colophon.cost_usd),
+        cost_usd,
         generator_version: if colophon.generator_version.is_empty() {
             format!("daily-epub {}", env!("CARGO_PKG_VERSION"))
         } else {
@@ -732,15 +1172,120 @@ mod tests {
             }
             serde_json::to_string(&snapshot).unwrap()
         });
+        let epub_path = if with_json {
+            None
+        } else {
+            Some(
+                crate::epub::build_edition_with_images(
+                    &issue,
+                    Edition::Standard,
+                    &crate::config::Config::default(),
+                    dir.path(),
+                    &[],
+                )
+                .unwrap()
+                .path,
+            )
+        };
+        let started_at = issue
+            .meta
+            .generated_at
+            .checked_sub(jiff::Span::new().minutes(23))
+            .unwrap();
+        let run_id = db.start_run(issue.meta.date, started_at).await.unwrap();
+        let mut report = crate::report::RunReport::new(issue.meta.date, started_at);
+        report.counts.entries_fetched = issue.colophon.entries_fetched;
+        report.counts.feeds_seen = issue.colophon.feeds_seen;
+        report.counts.articles = issue.behind.considered;
+        report.counts.eligible = issue.behind.eligible;
+        report.counts.triaged = issue.behind.triaged;
+        report.counts.assessed = issue.behind.read_closely;
+        report.counts.shortlisted = issue.behind.shortlisted;
+        report.counts.candidates = issue.colophon.candidates;
+        report.counts.selected = issue.meta.article_count;
+        report.counts.admitted_by = issue.behind.admitted_by.clone();
+        report.counts.rated_with_embeddings = issue.behind.rated_with_embeddings;
+        report.counts.knn_gate = issue.behind.knn_gate;
+        report.counts.feed_gate = issue.behind.feed_gate;
+        report.counts.embedded = 300;
+        report.provider_costs = issue
+            .colophon
+            .provider_costs
+            .iter()
+            .map(|(provider, cost_usd)| {
+                (
+                    provider.clone(),
+                    crate::report::ProviderUsage {
+                        usage: crate::types::TokenUsage::default(),
+                        cost_usd: *cost_usd,
+                    },
+                )
+            })
+            .collect();
+        report.config_json = json!({
+            "models": {
+                "bulk": issue.colophon.models.bulk,
+                "editor": issue.colophon.models.editor,
+                "embedding": issue.behind.embedding_model,
+            },
+            "editorial": {"summary_model": "editor"},
+            "voyage": {"model": issue.behind.embedding_model},
+        });
+        report.finish(issue.meta.generated_at);
+        db.finish_run(run_id, &report).await.unwrap();
+
+        if !with_json {
+            let mut article = crate::epub::fixtures::article(0, 3001, "Legacy near miss");
+            article.feed_title = "Near Misses Weekly".into();
+            db.upsert_entry(&Entry {
+                id: article.best_entry_id,
+                feed_id: article.feed_id,
+                feed_title: Some(article.feed_title.clone()),
+                category: article.category.clone(),
+                title: article.title.clone(),
+                url: article.url.clone(),
+                canonical_url: Some(article.canonical_url.clone()),
+                author: article.author.clone(),
+                published_at: article.published_at,
+                comments_url: article.comments_url.clone(),
+                raw_content: article.content_html.clone(),
+                fetched_at: article.first_seen,
+            })
+            .await
+            .unwrap();
+            let article_id = db.upsert_article(&article).await.unwrap();
+            crate::curate::telemetry::write(
+                &db,
+                &crate::curate::telemetry::CandidateRun {
+                    run_id,
+                    article_id,
+                    stage: "shortlisted",
+                    excluded_reason: Some("not_selected"),
+                    admitted_by: Some("[\"blend\"]"),
+                    signals_json: r#"{"v":1,"raw":{"quality":8.2,"fit":7.4}}"#,
+                    utility: Some(81.0),
+                    rank_utility: Some(3),
+                    cluster_id: Some(1),
+                    cluster_rank: Some(2),
+                    editor_why: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let report_json = serde_json::to_string(&report).unwrap();
+        let epub_path = epub_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
         db.upsert_issue(
             issue.meta.date,
             issue.meta.issue_number,
             issue.meta.generated_at,
-            None,
+            epub_path.as_deref(),
             None,
             None,
             Some(&issue.editorial.front_page_html),
-            Some("{\"status\":\"ok\"}"),
+            Some(&report_json),
             issue_json.as_deref(),
         )
         .await
@@ -793,6 +1338,16 @@ mod tests {
             ["Top Stories", "Niche Corner"]
         );
         assert!(loaded.issue.world_briefing.is_none());
+        assert!(loaded.world_html.as_deref().is_some_and(|html| {
+            html.contains("Something happened somewhere") && !html.contains("<h1>World Briefing")
+        }));
+        assert_eq!(loaded.issue.colophon.entries_fetched, 431);
+        assert_eq!(loaded.issue.colophon.feeds_seen, 92);
+        assert_eq!(loaded.issue.colophon.candidates, 120);
+        assert_eq!(loaded.issue.colophon.models.bulk, "deepseek-v4-flash");
+        assert_eq!(loaded.issue.colophon.models.editor, "claude-opus-5");
+        assert_eq!(loaded.issue.colophon.models.summaries, "claude-opus-5");
+        assert_eq!(loaded.issue.behind.near_misses[0].title, "Legacy near miss");
         assert!(
             loaded
                 .issue
@@ -836,8 +1391,12 @@ mod tests {
         .unwrap();
         assert!(html.contains("The Lead Story"));
         assert!(html.contains("Hacker News"));
+        assert!(html.contains("What it argues, and why it is worth the time."));
+        assert!(html.contains("Why it's here"));
         assert!(!html.contains("Two stories today"));
         assert!(!html.contains("Something happened"));
+        assert!(!html.contains("Body of"));
+        assert!(!html.contains("write path"));
 
         let archive = app
             .clone()
@@ -880,7 +1439,12 @@ mod tests {
                 .count(),
             1
         );
+        assert!(feed.contains("What it argues, and why it is worth the time."));
+        assert!(feed.contains("Why it&apos;s here"));
         assert!(!feed.contains("Something happened"));
+        assert!(!feed.contains("Two stories today"));
+        assert!(!feed.contains("Body of"));
+        assert!(!feed.contains("write path"));
 
         let robots = app
             .clone()
@@ -1025,7 +1589,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/issues/{}/articles/999999", source.meta.date))
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1036,7 +1600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_full_issue_omits_ephemeral_chapter_links() {
+    async fn fallback_full_issue_recovers_colophon_world_and_behind() {
         let (_dir, db, source) = seeded_issue(false).await;
         crate::web::users::add(&db, "reader", "correct horse battery", false)
             .await
@@ -1061,20 +1625,101 @@ mod tests {
         assert_eq!(issue.status(), StatusCode::OK);
         let issue = response_text(issue).await;
         assert!(issue.contains("Two stories today"));
-        assert!(!issue.contains(&format!("/issues/{}/world", source.meta.date)));
-        assert!(!issue.contains(&format!("/issues/{}/behind", source.meta.date)));
+        assert!(issue.contains(&format!("/issues/{}/world", source.meta.date)));
+        assert!(issue.contains(&format!("/issues/{}/behind", source.meta.date)));
+        assert!(issue.contains("431 from 92 feeds"));
+        assert!(issue.contains("deepseek-v4-flash"));
+        assert!(issue.contains("claude-opus-5"));
+        assert!(!issue.contains("0 from 0 feeds"));
 
         let world = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/issues/{}/world", source.meta.date))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(world.status(), StatusCode::OK);
+        let world = response_text(world).await;
+        assert!(world.contains("Something happened somewhere"));
+        assert_eq!(world.matches("World Briefing").count(), 2); // page title + chapter heading
+
+        let behind = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}/behind", source.meta.date))
                     .header(header::COOKIE, cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(world.status(), StatusCode::NOT_FOUND);
+        assert_eq!(behind.status(), StatusCode::OK);
+        let behind = response_text(behind).await;
+        assert!(behind.contains("Considered 412 articles"));
+        assert!(behind.contains("Legacy near miss"));
+    }
+
+    #[tokio::test]
+    async fn fallback_uses_finished_run_columns_and_marks_unknown_counts_na() {
+        let (_dir, db, source) = seeded_issue(false).await;
+        sqlx::query(
+            "UPDATE issues SET report_json = NULL, epub_path = '/missing/legacy.epub'
+             WHERE date = ?",
+        )
+        .bind(source.meta.date.to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE runs SET report_json = NULL WHERE date = ?")
+            .bind(source.meta.date.to_string())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        crate::web::users::add(&db, "reader", "correct horse battery", false)
+            .await
+            .unwrap();
+        let app = crate::server::router(crate::server::AppState::new(
+            db,
+            crate::config::Config::default(),
+            None,
+        ));
+        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+        let issue = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}", source.meta.date))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(issue.status(), StatusCode::OK);
+        let issue = response_text(issue).await;
+        assert!(issue.contains("431 from n/a feeds"));
+        assert!(issue.contains("120"));
+        assert!(!issue.contains("0 from 0 feeds"));
+        assert!(issue.contains(&format!("/issues/{}/behind", source.meta.date)));
+        assert!(!issue.contains(&format!("/issues/{}/world", source.meta.date)));
+
+        let behind = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}/behind", source.meta.date))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(behind.status(), StatusCode::OK);
+        assert!(response_text(behind).await.contains("Legacy near miss"));
     }
 
     #[tokio::test]
