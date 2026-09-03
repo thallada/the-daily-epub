@@ -111,3 +111,69 @@ document.querySelectorAll("[data-refresh]").forEach((element) => {
   const seconds = Number(element.dataset.refresh);
   if (seconds > 0) setTimeout(() => window.location.reload(), seconds * 1000);
 });
+/* step 4: table-of-contents panel (below `lg`) and reading-progress bar */
+const tocPanel = document.querySelector("[data-toc-panel]");
+const tocToggle = document.querySelector("[data-toc-toggle]");
+if (tocPanel) {
+  // Long issues overflow the sidebar; scroll just enough to show where we are.
+  const revealCurrent = () => {
+    const current = tocPanel.querySelector("a[aria-current=page]");
+    if (!current || tocPanel.scrollHeight <= tocPanel.clientHeight) return;
+    const margin = 24;
+    const top = current.offsetTop - margin;
+    const bottom = current.offsetTop + current.offsetHeight + margin;
+    if (bottom > tocPanel.scrollTop + tocPanel.clientHeight) {
+      tocPanel.scrollTop = bottom - tocPanel.clientHeight;
+    } else if (top < tocPanel.scrollTop) {
+      tocPanel.scrollTop = Math.max(0, top);
+    }
+  };
+  const setOpen = (open) => {
+    tocPanel.dataset.open = open ? "true" : "false";
+    if (tocToggle) tocToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) revealCurrent();
+  };
+  setOpen(false);
+  revealCurrent();
+  if (tocToggle) {
+    tocToggle.addEventListener("click", () => setOpen(tocPanel.dataset.open !== "true"));
+    document.addEventListener("click", (event) => {
+      if (tocPanel.dataset.open !== "true" || tocToggle.contains(event.target)) return;
+      // A tap on a chapter closes the panel; so does a tap anywhere outside it.
+      if (!tocPanel.contains(event.target) || event.target.closest("a")) setOpen(false);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || tocPanel.dataset.open !== "true") return;
+      setOpen(false);
+      tocToggle.focus();
+    });
+    window.matchMedia("(min-width: 64rem)").addEventListener("change", () => setOpen(false));
+  }
+}
+const tocBars = document.querySelectorAll("[data-toc-progress]");
+const tocChapter = document.querySelector("[data-toc-scroll]");
+if (tocBars.length && tocChapter) {
+  // "Chapter N" is worth position N once finished; show N-1 plus how far down we are.
+  const base = Math.max(0, Number(tocBars[0].getAttribute("value")) - 1);
+  let queued = false;
+  const paint = () => {
+    queued = false;
+    const start = window.scrollY + tocChapter.getBoundingClientRect().top;
+    const end = start + tocChapter.offsetHeight - window.innerHeight;
+    const read = end > start ? (window.scrollY - start) / (end - start) : 1;
+    const value = base + Math.min(1, Math.max(0, read));
+    tocBars.forEach((bar) => {
+      // The CSS transition is for navigation, not for tracking a finger.
+      bar.dataset.live = "true";
+      bar.value = value;
+    });
+  };
+  const schedule = () => {
+    if (queued) return;
+    queued = true;
+    window.requestAnimationFrame(paint);
+  };
+  window.addEventListener("scroll", schedule, { passive: true });
+  window.addEventListener("resize", schedule);
+  schedule();
+}

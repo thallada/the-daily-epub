@@ -633,6 +633,165 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
+/// Where the reader is inside the issue, for [`issue_toc`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TocPosition {
+    FrontPage,
+    Article(ArticleId),
+    World,
+    Behind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TocKind {
+    Brief,
+    Section,
+    Chapter,
+    World,
+    Behind,
+    Colophon,
+}
+
+#[derive(Debug)]
+struct TocItem {
+    kind: TocKind,
+    label: String,
+    href: String,
+    number: Option<usize>,
+    minutes: Option<i64>,
+    current: bool,
+    /// First entry of the back-matter group; the template draws a hairline above it.
+    divider: bool,
+}
+
+impl TocItem {
+    fn is_section(&self) -> bool {
+        matches!(self.kind, TocKind::Section)
+    }
+}
+
+/// The table of contents shared by the four signed-in issue pages.
+#[derive(Debug)]
+struct Toc {
+    display_date: String,
+    short_date: String,
+    issue_number: i64,
+    items: Vec<TocItem>,
+    /// 1-based index of the current chapter among the navigable ones; 0 on the issue page.
+    position: usize,
+    /// Navigable chapters: articles plus World Briefing and Behind the paper.
+    total: usize,
+    issue_href: String,
+}
+
+impl Toc {
+    /// Title shown next to the hamburger on narrow screens.
+    fn current_label(&self) -> &str {
+        self.items
+            .iter()
+            .find(|item| item.current)
+            .map_or("Front page", |item| item.label.as_str())
+    }
+}
+
+/// Build the chapter list for `view`, marking `current`.
+///
+/// Chapters are the picks in issue order, numbered `1..n` across sections, with
+/// the section names interleaved as non-links; the World Briefing and Behind the
+/// paper chapters follow when the issue has them, then the colophon anchor.
+fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
+    let issue = &view.issue;
+    let date = issue.meta.date;
+    let issue_href = issue_href(date);
+    let plain = |kind: TocKind, label: &str, href: String, current: bool, divider: bool| TocItem {
+        kind,
+        label: label.to_string(),
+        href,
+        number: None,
+        minutes: None,
+        current,
+        divider,
+    };
+
+    let mut items = vec![plain(
+        TocKind::Brief,
+        "The Brief",
+        issue_href.clone(),
+        current == TocPosition::FrontPage,
+        false,
+    )];
+    let mut position = 0usize;
+    let mut total = 0usize;
+    for name in chapters::section_names(issue) {
+        items.push(plain(TocKind::Section, &name, String::new(), false, false));
+        for pick in issue.lineup.section_picks(&name) {
+            total += 1;
+            let is_current = current == TocPosition::Article(pick.article.id);
+            if is_current {
+                position = total;
+            }
+            items.push(TocItem {
+                kind: TocKind::Chapter,
+                label: pick.article.title.clone(),
+                href: article_href(date, pick.article.id),
+                number: Some(total),
+                minutes: Some(pick.article.reading_minutes()),
+                current: is_current,
+                divider: false,
+            });
+        }
+    }
+
+    let mut divider = true;
+    if issue.world_briefing.is_some() || view.world_html.is_some() {
+        total += 1;
+        let is_current = current == TocPosition::World;
+        if is_current {
+            position = total;
+        }
+        items.push(plain(
+            TocKind::World,
+            "World Briefing",
+            format!("/issues/{date}/world"),
+            is_current,
+            divider,
+        ));
+        divider = false;
+    }
+    if view.has_behind {
+        total += 1;
+        let is_current = current == TocPosition::Behind;
+        if is_current {
+            position = total;
+        }
+        items.push(plain(
+            TocKind::Behind,
+            "Behind the paper",
+            format!("/issues/{date}/behind"),
+            is_current,
+            divider,
+        ));
+        divider = false;
+    }
+    items.push(plain(
+        TocKind::Colophon,
+        "Colophon",
+        format!("{issue_href}#colophon"),
+        false,
+        divider,
+    ));
+
+    Toc {
+        display_date: issue.meta.display_date.clone(),
+        short_date: crate::pipeline::short_display_date(date),
+        issue_number: issue.meta.issue_number,
+        items,
+        position,
+        total,
+        issue_href,
+    }
+}
+
 #[derive(Debug)]
 struct FullEntry {
     title: String,
@@ -679,6 +838,7 @@ struct ColophonView {
 #[template(path = "issue_full.html")]
 struct IssueFullTemplate {
     page: Page,
+    toc: Toc,
     display_date: String,
     issue_number: i64,
     stats_line: String,
@@ -701,6 +861,7 @@ struct ArticleLink {
 #[template(path = "article.html")]
 struct ArticleTemplate {
     page: Page,
+    toc: Toc,
     title: String,
     source_url: String,
     byline: Option<String>,
@@ -722,6 +883,7 @@ struct ArticleTemplate {
 #[template(path = "world.html")]
 struct WorldTemplate {
     page: Page,
+    toc: Toc,
     display_date: Option<String>,
     body_html: String,
     issue_href: String,
@@ -737,6 +899,7 @@ struct NearMissView {
 #[template(path = "behind.html")]
 struct BehindTemplate {
     page: Page,
+    toc: Toc,
     summary_line: String,
     admitted_line: String,
     learned_line: String,
@@ -758,7 +921,8 @@ pub async fn render_full(
     } else {
         HashMap::new()
     };
-    let issue_href = format!("/issues/{date}");
+    let issue_href = issue_href(date);
+    let toc = issue_toc(&view, TocPosition::FrontPage);
     let sections = chapters::section_names(&view.issue)
         .into_iter()
         .map(|name| FullSection {
@@ -795,6 +959,7 @@ pub async fn render_full(
     page.flash = take_flash(session).await?;
     Ok(Html(IssueFullTemplate {
         page,
+        toc,
         display_date: view.issue.meta.display_date.clone(),
         issue_number: view.issue.meta.issue_number,
         stats_line: view.issue.meta.stats_line(),
@@ -834,6 +999,7 @@ pub async fn article(
     else {
         return Err(WebError::NotFound);
     };
+    let toc = issue_toc(&view, TocPosition::Article(article_id));
     let pick = &view.issue.lineup.picks[index];
     let current = if viewer.role == crate::web::users::Role::Admin {
         rate::current_for_issue(&state, date).await?
@@ -861,6 +1027,7 @@ pub async fn article(
     page.flash = take_flash(&session).await?;
     Ok(Html(ArticleTemplate {
         page,
+        toc,
         title: article.title.clone(),
         source_url: article.canonical_url.clone(),
         byline: article.author.as_ref().map(|author| format!("By {author}")),
@@ -890,7 +1057,7 @@ pub async fn article(
         }),
         previous,
         next,
-        issue_href: format!("/issues/{date}"),
+        issue_href: issue_href(date),
     })
     .into_response())
 }
@@ -911,6 +1078,7 @@ pub async fn world(
     let Some(view) = load(&state.db, &state.config(), date).await? else {
         return Err(WebError::NotFound);
     };
+    let toc = issue_toc(&view, TocPosition::World);
     let (display_date, body_html) = if let Some(briefing) = view.issue.world_briefing {
         (
             Some(display_date(briefing.date)),
@@ -925,9 +1093,10 @@ pub async fn world(
     page.flash = take_flash(&session).await?;
     Ok(Html(WorldTemplate {
         page,
+        toc,
         display_date,
         body_html,
-        issue_href: format!("/issues/{date}"),
+        issue_href: issue_href(date),
     })
     .into_response())
 }
@@ -951,11 +1120,13 @@ pub async fn behind(
     if !view.has_behind {
         return Err(WebError::NotFound);
     }
+    let toc = issue_toc(&view, TocPosition::Behind);
     let behind = &view.issue.behind;
     let mut page = Page::new("Behind the paper", Some(viewer), "latest");
     page.flash = take_flash(&session).await?;
     Ok(Html(BehindTemplate {
         page,
+        toc,
         summary_line: chapters::behind_summary_line(behind),
         admitted_line: chapters::behind_admitted_line(behind),
         learned_line: chapters::behind_learned_line(behind),
@@ -968,13 +1139,17 @@ pub async fn behind(
             })
             .collect(),
         models_line: chapters::behind_models_line(behind),
-        issue_href: format!("/issues/{date}"),
+        issue_href: issue_href(date),
     })
     .into_response())
 }
 
 fn article_href(date: Date, article_id: ArticleId) -> String {
     format!("/issues/{date}/articles/{article_id}")
+}
+
+fn issue_href(date: Date) -> String {
+    format!("/issues/{date}")
 }
 
 fn summary_for<'a>(issue: &'a Issue, pick: &'a Pick) -> Option<&'a str> {
@@ -1399,6 +1574,9 @@ mod tests {
         assert!(!html.contains("Something happened"));
         assert!(!html.contains("Body of"));
         assert!(!html.contains("write path"));
+        // The table of contents is a signed-in feature.
+        assert!(!html.contains("data-toc-toggle"));
+        assert!(!html.contains("id=\"toc\""));
 
         let archive = app
             .clone()
@@ -1630,6 +1808,15 @@ mod tests {
         assert!(issue.contains(&format!("/issues/{}/world", source.meta.date)));
         assert!(issue.contains(&format!("/issues/{}/behind", source.meta.date)));
         assert!(issue.contains("431 from 92 feeds"));
+        // The recovered chapters are offered by the sidebar as well as the page.
+        assert!(issue.contains("data-toc-toggle"));
+        assert_eq!(
+            issue
+                .matches(&format!("/issues/{}/world", source.meta.date))
+                .count(),
+            2
+        );
+        assert!(issue.contains("Front page"));
         assert!(issue.contains("deepseek-v4-flash"));
         assert!(issue.contains("claude-opus-5"));
         assert!(!issue.contains("0 from 0 feeds"));
@@ -1709,7 +1896,9 @@ mod tests {
         assert!(issue.contains("120"));
         assert!(!issue.contains("0 from 0 feeds"));
         assert!(issue.contains(&format!("/issues/{}/behind", source.meta.date)));
+        // No EPUB to recover the World Briefing from: the sidebar must not offer it.
         assert!(!issue.contains(&format!("/issues/{}/world", source.meta.date)));
+        assert!(issue.contains("Behind the paper"));
 
         let behind = app
             .oneshot(
@@ -1938,6 +2127,133 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(down, "not_for_me");
+    }
+
+    #[tokio::test]
+    async fn toc_numbers_chapters_across_sections_and_tracks_the_reader() {
+        let (_dir, db, source) = seeded_issue(true).await;
+        let view = load(&db, &crate::config::Config::default(), source.meta.date)
+            .await
+            .unwrap()
+            .unwrap();
+        let front = issue_toc(&view, TocPosition::FrontPage);
+        let shape: Vec<(TocKind, Option<usize>, &str)> = front
+            .items
+            .iter()
+            .map(|item| (item.kind, item.number, item.label.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (TocKind::Brief, None, "The Brief"),
+                (TocKind::Section, None, "Top Stories"),
+                (TocKind::Chapter, Some(1), "The Lead Story"),
+                (TocKind::Section, None, "Niche Corner"),
+                (TocKind::Chapter, Some(2), "A Niche Delight & Other Tales"),
+                (TocKind::World, None, "World Briefing"),
+                (TocKind::Behind, None, "Behind the paper"),
+                (TocKind::Colophon, None, "Colophon"),
+            ]
+        );
+        // Two articles plus the World Briefing and Behind the paper chapters.
+        assert_eq!(front.total, 4);
+        assert_eq!(front.position, 0);
+        assert_eq!(front.current_label(), "The Brief");
+        assert_eq!(front.short_date, "Sat, Aug 15");
+        // Exactly one hairline, above the first back-matter entry.
+        assert_eq!(
+            front
+                .items
+                .iter()
+                .filter(|item| item.divider)
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["World Briefing"]
+        );
+        assert!(
+            front.items[2].minutes.is_some() && front.items[2].href.contains("/articles/"),
+            "chapters link to their article and carry a read time"
+        );
+
+        let second = issue_toc(
+            &view,
+            TocPosition::Article(view.issue.lineup.picks[1].article.id),
+        );
+        assert_eq!(second.position, 2);
+        assert_eq!(second.current_label(), "A Niche Delight & Other Tales");
+        assert_eq!(second.items.iter().filter(|item| item.current).count(), 1);
+        assert_eq!(issue_toc(&view, TocPosition::World).position, 3);
+        assert_eq!(issue_toc(&view, TocPosition::Behind).position, 4);
+    }
+
+    #[tokio::test]
+    async fn the_sidebar_marks_the_current_chapter_on_every_signed_in_issue_page() {
+        let (_dir, db, source) = seeded_issue(true).await;
+        crate::web::users::add(&db, "reader", "correct horse battery", false)
+            .await
+            .unwrap();
+        let app = crate::server::router(crate::server::AppState::new(
+            db,
+            crate::config::Config::default(),
+            None,
+        ));
+        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+        let date = source.meta.date;
+        let article_id = source.lineup.picks[1].article.id;
+        let cases = [
+            (format!("/issues/{date}"), "Front page", issue_href(date)),
+            (
+                article_href(date, article_id),
+                "Chapter 2 of 4",
+                article_href(date, article_id),
+            ),
+            (
+                format!("/issues/{date}/world"),
+                "Chapter 3 of 4",
+                format!("/issues/{date}/world"),
+            ),
+            (
+                format!("/issues/{date}/behind"),
+                "Chapter 4 of 4",
+                format!("/issues/{date}/behind"),
+            ),
+        ];
+        for (path, progress, current) in cases {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&path)
+                        .header(header::COOKIE, &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let html = response_text(response).await;
+            assert!(html.contains("data-toc-toggle"), "{path} has no toc bar");
+            assert!(html.contains("id=\"toc\""), "{path} has no toc panel");
+            assert!(html.contains(progress), "{path} is missing {progress:?}");
+            assert!(
+                html.contains(&format!("href=\"{current}\" aria-current=\"page\"")),
+                "{path} does not mark {current} as current"
+            );
+            assert!(html.contains(&format!("{}#colophon", issue_href(date))));
+            assert!(html.contains("A Niche Delight &#38; Other Tales"));
+        }
+
+        let anonymous = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{date}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::OK);
+        assert!(!response_text(anonymous).await.contains("data-toc-toggle"));
     }
 
     #[test]
