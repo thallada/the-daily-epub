@@ -1,6 +1,9 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard"{% if refresh %} data-refresh="5"{% endif %}>
-<h1><a href="/dashboard/jobs">Jobs</a> › Job {{ job.id }} · {{ job.name }} <span class="badge {{ job.status }}">{{ job.status }}</span></h1>
-{% if !description.is_empty() %}<p class="muted">{{ description }}</p>{% endif %}
+<header class="page-head"><div>
+<p class="page-eyebrow"><a class="text-muted no-underline hover:text-accent" href="/dashboard/jobs">Jobs</a> › Job {{ job.id }}</p>
+<h1 class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1"><span class="font-mono">{{ job.name }}</span> <span class="badge {{ job.status }}">{{ job.status }}</span></h1>
+{% if !description.is_empty() %}<p class="page-desc">{{ description }}</p>{% endif %}
+</div><div class="page-actions"><a class="btn" href="/dashboard/jobs">All jobs</a>{% if let Some(run_id) = job.run_id %}<a class="btn" href="/dashboard/runs/{{ run_id }}">Run {{ run_id }}</a>{% endif %}</div></header>
 <div class="cards">
 <section class="card"><h2>Job</h2>
 <dl class="kv">
@@ -12,7 +15,7 @@
 {% if let Some(message) = job.message %}<dt>Message</dt><dd class="message">{{ message }}</dd>{% endif %}
 {% if let Some(run_id) = job.run_id %}<dt>Run</dt><dd><a href="/dashboard/runs/{{ run_id }}">Run {{ run_id }}</a></dd>{% endif %}
 </dl>
-{% if refresh %}<p class="muted">This page reloads every 5 seconds while the job is requested or running.</p>{% endif %}
+{% if refresh %}<p class="muted text-xs">This page reloads every 5 seconds while the job is requested or running.</p>{% endif %}
 </section>
 <section class="card"><h2>Unit</h2>
 {% if let Some(status) = status %}<dl class="kv">
@@ -22,11 +25,11 @@
 {% if let Some(exited) = status.exited %}<dt>Main exited</dt><dd>{{ exited }}</dd>{% endif %}
 </dl>{% endif %}
 {% if let Some(error) = status_error %}<p class="error">Unit status unavailable: {{ error }}</p>{% endif %}
-<p class="muted">From <code>systemctl show {{ unit }}</code>.</p>
+<p class="muted text-xs">From <code>systemctl show {{ unit }}</code>.</p>
 </section>
 </div>
-<h2>Log</h2>
+<h2>Journal</h2>
 {% if let Some(error) = log_error %}<p class="error">Journal unavailable: {{ error }}</p>{% endif %}
-<p class="muted">Last {{ log_lines }} lines of <code>journalctl -u {{ unit }}</code>.</p>
+<p class="muted text-sm">Last {{ log_lines }} lines of <code>journalctl -u {{ unit }}</code>.</p>
 <pre class="preview journal">{{ log }}</pre>
 </section>{% endblock %}

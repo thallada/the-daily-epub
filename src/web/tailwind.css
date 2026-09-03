@@ -64,29 +64,47 @@
   h1, h2, h3 { @apply text-ink; font-optical-sizing:auto; }
   button, input, select, textarea { font:inherit; @apply rounded-sm border border-rule bg-paper px-2.5 py-1.5 text-ink transition-colors duration-150 placeholder:text-muted focus:border-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper; }
   button { @apply cursor-pointer; }
+  button:disabled, input:disabled, select:disabled, textarea:disabled { @apply cursor-not-allowed border-rule bg-paper-2 text-muted; }
   textarea { @apply min-h-28; }
+  summary { @apply cursor-pointer; }
   table { @apply w-full border-collapse font-sans text-sm leading-snug; font-variant-numeric:tabular-nums; }
   thead { @apply sticky top-0 z-10 bg-paper; }
   th, td { @apply border-b border-rule px-2 py-2 text-left align-top; }
   th { @apply text-[0.72rem] font-semibold uppercase tracking-[0.1em] text-muted; }
   tbody tr { @apply transition-colors duration-150 hover:bg-paper-2; }
   code, pre { @apply font-mono; }
+  meter { @apply block h-2 w-full rounded-sm; -webkit-appearance:none; appearance:none; background:var(--rule); }
+  meter::-webkit-meter-bar { background:var(--rule); border:0; border-radius:2px; height:0.5rem; }
+  meter::-webkit-meter-optimum-value, meter::-webkit-meter-suboptimum-value, meter::-webkit-meter-even-less-good-value { background:var(--good); border-radius:2px; }
+  meter.over::-webkit-meter-optimum-value, meter.over::-webkit-meter-suboptimum-value, meter.over::-webkit-meter-even-less-good-value { background:var(--down); }
+  meter::-moz-meter-bar { background:var(--good); border-radius:2px; }
+  meter.over::-moz-meter-bar { background:var(--down); }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior:auto !important; transition-duration:0.01ms !important; } }
 }
 
+
 @layer components {
+  /* ---------- shared controls ---------- */
   .btn, .button { @apply inline-flex min-h-10 items-center justify-center rounded-sm border border-rule-strong bg-transparent px-3 py-1.5 font-sans text-sm font-medium text-ink no-underline transition-colors duration-150 hover:bg-ink hover:text-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper; }
   .btn-primary { @apply inline-flex min-h-10 items-center justify-center rounded-sm border border-ink bg-ink px-3 py-1.5 font-sans text-sm font-medium text-paper no-underline transition-colors duration-150 hover:border-accent hover:bg-accent hover:text-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper; }
-  .badge { @apply inline-flex items-center rounded-full px-2 py-0.5 font-sans text-xs font-medium; }
+  .btn-quiet { @apply inline-flex min-h-9 items-center gap-1 rounded-sm border-0 bg-transparent px-2 py-1 font-sans text-sm text-muted underline decoration-rule underline-offset-4 hover:text-ink hover:decoration-accent; }
+  .btn:disabled, .btn-primary:disabled, .btn-danger:disabled { @apply cursor-not-allowed border-rule bg-paper-2 text-muted hover:bg-paper-2 hover:text-muted; }
+  .btn-danger, button.danger { @apply inline-flex min-h-9 items-center justify-center rounded-sm border border-down bg-transparent px-2.5 py-1 font-sans text-sm font-medium text-down transition-colors duration-150 hover:bg-down hover:text-paper; }
+
+  .badge { @apply inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 font-sans text-xs font-medium leading-5; color:var(--ink-2); background:color-mix(in oklab, var(--ink) 8%, transparent); }
   .badge.selected, .badge.loved, .badge.ok { color:var(--loved); background:color-mix(in oklab, var(--loved) 14%, transparent); }
   .badge.good, .badge.assessed, .badge.triaged, .badge.degraded { color:var(--good); background:color-mix(in oklab, var(--good) 14%, transparent); }
   .badge.down, .badge.excluded, .badge.failed, .badge.dry_run { color:var(--down); background:color-mix(in oklab, var(--down) 14%, transparent); }
   .badge.shortlisted, .badge.admitted, .badge.eligible, .badge.cleared, .badge.reason, .badge.running, .badge.requested { color:var(--muted); background:color-mix(in oklab, var(--muted) 14%, transparent); }
-  .kv { @apply grid grid-cols-[minmax(9rem,1fr)_2fr] gap-x-5 gap-y-1; }
-  .kv dt { @apply text-muted; }
-  .kv dd { @apply m-0 min-w-0; overflow-wrap:anywhere; }
+  .badge.restart, .badge.warn { color:var(--warn); background:color-mix(in oklab, var(--warn) 16%, transparent); }
+
+  .kv { @apply grid grid-cols-[minmax(9rem,1fr)_2fr] gap-x-5 gap-y-1.5; }
+  .kv dt { @apply text-sm text-muted; }
+  .kv dd { @apply m-0 min-w-0 text-sm; overflow-wrap:anywhere; }
   .scroll-x { @apply max-w-full overflow-x-auto; overscroll-behavior-inline:contain; }
   .scroll-x > table { min-width:max-content; }
+  .scroll-x.tall { @apply max-h-[70vh] overflow-y-auto; overscroll-behavior-block:contain; }
+
   .prose-body { @apply text-[1.0625rem] leading-[1.72] text-ink; }
   .prose-body > * + * { @apply mt-5; }
   .prose-body h2 { @apply mt-10 border-t border-rule pt-4 text-2xl font-semibold leading-[1.15] tracking-[-0.01em]; }
@@ -100,32 +118,143 @@
   .prose-body ol { @apply list-decimal pl-6; }
   .prose-body li::marker { color:var(--muted); }
   .prose-body li + li { @apply mt-2; }
+
   .rating { @apply my-5 flex flex-wrap items-center font-sans text-sm; }
   .rating-prompt { @apply mr-3 text-[0.72rem] uppercase tracking-[0.1em] text-muted; }
   .rating button[data-label]:not(.clear) { @apply -ml-px min-h-10 rounded-none border-rule bg-transparent px-3 py-1.5 text-ink first:ml-0 first:rounded-l-sm last:rounded-r-sm hover:z-10 hover:border-ink hover:bg-paper-2; }
   .rating button[data-label]:not(.clear).active { @apply z-10 border-ink bg-ink text-paper; }
   .rating button.clear { @apply ml-2 min-h-10 border-0 bg-transparent px-2 text-muted underline decoration-rule underline-offset-4 hover:text-ink; }
   .rating button.clear.active { @apply font-semibold text-ink; }
-  .rating-note { @apply mt-2 flex basis-full items-center gap-2 text-muted; }
+  .rating-note { @apply mt-2 flex w-full max-w-md basis-full items-center gap-2 text-muted; }
   .rating-note input { @apply flex-1; }
+
   .flash { @apply my-4 border-l-4 border-accent bg-paper-2 px-4 py-3 font-sans text-sm; }
   .error { @apply border-l-4 border-down bg-paper-2 px-4 py-3 font-sans text-sm text-down; }
   .notice { @apply border-l-4 border-warn bg-paper-2 px-4 py-3 font-sans text-sm text-ink-2; }
-  .dashboard { @apply mx-auto my-8 max-w-7xl px-4 font-sans text-base leading-normal sm:px-6; }
-  .dashboard h1 { @apply text-2xl font-semibold; } .dashboard h2 { @apply mt-7 text-lg font-semibold; } .dashboard h3 { @apply font-semibold; }
-  .cards { @apply my-4 grid gap-4; grid-template-columns:repeat(auto-fit,minmax(min(20rem,100%),1fr)); }
+  ul.error, ul.notice { @apply list-disc pl-8; }
+
+  /* ---------- dashboard shell ---------- */
+  .dashboard { @apply mx-auto my-8 max-w-7xl px-4 pb-6 font-sans text-base leading-normal sm:px-6; }
+  .dashboard > * + * { @apply mt-4; }
+  .dashboard h1 { @apply text-2xl font-semibold leading-tight tracking-[-0.01em]; }
+  .dashboard h2 { @apply text-lg font-semibold; }
+  .dashboard h3 { @apply text-sm font-semibold; }
+  .dashboard > h2 { @apply mt-9 border-t border-rule pt-3 text-[0.78rem] font-semibold uppercase tracking-[0.14em] text-muted; }
+  .dashboard > p, .dashboard > ul, .dashboard > ol { @apply text-sm; }
+  .dashboard code { @apply rounded-sm bg-paper-2 px-1 py-0.5 text-[0.85em]; }
+  .dashboard pre code { @apply bg-transparent p-0; }
+  .dashboard table a { @apply text-ink underline decoration-rule underline-offset-2 hover:text-ink hover:decoration-accent; }
+
+  .page-head { @apply flex flex-wrap items-end justify-between gap-x-6 gap-y-3 border-b border-rule pb-4; }
+  .page-head > div:first-child { @apply min-w-0; }
+  .dashboard > .page-head + * { @apply mt-6; }
+  .page-desc { @apply mt-1.5 max-w-[74ch] text-sm text-muted; }
+  .page-desc a { @apply text-accent; }
+  .page-actions { @apply flex flex-wrap items-center gap-2 font-sans text-sm; }
+  .page-eyebrow { @apply text-[0.7rem] uppercase tracking-[0.14em] text-muted; }
+
+  .tiles { @apply grid gap-3; grid-template-columns:repeat(auto-fit,minmax(min(10.5rem,100%),1fr)); }
+  .tile { @apply min-w-0 border border-rule px-3.5 py-3; }
+  .tile-label { @apply block text-[0.68rem] font-medium uppercase tracking-[0.12em] text-muted; }
+  .tile-num { @apply mt-1 block text-[1.55rem] font-semibold leading-tight tracking-[-0.01em]; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+  .tile-delta { @apply mt-1 block text-xs text-muted; overflow-wrap:anywhere; }
+
+  .cards { @apply grid gap-4; grid-template-columns:repeat(auto-fit,minmax(min(20rem,100%),1fr)); }
   .card { @apply min-w-0 border border-rule p-4; }
-  .muted, .meta { @apply text-muted; } .num { @apply whitespace-nowrap text-right tabular-nums; }
-  .filters, form.filters, form.inline { @apply my-4 flex flex-wrap items-end gap-3 font-sans text-sm; }
-  .filters label, form.filters label { @apply grid gap-1; }
+  .card > * + * { @apply mt-3; }
+  .card h2 { @apply text-base font-semibold; }
+  .card h3 { @apply text-base font-semibold; }
+  .card > h2:first-child, .card > h3:first-child { @apply mt-0; }
+  .card p, .card li { @apply text-sm; }
+
+  .muted, .meta { @apply text-muted; }
+  .jobs a, .picks > li > a:first-child { @apply text-ink no-underline hover:text-accent; }
+  .num { @apply whitespace-nowrap text-right tabular-nums; }
+  .cell-wrap { @apply min-w-[10rem] max-w-[24rem] whitespace-normal; overflow-wrap:anywhere; }
+  .cell-tight { @apply whitespace-nowrap; }
+
+  .filters { @apply flex flex-wrap items-end gap-x-4 gap-y-3 border-y border-rule py-3 font-sans text-sm; }
+  .filters label { @apply grid gap-1 text-[0.66rem] font-medium uppercase tracking-[0.1em] text-muted; }
+  .filters input, .filters select, .filters textarea { @apply text-sm normal-case tracking-normal text-ink; }
+  .filters select, .filters input[type="date"] { @apply min-w-32; }
+  .filters .filter-actions { @apply flex items-center gap-3; }
+  .form-inline { @apply flex flex-wrap items-center gap-3 font-sans text-sm; }
+  .form-inline label { @apply flex items-center gap-2 text-sm; }
   .table-filter { @apply my-2 w-80 max-w-full font-sans text-sm; }
-  .pager, .run-nav, .tabs { @apply my-4 flex flex-wrap items-center gap-4 font-sans text-sm; }
-  pre.block, pre.preview, pre.journal { @apply overflow-auto whitespace-pre-wrap rounded-sm bg-paper-2 p-3 font-mono text-sm; overflow-wrap:anywhere; }
-  .funnel > * { @apply my-0.5 min-w-px bg-good; }
-  .spark { @apply h-auto max-w-full; }
+
+  .pager { @apply flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-1 font-sans text-sm text-muted; }
+  .pager a { @apply text-ink no-underline hover:text-accent; }
+  .run-nav { @apply flex flex-wrap items-center justify-between gap-x-6 gap-y-2 font-sans text-sm; }
+  .run-nav a { @apply text-ink no-underline hover:text-accent; }
+  .tabs { @apply flex flex-wrap items-center gap-x-6 border-b border-rule font-sans text-[0.72rem] font-medium uppercase tracking-[0.12em]; }
+  .tabs a { @apply -mb-px flex min-h-10 items-center border-b-2 border-transparent text-muted no-underline hover:text-ink; }
+  .tabs a.active { @apply border-accent text-ink; }
+  .pagination { @apply font-sans text-sm text-muted; }
+
+  tr.superseded > td { @apply text-muted; }
+  tr.superseded a { @apply text-muted; }
+
+  /* the rating widget has to fit inside a table cell */
+  td .rating, .picks .rating { @apply my-1.5 max-w-[15rem] gap-y-1 text-xs; }
+  td .rating-prompt, .picks .rating-prompt { @apply hidden; }
+  td .rating button[data-label]:not(.clear), .picks .rating button[data-label]:not(.clear) { @apply min-h-8 px-2.5 py-1 text-xs; }
+  td .rating button.clear, .picks .rating button.clear { @apply ml-2 min-h-8 px-0 text-xs; }
+  td .rating-note { @apply mt-1 max-w-[15rem] gap-1.5 text-[0.7rem]; }
+  td .rating-note input { @apply px-1.5 py-0.5 text-xs; }
+  .picks .rating { @apply max-w-none; }
+
+  pre.block, pre.preview, pre.journal { @apply overflow-auto whitespace-pre-wrap rounded-sm bg-paper-2 p-3 font-mono text-[0.8125rem] leading-relaxed; overflow-wrap:anywhere; }
+  pre.block { @apply max-h-64; }
+  pre.preview { @apply max-h-56; }
+  pre.journal { @apply max-h-[34rem] p-4; }
+  pre.prompt, pre.learned { @apply max-h-[32rem]; }
+  td > pre.preview { @apply max-h-24 max-w-md bg-transparent p-0 text-xs text-muted; }
+
+  details.disclosure { @apply border border-rule; }
+  details.disclosure > summary { @apply px-4 py-3 font-sans text-sm font-medium; }
+  details.disclosure[open] > summary { @apply border-b border-rule; }
+  details.disclosure > .disclosure-body { @apply px-4 py-3 text-sm; }
+  details.disclosure > .disclosure-body > * + * { @apply mt-3; }
+  details.signals > summary { @apply min-w-0; }
+  .signals-body { @apply mt-2 max-w-2xl border-l-2 border-rule pl-3 text-xs; }
+  .signals-body > * + * { @apply mt-2; }
+  .signals-body ul { @apply list-disc pl-5; }
+
+  .funnel { @apply w-full min-w-[6rem] rounded-sm bg-paper-2; }
+  .funnel > * { @apply block min-w-px rounded-sm bg-good; }
+  .funnel-cell { @apply w-[14rem] min-w-[8rem] align-middle; }
+
+  .sparklines { @apply grid gap-4; grid-template-columns:repeat(auto-fit,minmax(min(18rem,100%),1fr)); }
+  .spark-figure { @apply m-0 min-w-0 border border-rule p-3; }
+  .spark-figure figcaption { @apply mb-2 text-[0.7rem] font-semibold uppercase tracking-[0.1em] text-ink; }
+  .spark-figure figcaption .muted { @apply font-normal normal-case tracking-normal; }
+  .spark { @apply h-auto w-full max-w-full; }
   .spark .s0 { fill:var(--good); } .spark .s1 { fill:var(--loved); } .spark .s2 { fill:var(--down); } .spark .s3 { fill:var(--accent); } .spark .s4 { fill:var(--muted); } .spark .s5 { fill:var(--ink); } .spark .line { stroke:var(--accent); }
+  .spark-axis { @apply mt-1 flex justify-between text-[0.66rem] uppercase tracking-[0.08em]; }
+  .spark-legend { @apply mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted; }
+  .spark-legend li { @apply flex items-center gap-1.5; }
+
+  /* ---------- settings ---------- */
+  .settings-form > * + * { @apply mt-5; }
+  .setting { @apply grid gap-2 border-t border-rule py-3 md:grid-cols-[minmax(0,19rem)_minmax(0,1fr)] md:gap-6; }
+  .setting:first-of-type { @apply border-t-0 pt-1; }
+  .setting-label { @apply min-w-0; }
+  .setting-label label { @apply inline-block; }
+  .setting-label code { @apply bg-transparent p-0 text-[0.85rem] font-medium text-ink; overflow-wrap:anywhere; }
+  .setting-input { @apply min-w-0; }
+  .setting-input > input, .setting-input > select, .setting-input > textarea { @apply w-full max-w-lg; }
+  .help, .default { @apply mt-1 text-xs text-muted; overflow-wrap:anywhere; }
+  .setting-label .help { @apply max-w-[42ch]; }
+  .secret { @apply text-sm text-ink-2; }
+  code.lines { @apply mt-1 block whitespace-pre-wrap; }
+  button.reset { @apply ml-1 inline min-h-0 rounded-none border-0 bg-transparent p-0 text-xs text-muted underline decoration-rule underline-offset-2 hover:text-ink; }
+  .save-bar { @apply sticky bottom-0 z-20 -mx-4 mt-6 flex flex-wrap items-center justify-end gap-x-4 gap-y-2 border-t border-rule bg-paper px-4 py-3 sm:-mx-6 sm:px-6; box-shadow:0 -10px 18px -14px color-mix(in oklab, var(--ink) 55%, transparent); }
+  .save-bar .meta { @apply mr-auto text-xs; }
+
   @media (max-width:40rem) {
     .kv { @apply block; } .kv dt { @apply mt-2; }
     .rating { @apply items-stretch; } .rating-prompt, .rating-note { @apply basis-full; } .rating-prompt { @apply mb-2; }
+    .filters label { @apply w-full; }
+    .filters input, .filters select { @apply w-full; }
   }
 }

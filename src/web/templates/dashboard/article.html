@@ -1,69 +1,81 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard">
-<h1><a href="{{ url }}">{{ title }}</a></h1>
-<p class="muted">Article {{ id }} · <a href="/dashboard/articles?feed={{ feed_id }}">{{ feed }}</a>{% if let Some(category) = category %} · {{ category }}{% endif %}{% if let Some(author) = author %} · {{ author }}{% endif %}</p>
+<header class="page-head"><div>
+<p class="page-eyebrow"><a class="text-muted no-underline hover:text-accent" href="/dashboard/articles">Articles</a> › {{ id }}</p>
+<h1 class="mt-1"><a class="text-ink no-underline hover:text-accent" href="{{ url }}">{{ title }}</a></h1>
+<p class="page-desc"><a href="/dashboard/articles?feed={{ feed_id }}">{{ feed }}</a>{% if let Some(category) = category %} · {{ category }}{% endif %}{% if let Some(author) = author %} · {{ author }}{% endif %}</p>
+</div><div class="page-actions">{% if let Some(rating) = rating %}<span class="badge {{ rating_class }}">{{ rating }}</span>{% else %}<span class="badge">unrated</span>{% endif %}<a class="btn" href="{{ url }}">Open source</a></div></header>
 
-<h2>Article</h2>
+<div class="cards">
+<section class="card"><h2>Article</h2>
 <dl class="kv">
 <dt>Canonical URL</dt><dd><a href="{{ canonical_url }}">{{ canonical_url }}</a></dd>
 <dt>Published</dt><dd>{{ published_at }}</dd>
 <dt>First seen</dt><dd>{{ first_seen }}</dd>
 <dt>Words</dt><dd>{{ words }}{% if excerpt_only %} <span class="badge">excerpt only</span>{% endif %}</dd>
 <dt>Images</dt><dd>{{ image_count }}</dd>
+<dt>Current rating</dt><dd>{% if let Some(rating) = rating %}<span class="badge {{ rating_class }}">{{ rating }}</span>{% else %}<span class="muted">unrated</span>{% endif %}</dd>
+</dl>
+</section>
+<section class="card"><h2>Provenance</h2>
+<dl class="kv">
 <dt>Sources</dt><dd>{% if sources.is_empty() %}<span class="muted">none recorded</span>{% else %}{% for source in sources %}{{ source.kind }} · {{ source.feed }}{% if let Some(category) = source.category %} ({{ category }}){% endif %}{% if !loop.last %}<br>{% endif %}{% endfor %}{% endif %}</dd>
 <dt>Social</dt><dd>{% if social.is_empty() %}<span class="muted">none</span>{% else %}{% for item in social %}{% if let Some(url) = item.url %}<a href="{{ url }}">{{ item.source }}</a>{% else %}{{ item.source }}{% endif %} · {{ item.score }} points · {{ item.comments }} comments{% if !loop.last %}<br>{% endif %}{% endfor %}{% endif %}</dd>
 <dt>In issues</dt><dd>{% if in_issues.is_empty() %}<span class="muted">never published</span>{% else %}{% for issue in in_issues %}<a href="{{ issue.href }}">{{ issue.date }}</a> · {{ issue.section }} · position {{ issue.position }}{% if issue.is_lead %} · lead{% endif %}{% if !loop.last %}<br>{% endif %}{% endfor %}{% endif %}</dd>
-<dt>Current rating</dt><dd>{% if let Some(rating) = rating %}<span class="badge {{ rating_class }}">{{ rating }}</span>{% else %}<span class="muted">unrated</span>{% endif %}</dd>
 </dl>
+</section>
+</div>
+
+<h2>Your verdict</h2>
 {% include "_rating_widget.html" %}
-{% if let Some(text) = explain %}<details class="explain"><summary>Explain (text)</summary><pre class="block">{{ text }}</pre></details>{% endif %}
+{% if let Some(text) = explain %}<details class="explain disclosure" id="article-explain"><summary>Explain (text)</summary><div class="disclosure-body"><pre class="block">{{ text }}</pre></div></details>{% endif %}
 
 <h2>Assessments</h2>
-{% if assessments.is_empty() %}<p class="muted">No LLM assessment stored.</p>{% else %}{% for assessment in assessments %}<section class="card">
-<h3>{{ assessment.stage }}{% if assessment.rejected %} <span class="badge down">rejected by provider</span>{% endif %}</h3>
-{% if assessment.rejected %}<p>{{ assessment.rationale }}</p><p class="muted">{{ assessment.model }} · prompt v{{ assessment.prompt_version }} · {{ assessment.assessed_at }}</p>{% else %}<dl class="kv">
-{% if assessment.stage == "deep" %}<dt>Quality</dt><dd>{{ assessment.score }}</dd><dt>Fit</dt><dd>{{ assessment.fit }}</dd><dt>Category</dt><dd>{{ assessment.category }}</dd><dt>Format</dt><dd>{{ assessment.kind }}</dd><dt>Paywalled guess</dt><dd>{% if assessment.paywalled %}yes{% else %}no{% endif %}</dd>{% else %}<dt>Interest</dt><dd>{{ assessment.score }}</dd><dt>Kind</dt><dd>{{ assessment.kind }}</dd>{% endif %}
+{% if assessments.is_empty() %}<p class="muted text-sm">No LLM assessment stored.</p>{% else %}<div class="cards">{% for assessment in assessments %}<section class="card">
+<h3 class="flex flex-wrap items-center gap-2">{{ assessment.stage }}{% if assessment.rejected %} <span class="badge down">rejected by provider</span>{% endif %}</h3>
+{% if assessment.rejected %}<p>{{ assessment.rationale }}</p><p class="muted text-xs">{{ assessment.model }} · prompt v{{ assessment.prompt_version }} · {{ assessment.assessed_at }}</p>{% else %}<dl class="kv">
+{% if assessment.stage == "deep" %}<dt>Quality</dt><dd class="tabular-nums">{{ assessment.score }}</dd><dt>Fit</dt><dd class="tabular-nums">{{ assessment.fit }}</dd><dt>Category</dt><dd>{{ assessment.category }}</dd><dt>Format</dt><dd>{{ assessment.kind }}</dd><dt>Paywalled guess</dt><dd>{% if assessment.paywalled %}yes{% else %}no{% endif %}</dd>{% else %}<dt>Interest</dt><dd class="tabular-nums">{{ assessment.score }}</dd><dt>Kind</dt><dd>{{ assessment.kind }}</dd>{% endif %}
 <dt>Rationale</dt><dd>{{ assessment.rationale }}</dd>
 <dt>Model</dt><dd>{{ assessment.model }} · prompt v{{ assessment.prompt_version }} · profile v{{ assessment.profile_version }}</dd>
 <dt>Assessed</dt><dd>{{ assessment.assessed_at }}</dd>
 </dl>
-{% if !assessment.facets.is_empty() %}<div class="scroll-x"><table class="facets"><thead><tr><th>facet</th><th>value</th></tr></thead><tbody>{% for facet in assessment.facets %}<tr><td>{{ facet.name }}</td><td>{{ facet.value }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}{% endif %}
-</section>{% endfor %}{% endif %}
+{% if !assessment.facets.is_empty() %}<div class="scroll-x"><table class="facets"><thead><tr><th>facet</th><th>value</th></tr></thead><tbody>{% for facet in assessment.facets %}<tr><td>{{ facet.name }}</td><td class="cell-wrap">{{ facet.value }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}{% endif %}
+</section>{% endfor %}</div>{% endif %}
 
 <h2>Run history</h2>
-{% if history.is_empty() %}<p class="muted">Never considered by a run.</p>{% else %}<div class="scroll-x"><table class="history">
+{% if history.is_empty() %}<p class="muted text-sm">Never considered by a run.</p>{% else %}<div class="scroll-x"><table class="history">
 <thead><tr><th>run</th><th>date</th><th>stage</th><th>reason</th><th>admitted by</th><th class="num">utility</th><th class="num">rank</th><th class="num">cluster</th><th>editor</th></tr></thead>
 <tbody>{% for row in history %}<tr>
-<td><details class="signals"><summary><a href="{{ row.run_href }}">run {{ row.run_id }}</a> <span class="badge {{ row.status }}">{{ row.status }}</span></summary>{% let signals = row.signals %}{% include "_signals_table.html" %}</details></td>
-<td>{{ row.date }}</td>
-<td><span class="badge {{ row.stage }}">{{ row.stage }}</span></td>
-<td>{% if let Some(reason) = row.reason %}{{ reason }}{% endif %}</td>
-<td>{% if let Some(first) = row.admitted_first %}{{ first }}{% if !row.admitted_rest.is_empty() %} <span class="muted">({{ row.admitted_rest }})</span>{% endif %}{% endif %}</td>
+<td class="cell-wrap"><details class="signals"><summary><a href="{{ row.run_href }}">run {{ row.run_id }}</a> <span class="badge {{ row.status }}">{{ row.status }}</span></summary>{% let signals = row.signals %}{% include "_signals_table.html" %}</details></td>
+<td class="cell-tight text-muted">{{ row.date }}</td>
+<td class="cell-tight"><span class="badge {{ row.stage }}">{{ row.stage }}</span></td>
+<td class="cell-tight text-muted">{% if let Some(reason) = row.reason %}{{ reason }}{% endif %}</td>
+<td class="cell-tight text-muted">{% if let Some(first) = row.admitted_first %}{{ first }}{% if !row.admitted_rest.is_empty() %} <span class="muted text-xs">({{ row.admitted_rest }})</span>{% endif %}{% endif %}</td>
 <td class="num">{{ row.utility }}</td>
 <td class="num">{{ row.rank }}</td>
 <td class="num">{{ row.cluster }}</td>
-<td>{% if let Some(why) = row.editor_why %}{{ why }}{% endif %}</td>
+<td class="cell-wrap text-muted">{% if let Some(why) = row.editor_why %}{{ why }}{% endif %}</td>
 </tr>{% endfor %}</tbody></table></div>{% endif %}
 
 <h2>Neighbours and interests</h2>
-{% if let Some(signals) = latest_signals %}{% if signals.top_interests.is_empty() && signals.neighbours.is_empty() %}<p class="muted">The latest run recorded no interests or neighbours for this article.</p>{% else %}<div class="cards">
+{% if let Some(signals) = latest_signals %}{% if signals.top_interests.is_empty() && signals.neighbours.is_empty() %}<p class="muted text-sm">The latest run recorded no interests or neighbours for this article.</p>{% else %}<div class="cards">
 <section class="card"><h3>Top interests</h3>{% if signals.top_interests.is_empty() %}<p class="muted">None.</p>{% else %}<div class="scroll-x"><table><thead><tr><th>interest</th><th class="num">z</th><th class="num">cos</th></tr></thead><tbody>{% for interest in signals.top_interests %}<tr><td>{{ interest.name }}</td><td class="num">{{ interest.z }}</td><td class="num">{{ interest.cos }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}</section>
-<section class="card"><h3>Nearest rated neighbours</h3>{% if signals.neighbours.is_empty() %}<p class="muted">None.</p>{% else %}<div class="scroll-x"><table><thead><tr><th>label</th><th class="num">cos</th><th>article</th></tr></thead><tbody>{% for neighbour in signals.neighbours %}<tr><td><span class="badge {{ neighbour.label }}">{{ neighbour.label }}</span></td><td class="num">{{ neighbour.cos }}</td><td><a href="/dashboard/articles/{{ neighbour.article_id }}">{{ neighbour.title }}</a></td></tr>{% endfor %}</tbody></table></div>{% endif %}</section>
-</div>{% endif %}{% else %}<p class="muted">No signals recorded.</p>{% endif %}
+<section class="card"><h3>Nearest rated neighbours</h3>{% if signals.neighbours.is_empty() %}<p class="muted">None.</p>{% else %}<div class="scroll-x"><table><thead><tr><th>label</th><th class="num">cos</th><th>article</th></tr></thead><tbody>{% for neighbour in signals.neighbours %}<tr><td><span class="badge {{ neighbour.label }}">{{ neighbour.label }}</span></td><td class="num">{{ neighbour.cos }}</td><td class="cell-wrap"><a href="/dashboard/articles/{{ neighbour.article_id }}">{{ neighbour.title }}</a></td></tr>{% endfor %}</tbody></table></div>{% endif %}</section>
+</div>{% endif %}{% else %}<p class="muted text-sm">No signals recorded.</p>{% endif %}
 
 <h2>Embedding</h2>
-{% if let Some(embedding) = embedding %}<dl class="kv"><dt>Model</dt><dd>{{ embedding.model }}</dd><dt>Dimension</dt><dd>{{ embedding.dimension }}</dd><dt>Created</dt><dd>{{ embedding.created_at }}</dd><dt>Input hash</dt><dd><code>{{ embedding.input_hash }}</code></dd></dl>{% else %}<p class="muted">No embedding stored.</p>{% endif %}
+{% if let Some(embedding) = embedding %}<dl class="kv"><dt>Model</dt><dd>{{ embedding.model }}</dd><dt>Dimension</dt><dd class="tabular-nums">{{ embedding.dimension }}</dd><dt>Created</dt><dd>{{ embedding.created_at }}</dd><dt>Input hash</dt><dd><code>{{ embedding.input_hash }}</code></dd></dl>{% else %}<p class="muted text-sm">No embedding stored.</p>{% endif %}
 
 <h2>Rating events</h2>
-{% if events.is_empty() %}<p class="muted">No rating events.</p>{% else %}<div class="scroll-x"><table class="events">
+{% if events.is_empty() %}<p class="muted text-sm">No rating events.</p>{% else %}<div class="scroll-x"><table class="events">
 <thead><tr><th>when</th><th>label</th><th class="num">value</th><th>kind</th><th>source</th><th>user</th><th>issue</th><th>note</th></tr></thead>
 <tbody>{% for event in events %}<tr>
-<td>{{ event.event_at }}</td>
-<td><span class="badge {{ event.label_class }}">{{ event.label }}</span></td>
+<td class="cell-tight text-muted">{{ event.event_at }}</td>
+<td class="cell-tight"><span class="badge {{ event.label_class }}">{{ event.label }}</span></td>
 <td class="num">{{ event.value }}</td>
-<td>{{ event.kind }}</td>
-<td>{{ event.source }}</td>
-<td>{% if let Some(user) = event.user %}{{ user }}{% else %}<span class="muted">—</span>{% endif %}</td>
-<td>{% if let Some(date) = event.issue_date %}<a href="/issues/{{ date }}">{{ date }}</a>{% endif %}</td>
-<td>{% if let Some(note) = event.note %}{{ note }}{% endif %}</td>
+<td class="cell-tight text-muted">{{ event.kind }}</td>
+<td class="cell-tight text-muted">{{ event.source }}</td>
+<td class="cell-tight">{% if let Some(user) = event.user %}{{ user }}{% else %}<span class="muted">—</span>{% endif %}</td>
+<td class="cell-tight">{% if let Some(date) = event.issue_date %}<a href="/issues/{{ date }}">{{ date }}</a>{% endif %}</td>
+<td class="cell-wrap text-muted">{% if let Some(note) = event.note %}{{ note }}{% endif %}</td>
 </tr>{% endfor %}</tbody></table></div>{% endif %}
 </section>{% endblock %}

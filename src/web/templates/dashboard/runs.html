@@ -1,21 +1,24 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard">
+<header class="page-head"><div>
 <h1>Runs</h1>
+<p class="page-desc">Every recorded pipeline run, newest first: how the funnel narrowed, what it cost and whether it finished clean.</p>
+</div><div class="page-actions"><a class="btn" href="/dashboard/stats">Stats</a><a class="btn" href="/dashboard/jobs">Jobs</a></div></header>
 <form class="filters" method="get" action="/dashboard/runs">
 <label>Status <select name="status"><option value="">any</option>{% for name in statuses %}<option value="{{ name }}"{% if status == *name %} selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
-<button type="submit">Filter</button>
+<div class="filter-actions"><button class="btn" type="submit">Filter</button>{% if !status.is_empty() %}<a class="btn-quiet" href="/dashboard/runs">Reset</a>{% endif %}</div>
 </form>
-<div class="scroll-x"><table data-filter>
-<thead><tr><th>run</th><th>date</th><th>status</th><th>started</th><th>duration</th><th>considered → eligible → triaged → assessed → shortlisted → selected</th><th>cost</th><th class="num">total</th><th>warnings</th></tr></thead>
+<div class="scroll-x tall"><table data-filter>
+<thead><tr><th>run</th><th>date</th><th>status</th><th>started</th><th>duration</th><th>considered → eligible → triaged → assessed → shortlisted → selected</th><th>cost</th><th class="num">total</th><th class="num">warnings</th></tr></thead>
 <tbody>{% for run in runs %}<tr>
-<td><a href="/dashboard/runs/{{ run.id }}">{{ run.id }}</a></td>
-<td><a href="/issues/{{ run.date }}">{{ run.date }}</a></td>
-<td><span class="badge {{ run.status }}">{{ run.status }}</span>{% if run.dry_run %} <span class="muted">dry</span>{% endif %}</td>
-<td>{{ run.started }}</td>
-<td>{{ run.duration }}</td>
-<td>{{ run.funnel }}</td>
-<td>{{ run.costs }}</td>
+<td class="num"><a href="/dashboard/runs/{{ run.id }}">{{ run.id }}</a></td>
+<td class="cell-tight"><a href="/issues/{{ run.date }}">{{ run.date }}</a></td>
+<td class="cell-tight"><span class="badge {{ run.status }}">{{ run.status }}</span>{% if run.dry_run %} <span class="muted text-xs">dry</span>{% endif %}</td>
+<td class="cell-tight text-muted">{{ run.started }}</td>
+<td class="num text-muted">{{ run.duration }}</td>
+<td class="cell-tight tabular-nums">{{ run.funnel }}</td>
+<td class="text-muted">{{ run.costs }}</td>
 <td class="num">{{ run.total }}</td>
-<td class="num">{% if run.warnings > 0 %}<a href="/dashboard/runs/{{ run.id }}#warnings">{{ run.warnings }}</a>{% else %}0{% endif %}</td>
-</tr>{% endfor %}</tbody></table></div>
+<td class="num">{% if run.warnings > 0 %}<a href="/dashboard/runs/{{ run.id }}#warnings">{{ run.warnings }}</a>{% else %}<span class="text-muted">0</span>{% endif %}</td>
+</tr>{% endfor %}{% if runs.is_empty() %}<tr><td colspan="9" class="text-muted">No runs match this filter.</td></tr>{% endif %}</tbody></table></div>
 {% include "dashboard/_pager.html" %}
 </section>{% endblock %}

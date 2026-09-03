@@ -1,19 +1,23 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard ratings">
+<header class="page-head"><div>
 <h1>Ratings</h1>
-<p class="preference-summary">{{ summary_line }}</p>
+<p class="page-desc">{{ summary_line }}</p>
+</div><div class="page-actions"><a class="btn" href="/dashboard/profile">Profile</a><a class="btn" href="/dashboard/articles?rated=unrated">Unrated articles</a></div></header>
 {% if no_embedding_count > 0 %}<p class="notice">{{ no_embedding_count }} rated articles have no embedding and cannot act as neighbours — run the <code>features-backfill</code> job (<code>features backfill --rated-only</code>).</p>{% endif %}
-<details id="ratings-how" class="how">
+<details id="ratings-how" class="how disclosure">
 <summary>How ratings enter the algorithm</summary>
-<ol>
+<div class="disclosure-body">
+<ol class="list-decimal space-y-3 pl-5 marker:text-muted">
 <li><strong>Prompt verdict block.</strong> The {{ how.verdicts_in_prompt }} most recent non-cleared verdicts, newest first, are written into every LLM call's system prompt as one line each (<code>LOVED | title | feed | summary</code>). Only the rank matters here — a verdict never ages out of this block, it is pushed out by newer ones. Tune <a href="/dashboard/settings#curation.feedback"><code>curation.feedback.verdicts_in_prompt</code></a>.</li>
 <li><strong>Weekly learned adjustments.</strong> Every {{ how.rebuild_interval_days }} days the editor model rewrites the profile's "Learned adjustments" bullets from the {{ how.max_ratings_in_rebuild }} most recent non-cleared verdicts, including notes and deep-assessment facets. See the <a href="/dashboard/profile">Profile</a> page.</li>
 <li><strong>Rated-neighbour signal.</strong> Each verdict with an embedding is an example with weight <code>value × 0.5^(age / {{ how.half_life_days }} days)</code>, where loved = {{ how.loved }}, good = {{ how.good }}, not for me = {{ how.not_for_me }}; ratings older than {{ how.lookback_days }} days are not loaded. A candidate's signal is the weighted mean cosine to its {{ how.neighbour_k }} nearest positive examples minus {{ how.negative_coefficient }} × the same over its nearest negative ones. The signal's preliminary weight ({{ how.knn_weight }}) is scaled by a gate that opens above {{ how.knn_floor }} embedded verdicts and is fully open at {{ how.knn_full }}. Tune <a href="/dashboard/settings#curation.ranking"><code>curation.ranking.rating_half_life_days</code>, <code>knn_floor</code>, <code>knn_full</code>, <code>neighbour_k</code></a> and <a href="/dashboard/settings#curation.ranking.weights.preliminary"><code>weights.preliminary.knn</code></a>.</li>
 <li><strong>Feed affinity.</strong> The same decayed weight is credited to the rated article's direct feeds, split evenly; each feed's Beta-smoothed rate <code>(up + 1) / (up + down + 2)</code> becomes a candidate's signal (the mean over its rated direct feeds). Its weight ({{ how.feed_weight }}) is gated between {{ how.feed_floor }} and {{ how.feed_full }} attributable ratings. Tune <a href="/dashboard/settings#curation.ranking"><code>curation.ranking.feed_floor</code>, <code>feed_full</code></a> and <a href="/dashboard/settings#curation.ranking.weights.preliminary"><code>weights.preliminary.feed</code></a>.</li>
 </ol>
-<p>Clearing a verdict removes it from all four paths without deleting history; ratings are append-only.</p>
+<p class="muted">Clearing a verdict removes it from all four paths without deleting history; ratings are append-only.</p>
+</div>
 </details>
 
-<nav class="tabs"><a href="{{ current_href }}"{% if tab == "current" %} class="active"{% endif %}>Current ({{ current_total }})</a> <a href="{{ events_href }}"{% if tab == "events" %} class="active"{% endif %}>Events</a></nav>
+<nav class="tabs" aria-label="Ratings view"><a href="{{ current_href }}"{% if tab == "current" %} class="active" aria-current="page"{% endif %}>Current ({{ current_total }})</a> <a href="{{ events_href }}"{% if tab == "events" %} class="active" aria-current="page"{% endif %}>Events</a></nav>
 
 {% if tab == "events" %}
 <form class="filters" method="get" action="/dashboard/ratings">
@@ -23,27 +27,27 @@
 <label>User <select name="user"><option value="">any</option>{% for username in usernames %}<option value="{{ username }}"{% if filter_user == username.as_str() %} selected{% endif %}>{{ username }}</option>{% endfor %}</select></label>
 <label>From <input type="date" name="from" value="{{ filter_from }}"></label>
 <label>To <input type="date" name="to" value="{{ filter_to }}"></label>
-<button type="submit">Filter</button>
+<div class="filter-actions"><button class="btn" type="submit">Filter</button> <a class="btn-quiet" href="{{ events_href }}">Reset</a></div>
 </form>
-<p class="meta">{{ pagination.total }} events, newest first. History is append-only; a later explicit event for the same article marks the earlier one <em>superseded</em>. Use the clear verdict to retract.</p>
-<div class="scroll-x"><table>
-<thead><tr><th>Event</th><th>Verdict</th><th>Value</th><th>Article</th><th>Issue</th><th>When</th><th>Source</th><th>By</th><th>Note</th></tr></thead>
+<p class="meta text-sm">{{ pagination.total }} events, newest first. History is append-only; a later explicit event for the same article marks the earlier one <em>superseded</em>. Use the clear verdict to retract.</p>
+<div class="scroll-x tall"><table>
+<thead><tr><th class="num">Event</th><th>Verdict</th><th class="num">Value</th><th>Article</th><th>Issue</th><th>When</th><th>Source</th><th>By</th><th>Note</th></tr></thead>
 <tbody>
 {% for event in events %}<tr{% if event.superseded %} class="superseded"{% endif %}>
-<td>#{{ event.id }}{% if event.kind != "explicit" %} <span class="badge">{{ event.kind }}</span>{% endif %}{% if event.superseded %} <span class="badge cleared">superseded</span>{% endif %}</td>
-<td><span class="badge {{ event.badge }}">{{ event.verdict }}</span></td>
-<td>{{ event.value }}</td>
-<td><a href="/dashboard/articles/{{ event.article_id }}">{{ event.title }}</a></td>
-<td>{% if !event.issue_date.is_empty() %}<a href="/issues/{{ event.issue_date }}">{{ event.issue_date }}</a>{% endif %}</td>
-<td>{{ event.when }}</td>
-<td>{{ event.source }}</td>
-<td>{{ event.username }}</td>
-<td>{{ event.note }}</td>
+<td class="num">#{{ event.id }}{% if event.kind != "explicit" %} <span class="badge">{{ event.kind }}</span>{% endif %}{% if event.superseded %} <span class="badge cleared">superseded</span>{% endif %}</td>
+<td class="cell-tight"><span class="badge {{ event.badge }}">{{ event.verdict }}</span></td>
+<td class="num">{{ event.value }}</td>
+<td class="cell-wrap"><a href="/dashboard/articles/{{ event.article_id }}">{{ event.title }}</a></td>
+<td class="cell-tight">{% if !event.issue_date.is_empty() %}<a href="/issues/{{ event.issue_date }}">{{ event.issue_date }}</a>{% endif %}</td>
+<td class="cell-tight text-muted">{{ event.when }}</td>
+<td class="cell-tight text-muted">{{ event.source }}</td>
+<td class="cell-tight text-muted">{{ event.username }}</td>
+<td class="cell-wrap text-muted">{{ event.note }}</td>
 </tr>
 {% endfor %}
-{% if events.is_empty() %}<tr><td colspan="9">No rating events match.</td></tr>{% endif %}
+{% if events.is_empty() %}<tr><td colspan="9" class="text-muted">No rating events match.</td></tr>{% endif %}
 </tbody></table></div>
-<div class="pager">{% if !prev_href.is_empty() %}<a href="{{ prev_href }}">← Newer</a>{% endif %} {% include "_pagination.html" %} {% if !next_href.is_empty() %}<a href="{{ next_href }}">Older →</a>{% endif %}</div>
+<nav class="pager" aria-label="Pagination">{% include "_pagination.html" %}<span class="flex items-center gap-2">{% if !prev_href.is_empty() %}<a class="btn" href="{{ prev_href }}">← Newer</a>{% endif %}{% if !next_href.is_empty() %}<a class="btn" href="{{ next_href }}">Older →</a>{% endif %}</span></nav>
 {% else %}
 <form class="filters" method="get" action="/dashboard/ratings">
 <input type="hidden" name="tab" value="current">
@@ -51,26 +55,26 @@
 <label>Source <select name="source"><option value="">any</option>{% for source in sources %}<option value="{{ source }}"{% if filter_source == source.as_str() %} selected{% endif %}>{{ source }}</option>{% endfor %}</select></label>
 <label>Feed <select name="feed"><option value="">any</option>{% for feed in feeds %}<option value="{{ feed.id }}"{% if filter_feed == feed.id.to_string() %} selected{% endif %}>{{ feed.title }}</option>{% endfor %}</select></label>
 <label>Title <input type="search" name="q" value="{{ filter_q }}" placeholder="contains…"></label>
-<button type="submit">Filter</button>
+<div class="filter-actions"><button class="btn" type="submit">Filter</button> <a class="btn-quiet" href="{{ current_href }}">Reset</a></div>
 </form>
-<p class="meta">One row per rated article (its latest explicit event), newest first. {% match last_run %}{% when Some with (run) %}"Used last run" counts the candidates of run #{{ run.id }} ({{ run.date }}, {{ run.status }}) that listed the article among their nearest rated neighbours, and how many of those were selected.{% when None %}No run has happened yet, so "Used last run" is empty.{% endmatch %}</p>
-<div class="scroll-x"><table class="contributions">
-<thead><tr><th>Verdict</th><th>Article</th><th>When · by</th><th>Note</th><th>Age → decay</th><th>Neighbour weight</th><th>Feed credit</th><th>In prompt</th><th>In rebuild</th><th>Used last run</th></tr></thead>
+<p class="meta text-sm">One row per rated article (its latest explicit event), newest first. {% match last_run %}{% when Some with (run) %}"Used last run" counts the candidates of run #{{ run.id }} ({{ run.date }}, {{ run.status }}) that listed the article among their nearest rated neighbours, and how many of those were selected.{% when None %}No run has happened yet, so "Used last run" is empty.{% endmatch %}</p>
+<div class="scroll-x tall"><table class="contributions">
+<thead><tr><th>Verdict</th><th>Article</th><th>When · by</th><th>Note</th><th>Age → decay</th><th class="num">Neighbour weight</th><th>Feed credit</th><th>In prompt</th><th>In rebuild</th><th>Used last run</th></tr></thead>
 <tbody>
 {% for row in current %}<tr>
-<td><span class="badge {{ row.badge }}">{{ row.verdict }}</span>{% let widget = row.widget %}{% include "_rating_widget.html" %}</td>
-<td><a href="/dashboard/articles/{{ row.article_id }}">{{ row.title }}</a><br><span class="meta">{{ row.feed_title }}{% if !row.issue_date.is_empty() %} · <a href="/issues/{{ row.issue_date }}">{{ row.issue_date }}</a>{% endif %}</span></td>
-<td>{{ row.when }}<br><span class="meta">{{ row.source }} · <span class="by">{{ row.username }}</span></span></td>
-<td>{{ row.note }}</td>
-<td>{{ row.age_days }} d → {{ row.decay }}</td>
-<td>{% if row.has_embedding && !row.neighbour_weight.is_empty() %}{{ row.neighbour_weight }}{% if row.beyond_lookback %} <span class="meta">(beyond lookback)</span>{% endif %}{% else if row.badge == "cleared" %}<span class="meta">—</span>{% else %}<span class="meta">no embedding</span>{% endif %}</td>
-<td>{% for credit in row.feed_credits %}{{ credit.title }} {{ credit.credit }}{% if !loop.last %}<br>{% endif %}{% endfor %}</td>
-<td>{% if row.in_prompt %}✓{% endif %}</td>
-<td>{% if row.in_rebuild %}✓{% endif %}</td>
-<td>{% if row.used_total > 0 %}{{ row.used_total }} ({{ row.used_selected }} selected){% endif %}</td>
+<td class="min-w-[13rem]"><span class="badge {{ row.badge }}">{{ row.verdict }}</span>{% let widget = row.widget %}{% include "_rating_widget.html" %}</td>
+<td class="cell-wrap"><a href="/dashboard/articles/{{ row.article_id }}">{{ row.title }}</a><br><span class="meta text-xs">{{ row.feed_title }}{% if !row.issue_date.is_empty() %} · <a href="/issues/{{ row.issue_date }}">{{ row.issue_date }}</a>{% endif %}</span></td>
+<td class="cell-tight">{{ row.when }}<br><span class="meta text-xs">{{ row.source }} · <span class="by">{{ row.username }}</span></span></td>
+<td class="cell-wrap text-muted">{{ row.note }}</td>
+<td class="cell-tight tabular-nums">{{ row.age_days }} d → {{ row.decay }}</td>
+<td class="num">{% if row.has_embedding && !row.neighbour_weight.is_empty() %}{{ row.neighbour_weight }}{% if row.beyond_lookback %} <span class="meta text-xs">(beyond lookback)</span>{% endif %}{% else if row.badge == "cleared" %}<span class="meta">—</span>{% else %}<span class="meta text-xs">no embedding</span>{% endif %}</td>
+<td class="cell-tight text-muted">{% for credit in row.feed_credits %}{{ credit.title }} <span class="tabular-nums text-ink">{{ credit.credit }}</span>{% if !loop.last %}<br>{% endif %}{% endfor %}</td>
+<td class="text-center">{% if row.in_prompt %}<span class="text-loved">✓</span>{% endif %}</td>
+<td class="text-center">{% if row.in_rebuild %}<span class="text-loved">✓</span>{% endif %}</td>
+<td class="cell-tight tabular-nums">{% if row.used_total > 0 %}{{ row.used_total }} ({{ row.used_selected }} selected){% endif %}</td>
 </tr>
 {% endfor %}
-{% if current.is_empty() %}<tr><td colspan="10">No current verdicts match.</td></tr>{% endif %}
+{% if current.is_empty() %}<tr><td colspan="10" class="text-muted">No current verdicts match.</td></tr>{% endif %}
 </tbody></table></div>
 {% endif %}
 </section>{% endblock %}

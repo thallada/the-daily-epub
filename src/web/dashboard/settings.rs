@@ -2495,7 +2495,7 @@ mod tests {
         )
         .await;
         assert!(
-            page.contains("! config.toml on disk does not load:"),
+            page.contains("config.toml on disk does not load:"),
             "{page}"
         );
         assert!(page.contains("value=\"31\""), "{page}");

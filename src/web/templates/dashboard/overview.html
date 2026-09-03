@@ -1,41 +1,55 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard">
+<header class="page-head"><div>
 <h1>Overview</h1>
+<p class="page-desc">The state of the paper right now: the last run, today's spend, this week's verdicts and anything waiting on you.</p>
+</div><div class="page-actions"><a class="btn" href="/dashboard/runs">Runs</a><a class="btn" href="/dashboard/jobs">Jobs</a><a class="btn" href="/dashboard/stats">Stats</a></div></header>
+
+<div class="tiles">
+<div class="tile"><span class="tile-label">Last run</span>{% if let Some(run) = last_run %}<span class="tile-num">{{ run.date }}</span><span class="tile-delta"><span class="badge {{ run.status }}">{{ run.status }}</span> · {{ run.duration }}</span>{% else %}<span class="tile-num text-muted">—</span><span class="tile-delta">no runs yet</span>{% endif %}</div>
+<div class="tile"><span class="tile-label">Warnings</span>{% if let Some(run) = last_run %}<span class="tile-num{% if run.warnings > 0 %} text-warn{% endif %}">{{ run.warnings }}</span><span class="tile-delta">{% if run.warnings > 0 %}<a href="/dashboard/runs/{{ run.id }}#warnings">on run {{ run.id }}</a>{% else %}clean run{% endif %}</span>{% else %}<span class="tile-num text-muted">—</span><span class="tile-delta">no runs yet</span>{% endif %}</div>
+<div class="tile"><span class="tile-label">Verdicts, 7 days</span><span class="tile-num">{{ ratings_total }}</span><span class="tile-delta"><a href="/dashboard/ratings">rating history</a></span></div>
+<div class="tile"><span class="tile-label">Unrated picks</span><span class="tile-num">{{ unrated.len() }}</span><span class="tile-delta">from the last three issues</span></div>
+<div class="tile"><span class="tile-label">Active jobs</span><span class="tile-num">{{ active_jobs.len() }}</span><span class="tile-delta"><a href="/dashboard/jobs">all jobs</a></span></div>
+</div>
+
 <div class="cards">
 <section class="card"><h2>Last run</h2>
 {% if let Some(run) = last_run %}<p><a href="/dashboard/runs/{{ run.id }}">Run {{ run.id }}</a> · {{ run.date }} · <span class="badge {{ run.status }}">{{ run.status }}</span></p>
-<p class="muted">Started {{ run.started }} · {{ run.duration }}</p>
+<p class="muted text-xs">Started {{ run.started }} · {{ run.duration }}</p>
 <pre class="block">{% for line in run.lines %}{{ line }}
 {% endfor %}</pre>
-{% if run.warnings > 0 %}<p><a href="/dashboard/runs/{{ run.id }}#warnings">{{ run.warnings }} warning{% if run.warnings != 1 %}s{% endif %}</a></p>{% endif %}
+{% if run.warnings > 0 %}<p class="text-sm"><a href="/dashboard/runs/{{ run.id }}#warnings">{{ run.warnings }} warning{% if run.warnings != 1 %}s{% endif %}</a></p>{% endif %}
 {% if let Some(error) = run.error %}<p class="error">{{ error }}</p>{% endif %}
 {% else %}<p class="muted">No runs recorded yet.</p>{% endif %}
 </section>
 <section class="card"><h2>Budget today</h2>
-{% if budget.is_empty() %}<p class="muted">No providers configured.</p>{% else %}<dl class="kv budget">
-{% for line in budget %}<dt>{{ line.provider }}</dt><dd><meter value="{{ line.value }}" max="{{ line.max }}"{% if line.over %} class="over"{% endif %}></meter> {{ line.spent }} of {{ line.ceiling }}{% if line.over %} <strong class="error">ceiling reached</strong>{% endif %}</dd>
+{% if budget.is_empty() %}<p class="muted">No providers configured.</p>{% else %}<dl class="kv budget grid-cols-1 gap-y-3">
+{% for line in budget %}<div><div class="flex flex-wrap items-baseline justify-between gap-2"><dt class="font-medium text-ink">{{ line.provider }}</dt><dd class="text-muted">{{ line.spent }} of {{ line.ceiling }}{% if line.over %} · <strong class="text-down">ceiling reached</strong>{% endif %}</dd></div><dd class="mt-1"><meter value="{{ line.value }}" max="{{ line.max }}"{% if line.over %} class="over"{% endif %}></meter></dd></div>
 {% endfor %}</dl>{% endif %}
-<p class="muted">Spend on the current UTC day across every recorded run.</p>
+<p class="muted text-xs">Spend on the current UTC day across every recorded run.</p>
 </section>
 <section class="card"><h2>Ratings this week</h2>
-{% if ratings.is_empty() %}<p class="muted">No explicit ratings in the last seven days.</p>{% else %}<p>{{ ratings_total }} verdict{% if ratings_total != 1 %}s{% endif %}: {% for count in ratings %}<span class="badge {{ count.label }}">{{ count.label }}</span> {{ count.count }}{% if !loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
-<p><a href="/dashboard/ratings">Rating history</a></p>
+{% if ratings.is_empty() %}<p class="muted">No explicit ratings in the last seven days.</p>{% else %}<p class="flex flex-wrap items-center gap-x-3 gap-y-1.5">{{ ratings_total }} verdict{% if ratings_total != 1 %}s{% endif %}{% for count in ratings %}<span class="inline-flex items-center gap-1.5"><span class="badge {{ count.label }}">{{ count.label }}</span> <span class="tabular-nums">{{ count.count }}</span></span>{% endfor %}</p>{% endif %}
+<p class="text-sm"><a href="/dashboard/ratings">Rating history</a></p>
 </section>
 <section class="card"><h2>Jobs</h2>
 {% if active_jobs.is_empty() && finished_jobs.is_empty() %}<p class="muted">No jobs recorded.</p>{% else %}
-{% if !active_jobs.is_empty() %}<ul class="jobs">{% for job in active_jobs %}<li><a href="/dashboard/jobs/{{ job.id }}">{{ job.name }}</a> <span class="badge {{ job.status }}">{{ job.status }}</span> <span class="muted">requested {{ job.requested }}</span></li>{% endfor %}</ul>{% endif %}
-{% if !finished_jobs.is_empty() %}<p class="muted">Recently finished</p><ul class="jobs">{% for job in finished_jobs %}<li><a href="/dashboard/jobs/{{ job.id }}">{{ job.name }}</a> <span class="badge {{ job.status }}">{{ job.status }}</span> <span class="muted">{{ job.finished }}</span>{% if let Some(message) = job.message %} <span class="muted">— {{ message }}</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
+{% if !active_jobs.is_empty() %}<ul class="jobs divide-y divide-rule border-y border-rule">{% for job in active_jobs %}<li class="flex flex-wrap items-baseline gap-x-2 py-1.5"><a class="font-mono text-xs" href="/dashboard/jobs/{{ job.id }}">{{ job.name }}</a> <span class="badge {{ job.status }}">{{ job.status }}</span> <span class="muted text-xs">requested {{ job.requested }}</span></li>{% endfor %}</ul>{% endif %}
+{% if !finished_jobs.is_empty() %}<p class="page-eyebrow">Recently finished</p><ul class="jobs divide-y divide-rule border-y border-rule">{% for job in finished_jobs %}<li class="flex flex-wrap items-baseline gap-x-2 py-1.5"><a class="font-mono text-xs" href="/dashboard/jobs/{{ job.id }}">{{ job.name }}</a> <span class="badge {{ job.status }}">{{ job.status }}</span> <span class="muted text-xs">{{ job.finished }}</span>{% if let Some(message) = job.message %} <span class="muted text-xs">— {{ message }}</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
 {% endif %}
-<p><a href="/dashboard/jobs">All jobs</a></p>
+<p class="text-sm"><a href="/dashboard/jobs">All jobs</a></p>
 </section>
 {% if !config_warnings.is_empty() %}<section class="card"><h2>Config on disk</h2>
-<ul class="warnings">{% for line in config_warnings %}<li class="error">{{ line }}</li>{% endfor %}</ul>
-<p><a href="/dashboard/settings">Settings</a></p>
+<ul class="warnings error list-disc pl-5">{% for line in config_warnings %}<li>{{ line }}</li>{% endfor %}</ul>
+<p class="text-sm"><a href="/dashboard/settings">Settings</a></p>
 </section>{% endif %}
 </div>
+
 <h2>Last 30 runs</h2>
 <div class="sparklines">{% for item in sparklines %}{% let spark = item %}{% include "dashboard/_sparkline.html" %}{% endfor %}</div>
+
 <h2>Unrated picks</h2>
-{% if unrated.is_empty() %}<p class="muted">Every pick from the last three issues has a verdict.</p>{% else %}<p class="muted">Picks from the last three issues without a verdict yet.</p>
-<ul class="picks">{% for pick in unrated %}<li><a href="{{ pick.issue_href }}">{{ pick.title }}</a> <span class="muted">· {{ pick.feed }} · {{ pick.issue_date }}</span>
+{% if unrated.is_empty() %}<p class="muted text-sm">Every pick from the last three issues has a verdict.</p>{% else %}<p class="muted text-sm">Picks from the last three issues without a verdict yet.</p>
+<ul class="picks divide-y divide-rule border-y border-rule">{% for pick in unrated %}<li class="py-3"><a class="font-medium text-ink no-underline hover:text-accent" href="{{ pick.issue_href }}">{{ pick.title }}</a> <span class="muted text-xs">· {{ pick.feed }} · {{ pick.issue_date }}</span>
 {% let widget = pick.widget %}{% include "_rating_widget.html" %}</li>{% endfor %}</ul>{% endif %}
 </section>{% endblock %}

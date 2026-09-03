@@ -1,28 +1,34 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard">
+<header class="page-head"><div>
 <h1>Jobs</h1>
-{% if jobs_enabled %}<p class="muted">Each job starts <code>daily-epub-job@&lt;name&gt;.service</code> through systemd; the unit runs <code>daily-epub job run &lt;name&gt;</code> and records itself here. Jobs that take the run lock wait for nothing: a second <code>generate</code> while one is running fails immediately.</p>{% else %}<p class="notice">Jobs are disabled on this server (<code>server.jobs_enabled = false</code>); run the commands by hand instead.</p>{% endif %}
-<div class="cards job-cards">{% for card in cards %}<section class="card">
-<h2>{{ card.name }}</h2>
-<p>{{ card.description }}</p>
-{% if let Some(lock) = card.lock %}<p class="muted">Takes the <code>{{ lock }}</code> lock.</p>{% endif %}
-<form method="post" action="/dashboard/jobs/{{ card.name }}" class="inline"{% if card.dangerous %} data-confirm="Start {{ card.name }}? This republishes the issue of that date."{% endif %}>
-{% if card.dated %}<label>Date <input type="date" name="date" value="{{ today }}"></label>{% endif %}
-<button type="submit"{% if !jobs_enabled %} disabled{% endif %}>Start</button>
+<p class="page-desc">{% if jobs_enabled %}Each job starts <code>daily-epub-job@&lt;name&gt;.service</code> through systemd; the unit runs <code>daily-epub job run &lt;name&gt;</code> and records itself here.{% else %}Jobs are disabled on this server; the catalogue below is read-only.{% endif %}</p>
+</div><div class="page-actions"><a class="btn" href="/dashboard/runs">Runs</a><a class="btn" href="/dashboard/settings">Settings</a></div></header>
+{% if jobs_enabled %}<p class="muted text-sm">Jobs that take the run lock wait for nothing: a second <code>generate</code> while one is running fails immediately.</p>{% else %}<p class="notice">Jobs are disabled on this server (<code>server.jobs_enabled = false</code>); run the commands by hand instead.</p>{% endif %}
+<div class="cards job-cards">{% for card in cards %}<section class="card flex flex-col">
+<div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+<h2 class="font-mono text-base">{{ card.name }}</h2>
+{% if let Some(status) = card.last_status %}<span class="badge {{ status }}">{{ status }}</span>{% else %}<span class="muted text-xs uppercase tracking-[0.1em]">never run</span>{% endif %}
+</div>
+<p class="text-muted">{{ card.description }}</p>
+<p class="text-xs text-muted">{% if let Some(id) = card.last_id %}Last started <a href="/dashboard/jobs/{{ id }}">{% if let Some(when) = card.last_requested %}{{ when }}{% else %}job {{ id }}{% endif %}</a>{% else %}No run recorded yet.{% endif %}{% if let Some(lock) = card.lock %} · takes the <code class="whitespace-nowrap">{{ lock }}</code> lock{% endif %}</p>
+<form method="post" action="/dashboard/jobs/{{ card.name }}" class="form-inline mt-auto pt-1"{% if card.dangerous %} data-confirm="Start {{ card.name }}? This republishes the issue of that date."{% endif %}>
+{% if card.dated %}<label class="text-xs uppercase tracking-[0.1em] text-muted">Date <input type="date" name="date" value="{{ today }}" class="text-sm normal-case tracking-normal text-ink"></label>{% endif %}
+<button class="btn" type="submit"{% if !jobs_enabled %} disabled{% endif %}>Start</button>
 </form>
 </section>{% endfor %}</div>
 <h2>History</h2>
-{% if jobs.is_empty() %}<p class="muted">No jobs recorded yet.</p>{% else %}<div class="scroll-x"><table data-filter>
-<thead><tr><th>job</th><th>name</th><th>requested by</th><th>requested</th><th>started</th><th>finished</th><th class="num">duration</th><th>status</th><th>message</th><th>run</th></tr></thead>
+{% if jobs.is_empty() %}<p class="muted text-sm">No jobs recorded yet.</p>{% else %}<div class="scroll-x tall"><table data-filter>
+<thead><tr><th class="num">job</th><th>name</th><th>requested by</th><th>requested</th><th>started</th><th>finished</th><th class="num">duration</th><th>status</th><th>message</th><th class="num">run</th></tr></thead>
 <tbody>{% for job in jobs %}<tr>
-<td><a href="/dashboard/jobs/{{ job.id }}">{{ job.id }}</a></td>
-<td>{{ job.name }}</td>
-<td>{{ job.requested_by }}</td>
-<td>{{ job.requested }}</td>
-<td>{{ job.started }}</td>
-<td>{{ job.finished }}</td>
+<td class="num"><a href="/dashboard/jobs/{{ job.id }}">{{ job.id }}</a></td>
+<td class="cell-tight font-mono text-xs">{{ job.name }}</td>
+<td class="cell-tight text-muted">{{ job.requested_by }}</td>
+<td class="cell-tight text-muted">{{ job.requested }}</td>
+<td class="cell-tight text-muted">{{ job.started }}</td>
+<td class="cell-tight text-muted">{{ job.finished }}</td>
 <td class="num">{{ job.duration }}</td>
-<td><span class="badge {{ job.status }}">{{ job.status }}</span></td>
-<td class="message">{% if let Some(message) = job.message %}{{ message }}{% endif %}</td>
-<td>{% if let Some(run_id) = job.run_id %}<a href="/dashboard/runs/{{ run_id }}">{{ run_id }}</a>{% endif %}</td>
+<td class="cell-tight"><span class="badge {{ job.status }}">{{ job.status }}</span></td>
+<td class="message cell-wrap text-muted">{% if let Some(message) = job.message %}{{ message }}{% endif %}</td>
+<td class="num">{% if let Some(run_id) = job.run_id %}<a href="/dashboard/runs/{{ run_id }}">{{ run_id }}</a>{% endif %}</td>
 </tr>{% endfor %}</tbody></table></div>{% endif %}
 </section>{% endblock %}

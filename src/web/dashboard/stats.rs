@@ -406,7 +406,7 @@ async fn stats(
         })
         .collect();
 
-    let mut page = Page::new("Stats", viewer, "dashboard");
+    let mut page = Page::new("Stats", viewer, "stats");
     page.flash = take_flash(&session).await?;
     Ok(Html(StatsTemplate {
         page,

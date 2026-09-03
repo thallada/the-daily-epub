@@ -1,15 +1,18 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard">
+<header class="page-head"><div>
 <h1>Users</h1>
-<p class="muted">Accounts are read-only here. Create, change, disable, enable, or sign out users with the <code>daily-epub users</code> CLI on the server.</p>
-<div class="scroll-x"><table data-filter>
+<p class="page-desc">Every account on this server, with its role and open sessions.</p>
+</div></header>
+<p class="muted text-sm">Accounts are read-only here. Create, change, disable, enable, or sign out users with the <code>daily-epub users</code> CLI on the server.</p>
+<div class="scroll-x tall"><table data-filter>
 <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Last login</th><th class="num">Open sessions</th></tr></thead>
 <tbody>{% for user in users %}<tr>
-<td>{{ user.username }}</td>
+<td class="font-medium text-ink">{{ user.username }}</td>
 <td><span class="badge">{{ user.role }}</span></td>
 <td>{% if user.disabled %}<span class="badge down">disabled</span>{% else %}<span class="badge loved">enabled</span>{% endif %}</td>
-<td>{{ user.created }}</td>
-<td>{{ user.last_login }}</td>
+<td class="cell-tight text-muted">{{ user.created }}</td>
+<td class="cell-tight text-muted">{{ user.last_login }}</td>
 <td class="num">{{ user.open_sessions }}</td>
-</tr>{% endfor %}{% if users.is_empty() %}<tr><td colspan="6">No users. Bootstrap an admin with <code>daily-epub users add &lt;username&gt; --admin</code>.</td></tr>{% endif %}</tbody>
+</tr>{% endfor %}{% if users.is_empty() %}<tr><td colspan="6" class="text-muted">No users. Bootstrap an admin with <code>daily-epub users add &lt;username&gt;</code> <code>--admin</code>.</td></tr>{% endif %}</tbody>
 </table></div>
 </section>{% endblock %}

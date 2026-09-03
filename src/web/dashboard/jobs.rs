@@ -45,6 +45,12 @@ struct JobCard {
     /// The `generate` card carries the date input for `generate-YYYY-MM-DD`.
     dated: bool,
     lock: Option<&'static str>,
+    /// Status of the most recent job started from this card, when there is one.
+    last_status: Option<String>,
+    /// When that job was requested, for the card's "last run" line.
+    last_requested: Option<String>,
+    /// Its id, so the card links straight to the job page.
+    last_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,8 +101,27 @@ fn cards() -> Vec<JobCard> {
             dangerous: job.dangerous(),
             dated: matches!(job, Job::Generate { .. }),
             lock: job.takes_lock(),
+            last_status: None,
+            last_requested: None,
+            last_id: None,
         })
         .collect()
+}
+
+/// `rows` is newest first, so the first row whose name is the card's name (or
+/// `<name>-<date>` for the dated `generate` card) is that card's last run.
+fn attach_last_runs(cards: &mut [JobCard], rows: &[JobLine]) {
+    for card in cards.iter_mut() {
+        let prefix = format!("{}-", card.name);
+        if let Some(row) = rows
+            .iter()
+            .find(|row| row.name == card.name || row.name.starts_with(&prefix))
+        {
+            card.last_status = Some(row.status.clone());
+            card.last_requested = Some(row.requested.clone());
+            card.last_id = Some(row.id);
+        }
+    }
 }
 
 fn job_line(row: &JobRow, config: &Config) -> JobLine {
@@ -140,11 +165,14 @@ async fn jobs_template(
                 .date()
                 .to_string()
         });
+    let jobs: Vec<JobLine> = rows.iter().map(|row| job_line(row, &config)).collect();
+    let mut cards = cards();
+    attach_last_runs(&mut cards, &jobs);
     Ok(JobsTemplate {
         page,
         jobs_enabled: config.server.jobs_enabled,
-        cards: cards(),
-        jobs: rows.iter().map(|row| job_line(row, &config)).collect(),
+        cards,
+        jobs,
         today,
     })
 }
@@ -351,6 +379,47 @@ mod tests {
     use crate::server::router;
     use crate::web::MockRunner;
     use crate::web::dashboard::tests::{assert_admin_only, get, login_cookie, response_text};
+
+    fn job_line_named(id: i64, name: &str, status: &str) -> JobLine {
+        JobLine {
+            id,
+            name: name.into(),
+            requested_by: "admin".into(),
+            requested: "2026-09-03 01:00".into(),
+            started: String::new(),
+            finished: String::new(),
+            duration: String::new(),
+            status: status.into(),
+            message: None,
+            run_id: None,
+        }
+    }
+
+    #[test]
+    fn cards_take_their_last_run_from_the_newest_matching_job() {
+        let mut cards = cards();
+        // Newest first, the way `jobs::list` returns them.
+        let rows = vec![
+            job_line_named(4, "generate-2026-09-03", "running"),
+            job_line_named(3, "profile-rebuild", "ok"),
+            job_line_named(2, "generate-2026-09-02", "ok"),
+        ];
+        attach_last_runs(&mut cards, &rows);
+
+        let generate = cards.iter().find(|card| card.name == "generate").unwrap();
+        assert_eq!(generate.last_id, Some(4), "the dated job matches its card");
+        assert_eq!(generate.last_status.as_deref(), Some("running"));
+        let rebuild = cards
+            .iter()
+            .find(|card| card.name == "profile-rebuild")
+            .unwrap();
+        assert_eq!(rebuild.last_id, Some(3));
+        let never = cards
+            .iter()
+            .find(|card| card.last_id.is_none())
+            .expect("a catalogue job with no recorded run");
+        assert!(never.last_status.is_none());
+    }
 
     async fn app_with_runner(
         config: Config,

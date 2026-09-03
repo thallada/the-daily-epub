@@ -1,18 +1,18 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard">
+<header class="page-head"><div>
 <h1>Settings history</h1>
-<p class="meta"><a href="/dashboard/settings">Settings</a> · every change made through the dashboard, newest first.</p>
-{% if changes.is_empty() %}<p>No settings have been changed through the dashboard yet.</p>{% else %}<div class="scroll-x"><table class="history">
+<p class="page-desc">Every settings change made through the dashboard, newest first. Hand edits to <code>config.toml</code> on disk are not recorded here.</p>
+</div><div class="page-actions"><a class="btn" href="/dashboard/settings">Back to settings</a></div></header>
+{% if changes.is_empty() %}<p class="muted text-sm">No settings have been changed through the dashboard yet.</p>{% else %}<div class="scroll-x tall"><table class="history" data-filter>
 <thead><tr><th>When</th><th>Who</th><th>Key</th><th>Before</th><th>After</th></tr></thead>
 <tbody>{% for change in changes %}<tr>
-<td>{{ change.changed_at }}</td>
-<td>{% match change.username %}{% when Some with (name) %}{{ name }}{% when None %}<em>removed user</em>{% endmatch %}</td>
+<td class="cell-tight text-muted">{{ change.changed_at }}</td>
+<td class="cell-tight">{% match change.username %}{% when Some with (name) %}{{ name }}{% when None %}<em class="text-muted">removed user</em>{% endmatch %}</td>
 <td><code>{{ change.key }}</code></td>
-<td>{% match change.old_value %}{% when Some with (value) %}<pre>{{ value }}</pre>{% when None %}<em>absent</em>{% endmatch %}</td>
-<td>{% match change.new_value %}{% when Some with (value) %}<pre>{{ value }}</pre>{% when None %}<em>removed</em>{% endmatch %}</td>
+<td class="cell-wrap">{% match change.old_value %}{% when Some with (value) %}<pre class="preview">{{ value }}</pre>{% when None %}<em class="text-muted">absent</em>{% endmatch %}</td>
+<td class="cell-wrap">{% match change.new_value %}{% when Some with (value) %}<pre class="preview">{{ value }}</pre>{% when None %}<em class="text-muted">removed</em>{% endmatch %}</td>
 </tr>{% endfor %}</tbody>
 </table></div>
-{% include "_pagination.html" %}
-{% if pagination.page < pagination.pages() %}<p><a href="/dashboard/settings/history?page={{ pagination.page + 1 }}">Older</a></p>{% endif %}
-{% if pagination.page > 1 %}<p><a href="/dashboard/settings/history?page={{ pagination.page - 1 }}">Newer</a></p>{% endif %}
+{% if pagination.pages() > 1 %}<nav class="pager" aria-label="Pagination">{% include "_pagination.html" %}<span class="flex items-center gap-2">{% if pagination.page > 1 %}<a class="btn" href="/dashboard/settings/history?page={{ pagination.page - 1 }}">← Newer</a>{% endif %}{% if pagination.page < pagination.pages() %}<a class="btn" href="/dashboard/settings/history?page={{ pagination.page + 1 }}">Older →</a>{% endif %}</span></nav>{% endif %}
 {% endif %}
 </section>{% endblock %}
