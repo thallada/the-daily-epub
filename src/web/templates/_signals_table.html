@@ -1,0 +1,8 @@
+{% if signals.empty %}<p class="muted">No signals recorded for this row (hygiene exclusion or thin telemetry).</p>{% else %}<div class="signals-body">
+<table class="signals"><thead><tr><th>signal</th><th class="num">raw</th><th class="num">norm</th><th class="num">weight</th><th>present</th></tr></thead>
+<tbody>{% for line in signals.lines %}<tr{% if !line.present %} class="muted"{% endif %}><td>{{ line.name }}</td><td class="num">{{ line.raw }}</td><td class="num">{{ line.norm }}</td><td class="num">{{ line.weight }}</td><td>{% if line.present %}yes{% else %}absent{% endif %}</td></tr>{% endfor %}</tbody></table>
+<p class="muted">Preliminary blend {{ signals.blend }}{% if let Some(cos) = signals.top1_cos %} · interest top-1 cosine {{ cos }}{% endif %}{% if signals.exploration %} · <span class="badge">exploration</span>{% endif %}{% if signals.auto_include %} · <span class="badge">auto-include</span>{% endif %}</p>
+{% if !signals.top_interests.is_empty() %}<p><strong>Top interests</strong></p><ul>{% for interest in signals.top_interests %}<li>{{ interest.name }} <span class="muted">· z {{ interest.z }} · cos {{ interest.cos }}</span></li>{% endfor %}</ul>{% endif %}
+{% if !signals.neighbours.is_empty() %}<p><strong>Nearest rated neighbours</strong></p><ul>{% for neighbour in signals.neighbours %}<li><span class="badge {{ neighbour.label }}">{{ neighbour.label }}</span> <a href="/dashboard/articles/{{ neighbour.article_id }}">{{ neighbour.title }}</a> <span class="muted">· cos {{ neighbour.cos }}</span></li>{% endfor %}</ul>{% endif %}
+{% if !signals.notes.is_empty() %}<ul class="muted">{% for note in signals.notes %}<li>{{ note }}</li>{% endfor %}</ul>{% endif %}
+</div>{% endif %}

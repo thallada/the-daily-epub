@@ -1,0 +1,16 @@
+<tr>
+<td><details class="signals"><summary><a href="{{ candidate.href }}">{{ candidate.title }}</a></summary>{% let signals = candidate.signals %}{% include "_signals_table.html" %}</details></td>
+<td>{{ candidate.feed }}</td>
+<td class="num">{{ candidate.words }}</td>
+<td><span class="badge {{ candidate.stage }}">{{ candidate.stage }}</span></td>
+<td>{% if let Some(reason) = candidate.reason %}<span class="badge reason">{{ reason }}</span>{% endif %}</td>
+<td>{% if let Some(first) = candidate.admitted_first %}{{ first }}{% if !candidate.admitted_rest.is_empty() %} <span class="muted">({{ candidate.admitted_rest }})</span>{% endif %}{% endif %}</td>
+<td class="num">{{ candidate.utility }}</td>
+<td class="num">{{ candidate.rank }}</td>
+<td class="num">{{ candidate.cluster }}</td>
+<td class="num">{{ candidate.triage }}</td>
+<td class="num">{{ candidate.quality }}</td>
+<td class="num">{{ candidate.fit }}</td>
+<td>{% if candidate.exploration %}<span class="badge">exploration</span>{% endif %}{% if candidate.auto_include %}<span class="badge">auto</span>{% endif %}</td>
+<td>{% if let Some(why) = candidate.editor_why %}{{ why }}{% endif %}</td>
+</tr>
