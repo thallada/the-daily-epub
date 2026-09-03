@@ -700,6 +700,15 @@ pub struct ServerConfig {
     /// Optional Basic auth for `/opds/*` and `/files/*`.
     pub basic_auth_user: Option<String>,
     pub basic_auth_pass: Option<String>,
+    /// Sliding web-session lifetime in days.
+    pub session_days: u32,
+    /// Login attempts allowed per IP during the configured window.
+    pub login_attempts: u32,
+    pub login_window_minutes: u32,
+    /// Whether the operator dashboard may start systemd jobs.
+    pub jobs_enabled: bool,
+    /// Number of journal lines displayed for a job.
+    pub journal_lines: u32,
 }
 
 impl Default for ServerConfig {
@@ -710,6 +719,11 @@ impl Default for ServerConfig {
             hmac_secret: None,
             basic_auth_user: None,
             basic_auth_pass: None,
+            session_days: 30,
+            login_attempts: 10,
+            login_window_minutes: 15,
+            jobs_enabled: true,
+            journal_lines: 300,
         }
     }
 }
@@ -931,6 +945,26 @@ impl Config {
 
     /// Cheap sanity checks so misconfiguration fails at startup, not mid-run.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.server.session_days == 0 {
+            return Err(ConfigError::Invalid(
+                "server.session_days must be >= 1".into(),
+            ));
+        }
+        if self.server.login_attempts == 0 {
+            return Err(ConfigError::Invalid(
+                "server.login_attempts must be >= 1".into(),
+            ));
+        }
+        if self.server.login_window_minutes == 0 {
+            return Err(ConfigError::Invalid(
+                "server.login_window_minutes must be >= 1".into(),
+            ));
+        }
+        if !(10..=5000).contains(&self.server.journal_lines) {
+            return Err(ConfigError::Invalid(
+                "server.journal_lines must be between 10 and 5000".into(),
+            ));
+        }
         if self.lookback_hours == 0 {
             return Err(ConfigError::Invalid("lookback_hours must be > 0".into()));
         }

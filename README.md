@@ -127,6 +127,13 @@ daily-epub features prune       # stale embeddings, old telemetry and assessment
 daily-epub backfill-social [--days 7]   # re-poll social scores for recent articles
 daily-epub db migrate           # run migrations (also automatic on every start)
 daily-epub config check         # validate the config, print the resolved roles, keys and paths
+daily-epub users add USER [--admin] [--password-stdin]
+daily-epub users passwd USER [--password-stdin]
+daily-epub users role USER user|admin
+daily-epub users disable USER
+daily-epub users enable USER
+daily-epub users list
+daily-epub users logout USER    # revoke all of USER's sessions
 ```
 
 `--dry-run` does everything except deliver: it still ingests, persists entries and
@@ -176,6 +183,20 @@ Voyage line likewise, and `editorial.summary_model`. Lines that need attention
 start with `!`. It exits non-zero only on a validation error — a missing key or
 file is a warning, since the run degrades rather than fails — and never opens
 the database or takes the lock, so it is safe to run next to a live `generate`.
+
+### Web routes
+
+| Route | Access | Purpose |
+|---|---|---|
+| `GET /` | Public | Latest issue as a source-link-only index. |
+| `GET /issues` | Public | Issue archive. |
+| `GET /issues/{date}` | Public | One source-link-only issue index. |
+| `GET /feed.xml` | Public | Atom feed carrying the same public issue content. |
+| `GET /robots.txt`, `/static/{file}` | Public | Crawler policy and embedded site assets. |
+| `GET/POST /login`, `POST /logout`, `GET /account` | Session | Sign in, sign out, and account management. |
+| `GET /dashboard` | Admin | Private operator dashboard. |
+| `GET /files/epub/{name}`, `/files/xtc/{name}` | Session or Basic auth | Published downloads; existing OPDS clients continue to use Basic auth. |
+| `GET /opds/daily.xml`, `/healthz`, `/issues.json`, `/r/...` | Existing policy | OPDS, health, reports, and signed rating links. |
 
 ---
 
@@ -293,7 +314,12 @@ prints what resolved.
 | `server.bind` | `127.0.0.1:3499` | Listen address. |
 | `server.public_url` | `https://daily.hallada.net` | Base URL the rating links inside the EPUB are built from. |
 | `server.hmac_secret` | — | **`DAILY_EPUB_SERVER__HMAC_SECRET`** (or `DAILY_EPUB_SECRET`). Without it, generated links are rejected with 403. |
-| `server.basic_auth_user` / `_pass` | unset | Optional Basic auth for `/opds/*` and `/files/*`. |
+| `server.basic_auth_user` / `_pass` | unset | Optional Basic auth for `/opds/*` and `/files/*`; signed-in web users may download from `/files/*` without Basic auth. |
+| `server.session_days` | `30` | Sliding lifetime for dashboard login sessions. |
+| `server.login_attempts` | `10` | Login attempts allowed per IP in one throttle window. |
+| `server.login_window_minutes` | `15` | Length of the login throttle window. |
+| `server.jobs_enabled` | `true` | Allow the dashboard to start the fixed systemd job catalogue. |
+| `server.journal_lines` | `300` | Journal lines shown on a dashboard job page (10–5000). |
 
 `[curation.ranking]` holds the ranker's tunables. The learned signals are
 gated: `knn` (rated-neighbour preference) ramps from `knn_floor` (8) to
@@ -383,6 +409,9 @@ Node for the XTC converter, whose JIT needs W+X pages.
 The rating links baked into every article chapter point at
 `server.public_url`, so `daily.hallada.net` must resolve and serve TLS from the
 internet (e-readers tap these links). The OPDS catalog rides on the same host.
+The login throttle's `SmartIpKeyExtractor` trusts `X-Forwarded-For`; this is
+safe only because the configured bind address is loopback and nginx is the
+only process that can reach it.
 With an existing certificate, a minimal nginx site is:
 
 ```nginx

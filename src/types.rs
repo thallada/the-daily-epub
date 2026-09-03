@@ -705,6 +705,7 @@ impl Vote {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RatingEvent {
     pub id: i64,
+    pub user_id: Option<i64>,
     pub article_id: ArticleId,
     pub issue_date: Option<Date>,
     pub kind: String,
@@ -733,6 +734,7 @@ pub struct Facets {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RatedArticle {
     pub article_id: ArticleId,
+    pub user_id: Option<i64>,
     pub issue_date: Option<Date>,
     pub title: String,
     pub feed_title: String,

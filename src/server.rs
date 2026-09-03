@@ -22,18 +22,23 @@
 //! `server.hmac_secret` is unset carries links this server rejects with 403.
 
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum_login::AuthManagerLayerBuilder;
+use axum_login::tower_sessions::{Expiry, SessionManagerLayer};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use jiff::Timestamp;
 use jiff::civil::Date;
 use serde::Deserialize;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
@@ -64,10 +69,44 @@ pub enum ServerError {
 }
 
 /// Shared axum state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppState {
     pub db: Db,
-    pub config: Config,
+    pub config: Arc<RwLock<Arc<Config>>>,
+    pub config_path: Option<PathBuf>,
+    pub web: Arc<crate::web::WebState>,
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("db", &self.db)
+            .field("config_path", &self.config_path)
+            .field("web", &self.web)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AppState {
+    pub fn new(db: Db, config: Config, config_path: Option<PathBuf>) -> Self {
+        Self {
+            db,
+            config: Arc::new(RwLock::new(Arc::new(config))),
+            config_path,
+            web: Arc::new(crate::web::WebState {
+                jobs: Arc::new(crate::web::DisabledRunner),
+                started_at: Timestamp::now(),
+                config_mtime: std::sync::Mutex::new(None),
+            }),
+        }
+    }
+
+    pub fn config(&self) -> Arc<Config> {
+        match self.config.read() {
+            Ok(config) => Arc::clone(&config),
+            Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +125,22 @@ pub use crate::auth::{constant_time_eq, rating_token, rating_url, verify_token};
 /// `/files/epub/{name}`, `/files/xtc/{name}`, `/healthz`, `/issues.json`, with
 /// `tower-http` tracing (§3.12).
 pub fn router(state: AppState) -> Router {
+    let config = state.config();
+    let store = crate::web::session::SqliteSessionStore::new(state.db.pool().clone());
+    let session_layer = SessionManagerLayer::new(store)
+        .with_name("daily_session")
+        .with_http_only(true)
+        .with_same_site(axum_login::tower_sessions::cookie::SameSite::Lax)
+        .with_secure(config.server.public_url.starts_with("https://"))
+        .with_expiry(Expiry::OnInactivity(time::Duration::days(i64::from(
+            config.server.session_days,
+        ))));
+    let auth_layer = AuthManagerLayerBuilder::new(
+        crate::web::session::Backend::new(state.db.clone()),
+        session_layer,
+    )
+    .build();
+
     Router::new()
         .route("/r/{date}/{article_id}/{vote}", get(handle_rating))
         .route(crate::publish::OPDS_PATH, get(handle_opds))
@@ -97,12 +152,25 @@ pub fn router(state: AppState) -> Router {
         .route("/files/xtc/{name}", get(handle_xtc_file))
         .route("/healthz", get(handle_healthz))
         .route("/issues.json", get(handle_issues_json))
+        .merge(crate::web::router(&config))
+        .layer(PropagateRequestIdLayer::x_request_id())
         .layer(TraceLayer::new_for_http())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(auth_layer)
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::web::session::require_same_origin,
+        ))
+        .layer(from_fn(crate::web::security_headers))
         .with_state(state)
 }
 
 /// `daily-epub serve` — bind, serve, graceful shutdown on SIGTERM (§3.12).
-pub async fn serve(config: Config, db: Db) -> Result<(), ServerError> {
+pub async fn serve(
+    config: Config,
+    config_path: Option<PathBuf>,
+    db: Db,
+) -> Result<(), ServerError> {
     if config.server.hmac_secret.is_none() {
         // Not fatal for the OPDS routes, but every rating link would 500.
         tracing::warn!("server.hmac_secret is unset — rating links will be rejected");
@@ -117,10 +185,27 @@ pub async fn serve(config: Config, db: Db) -> Result<(), ServerError> {
     let local = listener.local_addr().map(|a| a.to_string()).unwrap_or(addr);
     tracing::info!(bind = %local, public_url = %config.server.public_url, "serving");
 
-    let app = router(AppState { db, config });
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let store = crate::web::session::SqliteSessionStore::new(db.pool().clone());
+    if let Err(error) = store.delete_expired().await {
+        tracing::warn!(%error, "could not delete expired sessions at startup");
+    }
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            if let Err(error) = store.delete_expired().await {
+                tracing::warn!(%error, "could not delete expired sessions");
+            }
+        }
+    });
+
+    let app = router(AppState::new(db, config, config_path));
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     tracing::info!("server stopped");
     Ok(())
 }
@@ -219,7 +304,8 @@ async fn handle_rating(
         return page(StatusCode::BAD_REQUEST, "Bad link — invalid vote.", None);
     };
 
-    let Some(secret) = state.config.server.hmac_secret.as_deref() else {
+    let config = state.config();
+    let Some(secret) = config.server.hmac_secret.as_deref() else {
         tracing::error!("rating request but server.hmac_secret is unset");
         return page(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -251,12 +337,13 @@ async fn handle_rating(
     };
     let event = RatingEvent {
         id: 0,
+        user_id: None,
         issue_date: Some(date),
         article_id,
         kind: "explicit".into(),
         source: "epub".into(),
         label: label.into(),
-        value: vote.value(&state.config.curation.feedback),
+        value: vote.value(&config.curation.feedback),
         note: None,
         event_at: Timestamp::now(),
     };
@@ -278,23 +365,17 @@ async fn handle_rating(
         Vote::Good => "Recorded: Good — thanks.",
         Vote::NotForMe => "Recorded: Not for me — thanks.",
     };
-    confirmation_page(
-        StatusCode::OK,
-        message,
-        &state.config,
-        date,
-        article_id,
-        vote,
-    )
+    confirmation_page(StatusCode::OK, message, &config, date, article_id, vote)
 }
 
 /// `GET /opds/daily.xml` — both EPUB editions of the last issues, newest first,
 /// rendered from the publish directory on each request (§3.11).
 async fn handle_opds(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(challenge) = check_basic_auth(&state.config, &headers) {
+    let config = state.config();
+    if let Some(challenge) = check_basic_auth(&config, &headers) {
         return challenge;
     }
-    match crate::publish::build_opds(&state.db, &state.config).await {
+    match crate::publish::build_opds(&state.db, &config).await {
         Ok(feed) => (
             StatusCode::OK,
             [
@@ -321,9 +402,10 @@ async fn handle_epub_file(
     State(state): State<AppState>,
     Path(name): Path<String>,
     headers: HeaderMap,
+    auth: crate::web::session::AuthSession,
 ) -> Response {
-    let dir = state.config.publish.epub_dir.clone();
-    serve_file(&state, &dir, &name, &headers).await
+    let dir = state.config().publish.epub_dir.clone();
+    serve_file(&state, &dir, &name, &headers, auth.user().await.is_some()).await
 }
 
 /// `GET /files/xtc/{name}` — download one XTC artifact (§3.11).
@@ -334,14 +416,25 @@ async fn handle_xtc_file(
     State(state): State<AppState>,
     Path(name): Path<String>,
     headers: HeaderMap,
+    auth: crate::web::session::AuthSession,
 ) -> Response {
-    let dir = state.config.publish.xtc_dir.clone();
-    serve_file(&state, &dir, &name, &headers).await
+    let dir = state.config().publish.xtc_dir.clone();
+    serve_file(&state, &dir, &name, &headers, auth.user().await.is_some()).await
 }
 
-/// Stream one file out of `dir`, behind the OPDS Basic auth (§3.11).
-async fn serve_file(state: &AppState, dir: &FsPath, name: &str, headers: &HeaderMap) -> Response {
-    if let Some(challenge) = check_basic_auth(&state.config, headers) {
+/// Stream one file out of `dir`. A signed-in web session (any role) bypasses
+/// the OPDS Basic auth; without one the existing Basic auth policy applies
+/// unchanged, including "no credentials configured ⇒ public", so e-readers
+/// following the OPDS feed keep working (§3.11, dashboard plan §8).
+async fn serve_file(
+    state: &AppState,
+    dir: &FsPath,
+    name: &str,
+    headers: &HeaderMap,
+    signed_in: bool,
+) -> Response {
+    let config = state.config();
+    if !signed_in && let Some(challenge) = check_basic_auth(&config, headers) {
         return challenge;
     }
     let Some(path) = safe_join(dir, name) else {
@@ -734,10 +827,7 @@ mod tests {
 
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
-            let app = router(AppState {
-                db: db.clone(),
-                config,
-            });
+            let app = router(AppState::new(db.clone(), config, None));
             let handle = tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
@@ -848,6 +938,7 @@ mod tests {
                     None,
                     None,
                     Some(&format!("{{\"selected\":{n}}}")),
+                    None,
                 )
                 .await
                 .unwrap();

@@ -31,6 +31,7 @@ pub mod report;
 pub mod server;
 pub mod social;
 pub mod types;
+pub mod web;
 pub mod world;
 
 /// `CARGO_PKG_VERSION`, printed in the colophon and the OPDS generator tag.

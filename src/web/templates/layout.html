@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page.title }} · The Daily EPUB</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ page.version }}">
+  <link rel="alternate" type="application/atom+xml" title="The Daily EPUB" href="/feed.xml">
+  <link rel="icon" href="/static/favicon.svg">
+</head>
+<body>
+  <header class="masthead"><a href="/">The Daily EPUB</a></header>
+  <nav class="primary"><a href="/">Latest</a> · <a href="/issues">Archive</a> · <a href="/feed.xml">Feed</a> · {% match page.viewer %}{% when Some with (viewer) %}<a href="/account">{{ viewer.username }}</a>{% when None %}<a href="/login">Sign in</a>{% endmatch %}</nav>
+  {% if page.is_admin() %}<nav class="admin"><a href="/dashboard">Overview</a> · <a href="/dashboard/runs">Runs</a> · <a href="/dashboard/articles">Articles</a> · <a href="/dashboard/ratings">Ratings</a> · <a href="/dashboard/profile">Profile</a> · <a href="/dashboard/stats">Stats</a> · <a href="/dashboard/jobs">Jobs</a> · <a href="/dashboard/settings">Settings</a> · <a href="/dashboard/users">Users</a></nav>{% endif %}
+  {% match page.flash %}{% when Some with (flash) %}<div class="flash {{ flash.kind }}" role="status">{{ flash.text }}</div>{% when None %}{% endmatch %}
+  <main>{% block content %}{% endblock %}</main>
+  <footer>daily-epub {{ page.version }}</footer>
+  <script src="/static/app.js?v={{ page.version }}"></script>
+</body>
+</html>

@@ -58,6 +58,43 @@ enum Command {
     /// Inspect the resolved configuration.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Manage dashboard users without taking the pipeline run lock.
+    #[command(subcommand)]
+    Users(UsersCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum UsersCommand {
+    /// Add a user.
+    Add(UserAddArgs),
+    /// Change a user's password and revoke existing sessions.
+    Passwd(UserPasswordArgs),
+    /// Change a user's role.
+    Role { username: String, role: String },
+    /// Disable a user and revoke existing sessions.
+    Disable { username: String },
+    /// Enable a user.
+    Enable { username: String },
+    /// List users and open-session counts.
+    List,
+    /// Revoke all sessions for a user.
+    Logout { username: String },
+}
+
+#[derive(Debug, clap::Args)]
+struct UserAddArgs {
+    username: String,
+    #[arg(long)]
+    admin: bool,
+    #[arg(long)]
+    password_stdin: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct UserPasswordArgs {
+    username: String,
+    #[arg(long)]
+    password_stdin: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -286,7 +323,8 @@ async fn main() -> Result<()> {
         }
         Command::Serve => {
             let db = Db::open_and_migrate(&config.database_path).await?;
-            server::serve(config, db).await?;
+            let config_path = Config::resolve_path(cli.config.as_deref());
+            server::serve(config, config_path, db).await?;
         }
         Command::Profile(ProfileCommand::Rebuild) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
@@ -326,6 +364,10 @@ async fn main() -> Result<()> {
                 println!("{line}");
             }
         }
+        Command::Users(command) => {
+            let db = Db::open_and_migrate(&config.database_path).await?;
+            cmd_users(&db, command).await?;
+        }
     }
     Ok(())
 }
@@ -345,8 +387,89 @@ fn lock_holder(command: &Command) -> Option<&'static str> {
         | Command::Stats(_)
         | Command::Features(FeaturesCommand::Prune)
         | Command::Db(_)
-        | Command::Config(_) => None,
+        | Command::Config(_)
+        | Command::Users(_) => None,
     }
+}
+
+async fn cmd_users(db: &Db, command: UsersCommand) -> Result<()> {
+    use daily_epub::web::users;
+    match command {
+        UsersCommand::Add(args) => {
+            let password = read_new_password(args.password_stdin)?;
+            let user = users::add(db, &args.username, &password, args.admin).await?;
+            println!("added {} ({})", user.username, user.role);
+        }
+        UsersCommand::Passwd(args) => {
+            let password = read_new_password(args.password_stdin)?;
+            let sessions = users::passwd(db, &args.username, &password).await?;
+            println!(
+                "changed password for {} and revoked {sessions} session(s)",
+                args.username
+            );
+        }
+        UsersCommand::Role { username, role } => {
+            let role = role.parse().map_err(anyhow::Error::msg)?;
+            users::set_role(db, &username, role).await?;
+            println!("set {username} role to {role}");
+        }
+        UsersCommand::Disable { username } => {
+            let sessions = users::set_disabled(db, &username, true).await?;
+            println!("disabled {username} and revoked {sessions} session(s)");
+        }
+        UsersCommand::Enable { username } => {
+            users::set_disabled(db, &username, false).await?;
+            println!("enabled {username}");
+        }
+        UsersCommand::List => {
+            for row in users::list(db).await? {
+                let last_login = row
+                    .user
+                    .last_login_at
+                    .map(|timestamp| timestamp.to_string())
+                    .unwrap_or_else(|| "never".into());
+                println!(
+                    "{} · {}{} · created {} · last login {} · {} open session(s)",
+                    row.user.username,
+                    row.user.role,
+                    if row.user.disabled {
+                        " · disabled"
+                    } else {
+                        ""
+                    },
+                    row.user.created_at,
+                    last_login,
+                    row.open_sessions
+                );
+            }
+        }
+        UsersCommand::Logout { username } => {
+            let sessions = users::logout(db, &username).await?;
+            println!("revoked {sessions} session(s) for {username}");
+        }
+    }
+    Ok(())
+}
+
+fn read_new_password(from_stdin: bool) -> Result<String> {
+    if from_stdin {
+        let mut password = String::new();
+        std::io::stdin().read_line(&mut password)?;
+        while password.ends_with(['\n', '\r']) {
+            password.pop();
+        }
+        return Ok(password);
+    }
+    let first = read_password_hidden("Password: ")?;
+    let second = read_password_hidden("Confirm password: ")?;
+    if first != second {
+        anyhow::bail!("passwords do not match");
+    }
+    Ok(first)
+}
+
+fn read_password_hidden(prompt: &str) -> Result<String> {
+    rpassword::prompt_password(prompt).context("reading the password from the terminal")
 }
 
 /// `RUST_LOG`-driven tracing, defaulting to `info` (crate table "logging").
@@ -562,6 +685,7 @@ async fn append_cli_event(
     };
     let event = RatingEvent {
         id: 0,
+        user_id: None,
         article_id,
         issue_date: db.latest_issue_date_for_article(article_id).await?,
         kind: "explicit".into(),

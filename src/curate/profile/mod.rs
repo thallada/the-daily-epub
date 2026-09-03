@@ -509,6 +509,7 @@ mod tests {
     fn prompt_sections_are_ordered_and_verdicts_have_required_labels() {
         let rating = RatedArticle {
             article_id: 1,
+            user_id: None,
             issue_date: None,
             title: "A title".into(),
             feed_title: "A feed".into(),
@@ -551,6 +552,7 @@ mod tests {
     fn rebuild_prompt_carries_summary_facets_note_and_diversity_instruction() {
         let rating = RatedArticle {
             article_id: 1,
+            user_id: None,
             issue_date: Some("2026-08-15".parse().unwrap()),
             title: "Postgres failover".into(),
             feed_title: "Engineering Notes".into(),
@@ -647,6 +649,7 @@ mod tests {
         .unwrap();
         db.append_rating_event(&RatingEvent {
             id: 0,
+            user_id: None,
             article_id: 1,
             issue_date: None,
             kind: "explicit".into(),

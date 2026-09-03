@@ -1,0 +1,1 @@
+{% extends "layout.html" %}{% block content %}<section class="reading"><h1>Issue archive</h1>{% for month in months %}<h2>{{ month.label }}</h2><ul>{% for issue in month.issues %}<li><a href="/issues/{{ issue.date }}">{{ issue.display_date }}</a> · No. {{ issue.issue_number }} · {{ issue.article_count }} articles</li>{% endfor %}</ul>{% endfor %}</section>{% endblock %}

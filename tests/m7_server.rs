@@ -106,6 +106,49 @@ impl Server {
     fn get_auth(&self, path: &str, credentials: &str) -> HttpResponse {
         try_get(self.port, path, Some(credentials)).expect("request failed")
     }
+
+    fn add_admin(&self, username: &str, password: &str) {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_daily-epub"))
+            .args(["users", "add", username, "--admin", "--password-stdin"])
+            .current_dir(self.dir.path())
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env(
+                "DAILY_EPUB_DATABASE_PATH",
+                self.dir.path().join("daily-epub.db"),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawning users add");
+        child
+            .stdin
+            .take()
+            .expect("users add stdin")
+            .write_all(format!("{password}\n").as_bytes())
+            .expect("writing users add password");
+        assert!(child.wait().expect("waiting for users add").success());
+    }
+
+    fn post_form(&self, path: &str, body: &str) -> HttpResponse {
+        try_request(
+            self.port,
+            "POST",
+            path,
+            &format!(
+                "Content-Type: application/x-www-form-urlencoded\r\nSec-Fetch-Site: same-origin\r\nContent-Length: {}\r\n",
+                body.len()
+            ),
+            body,
+        )
+        .expect("request failed")
+    }
+
+    fn get_cookie(&self, path: &str, cookie: &str) -> HttpResponse {
+        try_request(self.port, "GET", path, &format!("Cookie: {cookie}\r\n"), "")
+            .expect("request failed")
+    }
 }
 
 #[derive(Debug)]
@@ -135,15 +178,26 @@ fn free_port() -> u16 {
 
 /// A minimal HTTP/1.1 `GET`; `None` when the connection could not be made.
 fn try_get(port: u16, path: &str, credentials: Option<&str>) -> Option<HttpResponse> {
+    let auth = credentials
+        .map(|c| format!("Authorization: Basic {c}\r\n"))
+        .unwrap_or_default();
+    try_request(port, "GET", path, &auth, "")
+}
+
+fn try_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    extra_headers: &str,
+    body: &str,
+) -> Option<HttpResponse> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .ok()?;
-    let auth = credentials
-        .map(|c| format!("Authorization: Basic {c}\r\n"))
-        .unwrap_or_default();
-    let request =
-        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n{auth}\r\n");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n{extra_headers}\r\n{body}"
+    );
     stream.write_all(request.as_bytes()).ok()?;
     stream.flush().ok()?;
     // No half-close here: hyper drops a connection whose peer has shut down its
@@ -170,6 +224,32 @@ fn try_get(port: u16, path: &str, credentials: Option<&str>) -> Option<HttpRespo
 #[test]
 fn binary_serves_health_issues_and_rating_endpoints() {
     let server = Server::start(false);
+
+    for path in ["/", "/issues", "/feed.xml", "/login"] {
+        assert_eq!(server.get(path).status, 200, "{path}");
+    }
+    let dashboard = server.get("/dashboard");
+    assert_eq!(dashboard.status, 302);
+    assert_eq!(
+        dashboard.header("location"),
+        Some("/login?next=%2Fdashboard")
+    );
+
+    server.add_admin("admin", "correct horse battery");
+    let login = server.post_form(
+        "/login",
+        "username=admin&password=correct+horse+battery&next=%2Faccount",
+    );
+    assert_eq!(login.status, 303, "{login:?}");
+    let cookie = login
+        .header("set-cookie")
+        .expect("login cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair");
+    let account = server.get_cookie("/account", cookie);
+    assert_eq!(account.status, 200, "{account:?}");
+    assert!(account.body.contains("admin"));
 
     let res = server.get("/healthz");
     assert_eq!(res.status, 200);

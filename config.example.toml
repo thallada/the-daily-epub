@@ -210,6 +210,11 @@ settings = "/etc/daily-epub/xtc-settings.json"
 [server]
 bind = "127.0.0.1:3499"
 public_url = "https://daily.hallada.net"
+session_days = 30
+login_attempts = 10
+login_window_minutes = 15
+jobs_enabled = true
+journal_lines = 300
 # hmac_secret via DAILY_EPUB_SERVER__HMAC_SECRET env (32+ random bytes)
 # Optional Basic auth for the XTC OPDS feed and file downloads:
 # basic_auth_user = "daily"

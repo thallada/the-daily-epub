@@ -60,6 +60,27 @@ pub struct Db {
     pool: SqlitePool,
 }
 
+#[derive(Debug, Clone)]
+pub struct IssueRow {
+    pub date: Date,
+    pub issue_number: i64,
+    pub generated_at: Timestamp,
+    pub epub_path: Option<String>,
+    pub x4_path: Option<String>,
+    pub xtc_path: Option<String>,
+    pub front_page_html: Option<String>,
+    pub report_json: Option<String>,
+    pub issue_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IssueListRow {
+    pub date: Date,
+    pub issue_number: i64,
+    pub generated_at: Timestamp,
+    pub article_count: i64,
+}
+
 impl Db {
     /// Open (creating if needed) the database at `path` with WAL + foreign keys on,
     /// creating parent directories first. Does **not** run migrations.
@@ -442,11 +463,12 @@ impl Db {
         xtc_path: Option<&str>,
         front_page_html: Option<&str>,
         report_json: Option<&str>,
+        issue_json: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
             "INSERT INTO issues (date, issue_number, generated_at, epub_path, x4_path, xtc_path,
-                                 front_page_html, report_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                 front_page_html, report_json, issue_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(date) DO UPDATE SET
                  issue_number = excluded.issue_number,
                  generated_at = excluded.generated_at,
@@ -454,7 +476,8 @@ impl Db {
                  x4_path = COALESCE(excluded.x4_path, issues.x4_path),
                  xtc_path = COALESCE(excluded.xtc_path, issues.xtc_path),
                  front_page_html = COALESCE(excluded.front_page_html, issues.front_page_html),
-                 report_json = COALESCE(excluded.report_json, issues.report_json)",
+                 report_json = COALESCE(excluded.report_json, issues.report_json),
+                 issue_json = COALESCE(excluded.issue_json, issues.issue_json)",
         )
         .bind(date.to_string())
         .bind(issue_number)
@@ -464,9 +487,47 @@ impl Db {
         .bind(xtc_path)
         .bind(front_page_html)
         .bind(report_json)
+        .bind(issue_json)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// One stored issue, including its serialized full-issue snapshot.
+    pub async fn issue_by_date(&self, date: Date) -> Result<Option<IssueRow>> {
+        let row = sqlx::query(
+            "SELECT date, issue_number, generated_at, epub_path, x4_path, xtc_path,
+                    front_page_html, report_json, issue_json
+             FROM issues WHERE date = ?",
+        )
+        .bind(date.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(issue_from_row).transpose()
+    }
+
+    /// Issue archive rows, newest first. A non-positive limit means all rows.
+    pub async fn issue_dates(&self, limit: Option<i64>) -> Result<Vec<IssueListRow>> {
+        let rows = sqlx::query(
+            "SELECT i.date, i.issue_number, i.generated_at, COUNT(ia.article_id) AS article_count
+             FROM issues i LEFT JOIN issue_articles ia ON ia.issue_date = i.date
+             GROUP BY i.date, i.issue_number, i.generated_at
+             ORDER BY i.date DESC
+             LIMIT CASE WHEN ? > 0 THEN ? ELSE -1 END",
+        )
+        .bind(limit.unwrap_or(-1))
+        .bind(limit.unwrap_or(-1))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(issue_list_from_row).collect()
+    }
+
+    pub async fn latest_issue_date(&self) -> Result<Option<Date>> {
+        let raw: Option<String> = sqlx::query_scalar("SELECT MAX(date) FROM issues")
+            .fetch_one(&self.pool)
+            .await?;
+        raw.map(|value| parse_date("issues.date", &value))
+            .transpose()
     }
 
     /// Replace the lineup for a date (regeneration is idempotent, notes §12).
@@ -541,8 +602,8 @@ impl Db {
     pub async fn append_rating_event(&self, event: &RatingEvent) -> Result<i64> {
         let row = sqlx::query(
             "INSERT INTO rating_events
-                 (article_id, issue_date, kind, source, label, value, note, event_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 (article_id, issue_date, kind, source, label, value, note, event_at, user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING id",
         )
         .bind(event.article_id)
@@ -553,6 +614,7 @@ impl Db {
         .bind(event.value)
         .bind(event.note.as_deref())
         .bind(fmt_ts(event.event_at))
+        .bind(event.user_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get("id"))
@@ -611,7 +673,7 @@ impl Db {
                  FROM rating_events re
                  WHERE re.kind = 'explicit' AND re.event_at >= ?
              )
-             SELECT r.article_id, r.issue_date, r.label, r.value, r.note, r.event_at,
+             SELECT r.article_id, r.user_id, r.issue_date, r.label, r.value, r.note, r.event_at,
                     COALESCE(a.title, '') AS title,
                     COALESCE(e.feed_title, '') AS feed_title,
                     (SELECT ia.summary FROM issue_articles ia
@@ -655,7 +717,8 @@ impl Db {
         sqlx::query(
             "UPDATE runs SET finished_at = ?, entries_fetched = ?, candidates = ?, selected = ?,
                              input_tokens = ?, cached_tokens = ?, output_tokens = ?, cost_usd = ?,
-                             status = ?, error = ?, provider_costs_json = ?, config_json = ?
+                             status = ?, error = ?, provider_costs_json = ?, config_json = ?,
+                             report_json = ?
              WHERE id = ?",
         )
         .bind(report.finished_at.map(fmt_ts))
@@ -680,6 +743,7 @@ impl Db {
                 source,
             })?,
         )
+        .bind(report.to_json())
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -828,6 +892,7 @@ fn rated_article_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RatedArticle>
     });
     Ok(RatedArticle {
         article_id: row.get("article_id"),
+        user_id: row.get("user_id"),
         issue_date,
         title: row.get("title"),
         feed_title: row.get("feed_title"),
@@ -837,6 +902,29 @@ fn rated_article_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RatedArticle>
         value: row.get("value"),
         label: row.get("label"),
         event_at: parse_ts("rating_events.event_at", &row.get::<String, _>("event_at"))?,
+    })
+}
+
+fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<IssueRow> {
+    Ok(IssueRow {
+        date: parse_date("issues.date", &row.get::<String, _>("date"))?,
+        issue_number: row.get("issue_number"),
+        generated_at: parse_ts("issues.generated_at", &row.get::<String, _>("generated_at"))?,
+        epub_path: row.get("epub_path"),
+        x4_path: row.get("x4_path"),
+        xtc_path: row.get("xtc_path"),
+        front_page_html: row.get("front_page_html"),
+        report_json: row.get("report_json"),
+        issue_json: row.get("issue_json"),
+    })
+}
+
+fn issue_list_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<IssueListRow> {
+    Ok(IssueListRow {
+        date: parse_date("issues.date", &row.get::<String, _>("date"))?,
+        issue_number: row.get("issue_number"),
+        generated_at: parse_ts("issues.generated_at", &row.get::<String, _>("generated_at"))?,
+        article_count: row.get("article_count"),
     })
 }
 
@@ -908,6 +996,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(row.get::<i64, _>(0), 1);
+        for table in [
+            "users",
+            "sessions",
+            "config_changes",
+            "profile_versions",
+            "jobs",
+        ] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(exists, 1, "missing {table}");
+        }
+        let columns: Vec<String> = sqlx::query("PRAGMA table_info(rating_events)")
+            .fetch_all(db.pool())
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get("name"))
+            .collect();
+        assert!(columns.contains(&"user_id".to_string()));
     }
 
     #[tokio::test]
@@ -1024,6 +1136,13 @@ mod tests {
         report.counts.selected = 20;
         report.finish(ts("2026-08-15T05:36:00Z"));
         db.finish_run(run_id, &report).await.unwrap();
+        let stored_report: Option<String> =
+            sqlx::query_scalar("SELECT report_json FROM runs WHERE id = ?")
+                .bind(run_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(stored_report.as_deref(), Some(report.to_json().as_str()));
 
         db.upsert_issue(
             date,
@@ -1034,6 +1153,7 @@ mod tests {
             None,
             None,
             Some("{}"),
+            None,
         )
         .await
         .unwrap();
@@ -1158,6 +1278,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1185,6 +1306,7 @@ mod tests {
         .unwrap();
         let event = |label: &str, value: f64, at: &str| RatingEvent {
             id: 0,
+            user_id: None,
             article_id,
             issue_date: Some("2026-08-15".parse().unwrap()),
             kind: "explicit".into(),
@@ -1268,9 +1390,13 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0004_web.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let rows = sqlx::query(
-            "SELECT article_id, issue_date, kind, source, label, value, event_at
+            "SELECT article_id, issue_date, kind, source, label, value, event_at, user_id
              FROM rating_events ORDER BY article_id",
         )
         .fetch_all(&pool)
@@ -1285,6 +1411,7 @@ mod tests {
             assert_eq!(row.get::<String, _>("kind"), "explicit");
             assert_eq!(row.get::<String, _>("source"), "migration");
             assert_eq!(row.get::<String, _>("issue_date"), "2026-08-15");
+            assert_eq!(row.get::<Option<i64>, _>("user_id"), None);
         }
         assert_eq!(rows[0].get::<String, _>("event_at"), "2026-08-15T12:00:00Z");
 
@@ -1302,6 +1429,11 @@ mod tests {
             "interest_embeddings",
             "article_assessments",
             "candidate_runs",
+            "users",
+            "sessions",
+            "config_changes",
+            "profile_versions",
+            "jobs",
         ] {
             assert!(tables.iter().any(|table| table == expected), "{expected}");
         }

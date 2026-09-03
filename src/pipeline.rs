@@ -70,6 +70,7 @@ pub struct GenerateOptions {
 /// What one run produced, for the caller to print (§3.13).
 #[derive(Debug)]
 pub struct GenerateOutcome {
+    pub run_id: i64,
     pub report: RunReport,
     /// `None` only when the run failed before assembly.
     pub issue: Option<Issue>,
@@ -271,12 +272,14 @@ pub async fn generate(config: &Config, db: &Db, opts: &GenerateOptions) -> Resul
                 None,
                 None,
                 Some(&report.to_json()),
+                None,
             )
             .await
     {
         tracing::warn!(error = %e, "could not attach the run report to the issue");
     }
     Ok(GenerateOutcome {
+        run_id,
         report,
         issue: stages.issue,
         artifacts: stages.artifacts,
@@ -1045,6 +1048,12 @@ async fn record_issue(db: &Db, issue: &Issue, published: &Published) -> Result<(
     let x4_path = path_for(Edition::X4);
     let xtc_path = published.xtc.as_ref().map(|p| p.display().to_string());
 
+    let mut stored_issue = issue.clone();
+    for pick in &mut stored_issue.lineup.picks {
+        pick.article.content_html.clear();
+    }
+    let issue_json = serde_json::to_string(&stored_issue).context("serializing issue snapshot")?;
+
     db.upsert_issue(
         issue.meta.date,
         issue.meta.issue_number,
@@ -1054,6 +1063,7 @@ async fn record_issue(db: &Db, issue: &Issue, published: &Published) -> Result<(
         xtc_path.as_deref(),
         Some(&issue.editorial.front_page_html),
         None,
+        Some(&issue_json),
     )
     .await?;
     db.replace_issue_articles(issue.meta.date, &issue.lineup.picks)

@@ -1,0 +1,1 @@
+{% for section in issue.sections %}<h2>{{ section.name }}</h2><ul>{% for entry in section.entries %}<li><a href="{{ entry.url }}">{{ entry.title }}</a> — {{ entry.source }} ({{ entry.domain }}){% if !entry.comment_links.is_empty() %} · {% for link in entry.comment_links %}<a href="{{ link.url }}">{{ link.label }}</a>{% endfor %}{% endif %}</li>{% endfor %}</ul>{% endfor %}

@@ -364,6 +364,7 @@ async fn assemble_build_publish(
         None,
         Some(&issue.editorial.front_page_html),
         Some("{\"status\":\"ok\"}"),
+        None,
     )
     .await
     .expect("record the issue");
