@@ -57,3 +57,8 @@ document.querySelectorAll("table[data-filter]").forEach((table) => {
     });
   });
 });
+/* step 6: reload a job page every N seconds while its job is requested/running */
+document.querySelectorAll("[data-refresh]").forEach((element) => {
+  const seconds = Number(element.dataset.refresh);
+  if (seconds > 0) setTimeout(() => window.location.reload(), seconds * 1000);
+});

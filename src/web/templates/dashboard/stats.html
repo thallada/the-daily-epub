@@ -1,0 +1,31 @@
+{% extends "layout.html" %}{% block content %}<section class="dashboard">
+<h1>Stats</h1>
+<p class="muted">Last {{ days }} days ({{ since_date }} → {{ today }}) · window: {% for window in windows %}{% if *window == days %}<strong>{{ window }}</strong>{% else %}<a href="/dashboard/stats?days={{ window }}">{{ window }}</a>{% endif %}{% if !loop.last %} · {% endif %}{% endfor %} days · the same figures as <code>daily-epub stats --days {{ days }}</code>.</p>
+<div class="sparklines">{% for item in sparklines %}{% let spark = item %}{% include "dashboard/_sparkline.html" %}{% endfor %}</div>
+<div class="cards">
+<section class="card"><h2>Issues and ratings</h2>
+<dl class="kv">{% for line in summary %}<dt>{{ line.key }}</dt><dd>{{ line.value }}</dd>{% endfor %}</dl>
+{% if ratings.is_empty() %}<p class="muted">No explicit ratings in the window.</p>{% else %}<p>{% for line in ratings %}<span class="badge {{ line.key }}">{{ line.key }}</span> {{ line.value }}{% if !loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+</section>
+<section class="card"><h2>Retriever yield</h2>
+{% if retrievers.is_empty() %}<p class="muted">No rated picks by admitting retriever in the window.</p>{% else %}<div class="scroll-x"><table>
+<thead><tr><th>admitted by</th><th class="num">rated</th><th class="num">up</th><th class="num">down</th><th class="num">ratio</th></tr></thead>
+<tbody>{% for line in retrievers %}<tr><td>{{ line.retriever }}</td><td class="num">{{ line.rated }}</td><td class="num">{{ line.up }}</td><td class="num">{{ line.down }}</td><td class="num">{{ line.ratio }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+<h3>Exploration</h3>
+<dl class="kv">{% for line in exploration %}<dt>{{ line.key }}</dt><dd>{{ line.value }}</dd>{% endfor %}</dl>
+</section>
+<section class="card"><h2>Cost per day</h2>
+<dl class="kv">{% for line in cost_per_day %}<dt>{{ line.key }}</dt><dd>{{ line.value }}</dd>{% endfor %}</dl>
+<p class="muted">Window spend divided by {{ days }} days, per provider.</p>
+</section>
+</div>
+<h2>Spend by day</h2>
+{% if cost_rows.is_empty() %}<p class="muted">No provider costs recorded in the window.</p>{% else %}<div class="scroll-x"><table data-filter>
+<thead><tr><th>day (UTC)</th>{% for provider in providers %}<th class="num">{{ provider }}</th>{% endfor %}<th class="num">total</th></tr></thead>
+<tbody>{% for row in cost_rows %}<tr><td>{{ row.date }}</td>{% for cell in row.cells %}<td class="num">{{ cell }}</td>{% endfor %}<td class="num">{{ row.total }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+<h2>Runs in the window</h2>
+{% if runs.is_empty() %}<p class="muted">No finished runs in the window.</p>{% else %}<div class="scroll-x"><table data-filter>
+<thead><tr><th>run</th><th>date</th><th>status</th><th class="num">cost</th><th class="num">selected</th><th class="num">duration</th></tr></thead>
+<tbody>{% for run in runs %}<tr><td><a href="/dashboard/runs/{{ run.run_id }}">{{ run.run_id }}</a></td><td><a href="/issues/{{ run.date }}">{{ run.date }}</a></td><td><span class="badge {{ run.status }}">{{ run.status }}</span></td><td class="num">{{ run.cost }}</td><td class="num">{{ run.selected }}</td><td class="num">{{ run.duration }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+<details class="explain"><summary>As text (<code>daily-epub stats --days {{ days }}</code>)</summary><pre class="preview">{{ text }}</pre></details>
+</section>{% endblock %}

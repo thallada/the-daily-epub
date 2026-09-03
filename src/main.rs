@@ -17,7 +17,7 @@ use daily_epub::db::Db;
 use daily_epub::pipeline::{self, GenerateOptions, GenerateOutcome};
 use daily_epub::report::{RunReport, VOYAGE_PROVIDER};
 use daily_epub::types::{ArticleId, RatingEvent, Vote};
-use daily_epub::{curate, http, lock, server, social};
+use daily_epub::{curate, http, jobs, lock, server, social};
 
 /// A personalized daily newspaper, delivered as an EPUB.
 #[derive(Debug, Parser)]
@@ -61,6 +61,19 @@ enum Command {
     /// Manage dashboard users without taking the pipeline run lock.
     #[command(subcommand)]
     Users(UsersCommand),
+    /// Operator jobs (what `daily-epub-job@<name>.service` runs).
+    #[command(subcommand)]
+    Job(JobCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum JobCommand {
+    /// Run one catalogue job in-process and record it in the `jobs` table.
+    Run {
+        /// `generate`, `generate-YYYY-MM-DD`, `dry-run`, `profile-rebuild`,
+        /// `features-backfill`, `backfill-social` or `features-prune`.
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,7 +341,7 @@ async fn main() -> Result<()> {
         }
         Command::Profile(ProfileCommand::Rebuild) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
-            cmd_profile_rebuild(&config, &db).await?;
+            println!("{}", cmd_profile_rebuild(&config, &db).await?);
         }
         Command::Ratings(command) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
@@ -345,11 +358,11 @@ async fn main() -> Result<()> {
         }
         Command::Features(command) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
-            cmd_features(&config, &db, command).await?;
+            println!("{}", cmd_features(&config, &db, command).await?);
         }
         Command::BackfillSocial(args) => {
             let db = Db::open_and_migrate(&config.database_path).await?;
-            cmd_backfill_social(&db, args.days).await?;
+            println!("{}", cmd_backfill_social(&db, args.days).await?);
         }
         Command::Db(DbCommand::Migrate) => {
             let db = Db::open(&config.database_path).await?;
@@ -368,19 +381,44 @@ async fn main() -> Result<()> {
             let db = Db::open_and_migrate(&config.database_path).await?;
             cmd_users(&db, command).await?;
         }
+        Command::Job(JobCommand::Run { name }) => {
+            let Some(job) = jobs::Job::parse(&name) else {
+                eprintln!("unknown job {name:?}; the catalogue is:");
+                for job in jobs::Job::CATALOGUE {
+                    eprintln!("  {:<20} {}", job.name(), job.description());
+                }
+                eprintln!(
+                    "  {:<20} {}",
+                    "generate-YYYY-MM-DD",
+                    jobs::Job::Generate {
+                        date: Some(jiff::civil::Date::default())
+                    }
+                    .description()
+                );
+                std::process::exit(2);
+            };
+            let db = Db::open_and_migrate(&config.database_path).await?;
+            cmd_job_run(&config, &db, &job).await?;
+        }
     }
     Ok(())
 }
 
 /// The commands that write the database and provider budgets and so hold the
 /// run lock (§5): `generate`, `profile rebuild`, `features backfill`,
-/// `backfill-social`. Everything else is read-only or its own writer.
+/// `backfill-social`, and a `job run` of any of them. Everything else is
+/// read-only or its own writer.
 fn lock_holder(command: &Command) -> Option<&'static str> {
     match command {
         Command::Generate(_) => Some("generate"),
         Command::Profile(ProfileCommand::Rebuild) => Some("profile rebuild"),
         Command::Features(FeaturesCommand::Backfill(_)) => Some("features backfill"),
         Command::BackfillSocial(_) => Some("backfill-social"),
+        // An unknown name takes no lock; the dispatch exits 2 before opening
+        // the database.
+        Command::Job(JobCommand::Run { name }) => {
+            jobs::Job::parse(name).and_then(|job| job.takes_lock())
+        }
         Command::Serve
         | Command::Ratings(_)
         | Command::Explain(_)
@@ -603,7 +641,8 @@ fn print_lineup(issue: &daily_epub::types::Issue) {
 // ---------------------------------------------------------------------------
 
 /// `profile rebuild` runs on the editor when configured, else bulk (§14.3).
-async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<()> {
+/// Returns the one-line summary the CLI prints and `job run` records.
+async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<String> {
     use curate::llm::{Llms, provider_meters};
     let profile = curate::profile::load_or_build(
         db,
@@ -637,12 +676,11 @@ async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<()> {
         config.curation.feedback.verdicts_in_prompt,
     )
     .await?;
-    println!(
+    Ok(format!(
         "taste profile rebuilt (version {}, {} chars)",
         rebuilt.version,
         rebuilt.text.len()
-    );
-    Ok(())
+    ))
 }
 
 async fn resolve_rating_article(
@@ -765,7 +803,9 @@ async fn cmd_explain(db: &Db, args: ExplainArgs) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_features(config: &Config, db: &Db, command: FeaturesCommand) -> Result<()> {
+/// `features backfill` / `features prune`; returns the final summary line
+/// (progress lines are printed as they happen).
+async fn cmd_features(config: &Config, db: &Db, command: FeaturesCommand) -> Result<String> {
     match command {
         FeaturesCommand::Backfill(args) => {
             if !config.voyage.enabled {
@@ -788,8 +828,7 @@ async fn cmd_features(config: &Config, db: &Db, command: FeaturesCommand) -> Res
                 plan.cached
             );
             if plan.is_empty() {
-                println!("cache is warm; nothing to do");
-                return Ok(());
+                return Ok("cache is warm; nothing to do".into());
             }
             println!(
                 "estimate: ~{} tokens ≈ ${:.4} with {} at ${:.2}/M",
@@ -802,17 +841,16 @@ async fn cmd_features(config: &Config, db: &Db, command: FeaturesCommand) -> Res
                 && !args.yes
                 && !confirm("continue?")?
             {
-                println!("aborted");
-                return Ok(());
+                return Ok("aborted".into());
             }
             let outcome = embedding::run_backfill(&service, &plan).await?;
-            println!(
+            Ok(format!(
                 "embedded {} articles and {} interests · {} tokens · ${:.4}",
                 outcome.articles_embedded,
                 outcome.interests_embedded,
                 outcome.tokens,
                 outcome.cost_usd
-            );
+            ))
         }
         FeaturesCommand::Prune => {
             let ranking = &config.curation.ranking;
@@ -823,17 +861,16 @@ async fn cmd_features(config: &Config, db: &Db, command: FeaturesCommand) -> Res
                 jiff::Timestamp::now(),
             )
             .await?;
-            println!(
+            Ok(format!(
                 "pruned {} embeddings older than {} days, {} candidate rows and {} assessments older than {} days",
                 pruned.embeddings,
                 ranking.embedding_retention_days,
                 pruned.telemetry,
                 pruned.assessments,
                 ranking.telemetry_retention_days
-            );
+            ))
         }
     }
-    Ok(())
 }
 
 /// A y/N question on stdin; anything but a leading `y` is a no.
@@ -845,12 +882,94 @@ fn confirm(question: &str) -> Result<bool> {
     Ok(answer.trim().to_lowercase().starts_with('y'))
 }
 
-async fn cmd_backfill_social(db: &Db, days: u32) -> Result<()> {
+async fn cmd_backfill_social(db: &Db, days: u32) -> Result<String> {
     let http = http::build_client(http::DEFAULT_TIMEOUT)?;
     let enricher = social::SocialEnricher::new(http, db.clone());
     let updated = enricher.backfill(days).await?;
-    println!("refreshed social scores for {updated} articles");
-    Ok(())
+    Ok(format!("refreshed social scores for {updated} articles"))
+}
+
+// ---------------------------------------------------------------------------
+// `job run` (dashboard plan §14.2)
+// ---------------------------------------------------------------------------
+
+/// `job run <name>`: claim the newest `requested` row of this job (or insert
+/// one when the unit was started by hand), run the mapped command in-process
+/// with the same functions the plain subcommands use, and record `ok` /
+/// `failed` with a one-line message and, for generate, the run id. A failure
+/// propagates so the unit exits non-zero (`Result=exit-code`).
+async fn cmd_job_run(config: &Config, db: &Db, job: &jobs::Job) -> Result<()> {
+    let id = jobs::claim(db, job, jiff::Timestamp::now())
+        .await
+        .context("claiming the jobs row")?;
+    tracing::info!(job = %job.name(), job_id = id, "job started");
+    let result = run_job(config, db, job).await;
+    let now = jiff::Timestamp::now();
+    match result {
+        Ok((message, run_id)) => {
+            jobs::finish(db, id, jobs::Outcome::Ok, &message, run_id, now)
+                .await
+                .context("recording the job outcome")?;
+            tracing::info!(job = %job.name(), job_id = id, %message, "job finished");
+            Ok(())
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            jobs::finish(db, id, jobs::Outcome::Failed, &message, None, now)
+                .await
+                .context("recording the job failure")?;
+            tracing::error!(job = %job.name(), job_id = id, %message, "job failed");
+            Err(error)
+        }
+    }
+}
+
+/// The command each catalogue job maps to (§14.1), returning its one-line
+/// message and the run id it produced.
+async fn run_job(config: &Config, db: &Db, job: &jobs::Job) -> Result<(String, Option<i64>)> {
+    match job {
+        jobs::Job::Generate { date } => {
+            generate_job(config, db, date.map(|date| date.to_string()), false).await
+        }
+        jobs::Job::DryRun => generate_job(config, db, None, true).await,
+        jobs::Job::ProfileRebuild => Ok((cmd_profile_rebuild(config, db).await?, None)),
+        jobs::Job::FeaturesBackfill => {
+            let args = BackfillArgs {
+                days: 30,
+                rated_only: false,
+                all: false,
+                yes: true,
+            };
+            Ok((
+                cmd_features(config, db, FeaturesCommand::Backfill(args)).await?,
+                None,
+            ))
+        }
+        jobs::Job::BackfillSocial => Ok((cmd_backfill_social(db, 7).await?, None)),
+        jobs::Job::FeaturesPrune => Ok((
+            cmd_features(config, db, FeaturesCommand::Prune).await?,
+            None,
+        )),
+    }
+}
+
+/// `generate [--date D] [--dry-run]` as a job: the `curation:` line is the
+/// message, the run id links the job to its run.
+async fn generate_job(
+    config: &Config,
+    db: &Db,
+    date: Option<String>,
+    dry_run: bool,
+) -> Result<(String, Option<i64>)> {
+    let opts = GenerateOptions {
+        date,
+        dry_run,
+        ..GenerateOptions::default()
+    };
+    let outcome = pipeline::generate(config, db, &opts).await?;
+    print_outcome(&outcome);
+    let [curation, ..] = outcome.report.info_block();
+    Ok((curation, Some(outcome.run_id)))
 }
 
 #[cfg(test)]
@@ -982,9 +1101,110 @@ mod tests {
             vec!["db", "migrate"],
             vec!["features", "prune"],
             vec!["config", "check"],
+            vec!["job", "run", "features-prune"],
+            vec!["job", "run", "not-a-job"],
         ] {
             assert_eq!(lock_holder(&parse(&args)), None, "{args:?}");
         }
+        // `job run` takes the same lock as the command it maps to.
+        assert_eq!(
+            lock_holder(&parse(&["job", "run", "generate"])),
+            Some("generate")
+        );
+        assert_eq!(
+            lock_holder(&parse(&["job", "run", "generate-2026-09-03"])),
+            Some("generate")
+        );
+        assert_eq!(
+            lock_holder(&parse(&["job", "run", "dry-run"])),
+            Some("generate")
+        );
+        assert_eq!(
+            lock_holder(&parse(&["job", "run", "profile-rebuild"])),
+            Some("profile rebuild")
+        );
+        assert_eq!(
+            lock_holder(&parse(&["job", "run", "features-backfill"])),
+            Some("features backfill")
+        );
+        assert_eq!(
+            lock_holder(&parse(&["job", "run", "backfill-social"])),
+            Some("backfill-social")
+        );
+    }
+
+    #[test]
+    fn parses_job_run() {
+        match Cli::try_parse_from(["daily-epub", "job", "run", "features-prune"])
+            .unwrap()
+            .command
+        {
+            Command::Job(JobCommand::Run { name }) => assert_eq!(name, "features-prune"),
+            other => panic!("expected job run, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["daily-epub", "job", "run"]).is_err());
+        assert!(Cli::try_parse_from(["daily-epub", "job"]).is_err());
+    }
+
+    /// Dashboard plan §17 "Jobs": `job run` flips the dashboard's `requested`
+    /// row to `running` and then `ok` with the command's message, in-process
+    /// and without systemd.
+    #[tokio::test]
+    async fn job_run_flips_requested_to_running_to_ok() {
+        use sqlx::Row as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            database_path: dir.path().join("jobs.db"),
+            ..Config::default()
+        };
+        let db = Db::open_and_migrate(&config.database_path).await.unwrap();
+        let now = jiff::Timestamp::now();
+        let job = jobs::Job::FeaturesPrune;
+        let requested = jobs::insert_requested(&db, &job, None, now).await.unwrap();
+        assert_eq!(
+            jobs::get(&db, requested).await.unwrap().unwrap().status,
+            "requested"
+        );
+
+        cmd_job_run(&config, &db, &job).await.unwrap();
+
+        let row = jobs::get(&db, requested).await.unwrap().unwrap();
+        assert_eq!(row.status, "ok", "{row:?}");
+        assert!(row.started_at.is_some());
+        assert!(row.finished_at.is_some());
+        assert!(
+            row.message
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("pruned 0 embeddings"),
+            "{row:?}"
+        );
+        assert_eq!(row.run_id, None);
+        let rows: i64 = sqlx::query("SELECT COUNT(*) AS n FROM jobs")
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(rows, 1, "the requested row was claimed, not duplicated");
+
+        // A failing command records `failed` with the error and propagates it.
+        config.voyage.enabled = false;
+        let backfill = jobs::Job::FeaturesBackfill;
+        let error = cmd_job_run(&config, &db, &backfill).await.unwrap_err();
+        assert!(error.to_string().contains("voyage.enabled is false"));
+        let failed = jobs::list(&db, 1).await.unwrap().remove(0);
+        assert_eq!(failed.name, "features-backfill");
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.requested_by, None, "started by hand: no requester");
+        assert!(
+            failed
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("voyage.enabled is false"),
+            "{failed:?}"
+        );
     }
 
     #[test]

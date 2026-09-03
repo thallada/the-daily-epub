@@ -35,6 +35,20 @@ pub struct UnitStatus {
     pub sub_state: String,
     pub result: String,
     pub exit_status: Option<i32>,
+    /// `ExecMainStartTimestamp`, as systemd prints it; empty when never run.
+    pub started: Option<String>,
+    /// `ExecMainExitTimestamp`, as systemd prints it.
+    pub exited: Option<String>,
+}
+
+impl UnitStatus {
+    /// The unit ran and stopped with a failure result (`exit-code`, `failed`,
+    /// `signal`, `timeout`, …); a never-started unit reports `success`.
+    pub fn exited_unsuccessfully(&self) -> bool {
+        matches!(self.active_state.as_str(), "inactive" | "failed")
+            && !self.result.is_empty()
+            && self.result != "success"
+    }
 }
 
 #[derive(Debug, Default)]
@@ -55,16 +69,38 @@ impl JobRunner for DisabledRunner {
     }
 }
 
-/// In-memory runner for router tests. Step 6 will add scripted results alongside
-/// these recorded calls when the jobs pages begin invoking the runner.
+/// In-memory runner for router tests: records every call and answers with
+/// scripted results (`start` succeeds, `status` is inactive/success and `log`
+/// is empty unless told otherwise).
 #[derive(Debug, Default)]
 pub struct MockRunner {
     calls: Mutex<Vec<String>>,
+    start_error: Mutex<Option<String>>,
+    statuses: Mutex<std::collections::HashMap<String, UnitStatus>>,
+    log_text: Mutex<String>,
 }
 
 impl MockRunner {
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("mock runner lock").clone()
+    }
+
+    /// Make every `start` fail with `message` (`None` restores success).
+    pub fn fail_starts(&self, message: Option<&str>) {
+        *self.start_error.lock().expect("mock runner lock") = message.map(str::to_string);
+    }
+
+    /// Script the `status` answer for one unit.
+    pub fn set_status(&self, unit: &str, status: UnitStatus) {
+        self.statuses
+            .lock()
+            .expect("mock runner lock")
+            .insert(unit.to_string(), status);
+    }
+
+    /// Script the journal text every `log` call returns.
+    pub fn set_log(&self, text: &str) {
+        *self.log_text.lock().expect("mock runner lock") = text.to_string();
     }
 
     fn record(&self, call: String) {
@@ -76,17 +112,31 @@ impl MockRunner {
 impl JobRunner for MockRunner {
     async fn start(&self, unit: &str) -> Result<(), String> {
         self.record(format!("start {unit}"));
-        Ok(())
+        match self.start_error.lock().expect("mock runner lock").clone() {
+            Some(message) => Err(message),
+            None => Ok(()),
+        }
     }
 
     async fn status(&self, unit: &str) -> Result<UnitStatus, String> {
         self.record(format!("status {unit}"));
-        Ok(UnitStatus::default())
+        Ok(self
+            .statuses
+            .lock()
+            .expect("mock runner lock")
+            .get(unit)
+            .cloned()
+            .unwrap_or_else(|| UnitStatus {
+                active_state: "inactive".into(),
+                sub_state: "dead".into(),
+                result: "success".into(),
+                ..UnitStatus::default()
+            }))
     }
 
     async fn log(&self, unit: &str, lines: usize) -> Result<String, String> {
         self.record(format!("log {unit} {lines}"));
-        Ok(String::new())
+        Ok(self.log_text.lock().expect("mock runner lock").clone())
     }
 }
 

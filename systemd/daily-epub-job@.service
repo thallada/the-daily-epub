@@ -1,38 +1,32 @@
-# The Daily EPUB — rating endpoints, XTC OPDS feed and static files (spec §3.12, §3.15).
+# The Daily EPUB — one operator job (dashboard plan §14): an instance of this
+# template runs `daily-epub job run <name>` for a catalogue name such as
+# `generate`, `generate-2026-09-03`, `dry-run`, `profile-rebuild`,
+# `features-backfill`, `backfill-social` or `features-prune`. The Jobs page
+# starts instances through systemd + polkit (systemd/50-daily-epub.rules); by
+# hand: `sudo systemctl start daily-epub-job@features-prune`.
 #
-# Install:
-#   cargo build --release && sudo install -m0755 target/release/daily-epub /usr/local/bin/
-#   sudo install -d -m0750 -o daily-epub -g daily-epub /etc/daily-epub
-#   sudo install -m0640 -o daily-epub -g daily-epub config.example.toml /etc/daily-epub/config.toml
-#   printf 'DAILY_EPUB_SERVER__HMAC_SECRET=%s\n' "$(openssl rand -hex 32)" \
-#     | sudo tee /etc/daily-epub/env >/dev/null   # plus DAILY_EPUB_MINIFLUX__API_KEY etc.
-#   sudo chmod 0600 /etc/daily-epub/env
-#   sudo useradd --system --home /var/lib/daily-epub --shell /usr/sbin/nologin daily-epub
-#   sudo install -m0644 systemd/daily-epub*.{service,timer} /etc/systemd/system/
-#   sudo systemctl daemon-reload && sudo systemctl enable --now daily-epub.service
-#
-# Then reverse-proxy daily.hallada.net → 127.0.0.1:3499 (spec §3.15).
+# Install: sudo install -m0644 systemd/daily-epub-job@.service /etc/systemd/system/
+#          (same binary, config and env file as daily-epub.service).
+# Logs: journalctl -u daily-epub-job@<name> -f
 
 [Unit]
-Description=The Daily EPUB server (ratings, XTC OPDS)
+Description=The Daily EPUB job %i
 Documentation=https://github.com/thallada/the-daily-epub
-After=network-online.target
+After=network-online.target miniflux.service
 Wants=network-online.target
 
 [Service]
-Type=exec
+Type=oneshot
 User=daily-epub
 Group=daily-epub
-# The Jobs page reads `journalctl -u daily-epub-job@<name>` (dashboard plan §14.3).
-SupplementaryGroups=systemd-journal
-ExecStart=/usr/local/bin/daily-epub --config /etc/daily-epub/config.toml serve
+ExecStart=/usr/local/bin/daily-epub --config /etc/daily-epub/config.toml job run %i
 EnvironmentFile=-/etc/daily-epub/env
 Environment=RUST_LOG=info,sqlx=warn,hyper=warn
-Restart=on-failure
-RestartSec=5s
-# SIGTERM triggers the graceful shutdown in server::serve.
-KillSignal=SIGTERM
-TimeoutStopSec=20s
+# Same ceiling as the timer-driven generate unit: a generate job is the same
+# network-bound run, and nothing else in the catalogue takes longer.
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=idle
 
 # --- state + writable paths ---------------------------------------------
 StateDirectory=daily-epub
@@ -62,11 +56,14 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
+# No MemoryDenyWriteExecute here: this unit spawns Node (epub-to-xtc-converter),
+# whose JIT needs W+X pages (§3.11).
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 UMask=0027
+
+# Template instances are normally started on demand by the dashboard.
 
 [Install]
 WantedBy=multi-user.target

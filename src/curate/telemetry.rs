@@ -624,16 +624,179 @@ fn first_retriever(admitted_by: Option<&str>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct UpDown {
-    rated: i64,
-    up: i64,
-    down: i64,
+/// Rated picks by admitting retriever: how many were rated, up, down.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UpDown {
+    pub rated: i64,
+    pub up: i64,
+    pub down: i64,
+}
+
+impl UpDown {
+    /// `"NN% up"`, or `n/a` with nothing rated.
+    pub fn ratio(&self) -> String {
+        if self.rated > 0 {
+            format!("{:.0}% up", 100.0 * self.up as f64 / self.rated as f64)
+        } else {
+            "n/a".to_string()
+        }
+    }
+}
+
+/// One finished, non-dry run as a point of the per-run series (dashboard
+/// plan §9.1, §12).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunPoint {
+    pub run_id: i64,
+    pub date: String,
+    pub started_at: String,
+    pub status: String,
+    pub cost_usd: f64,
+    pub selected: i64,
+    pub duration_secs: Option<i64>,
+}
+
+/// Everything `daily-epub stats` prints, as data (dashboard plan §12): the
+/// CLI renders it with [`render_stats_text`], the stats page as tables and
+/// sparklines.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StatsData {
+    pub days: i64,
+    /// First UTC date of the window.
+    pub since_date: String,
+    /// UTC date of `now`.
+    pub today: String,
+    pub issues: i64,
+    pub published: i64,
+    /// Explicit ratings per label, label order; `cleared` included.
+    pub ratings_by_label: Vec<(String, i64)>,
+    /// Explicit ratings excluding `cleared`.
+    pub total_ratings: i64,
+    pub per_retriever: BTreeMap<String, UpDown>,
+    pub exploration_admitted: i64,
+    pub exploration_selected: i64,
+    pub exploration_positive: i64,
+    /// Provider → spend over the whole window.
+    pub provider_totals: BTreeMap<String, f64>,
+    /// UTC date → provider → spend.
+    pub cost_by_day: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Seconds of every finished run in the window (dry runs included), for
+    /// the mean generation time.
+    pub durations: Vec<i64>,
+    /// Finished non-dry runs in the window, oldest first.
+    pub runs: Vec<RunPoint>,
+    /// Issue date → picks, oldest first.
+    pub selected_per_issue: Vec<(String, i64)>,
+    /// Week (Monday, UTC) → label → explicit ratings.
+    pub ratings_per_week: BTreeMap<String, BTreeMap<String, i64>>,
+}
+
+impl StatsData {
+    /// `n` per issue with one decimal, or `n/a` without issues.
+    pub fn per_issue(&self, n: i64) -> String {
+        if self.issues > 0 {
+            format!("{:.1}", n as f64 / self.issues as f64)
+        } else {
+            "n/a".to_string()
+        }
+    }
+
+    pub fn mean_issue_size(&self) -> String {
+        self.per_issue(self.published)
+    }
+
+    pub fn ratings_per_issue(&self) -> String {
+        self.per_issue(self.total_ratings)
+    }
+
+    /// Spend per day over the window for one provider total.
+    pub fn per_day(&self, total: f64) -> f64 {
+        total / self.days as f64
+    }
+
+    /// Every provider's window spend added up, in provider order.
+    pub fn grand_total(&self) -> f64 {
+        let mut grand = 0.0;
+        for total in self.provider_totals.values() {
+            grand += total;
+        }
+        grand
+    }
+
+    /// Integer mean of the finished runs' seconds.
+    pub fn mean_generation_secs(&self) -> Option<i64> {
+        if self.durations.is_empty() {
+            None
+        } else {
+            Some(self.durations.iter().sum::<i64>() / self.durations.len() as i64)
+        }
+    }
 }
 
 /// `daily-epub stats [--days N]` as text: the whole evaluation framework
 /// (§15.3). One fact per line, nothing wider than 80 columns.
 pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String> {
+    Ok(render_stats_text(&stats_data(db, days, now).await?))
+}
+
+/// Finished non-dry runs as sparkline points, oldest first: those started
+/// at or after `since` (RFC3339) and/or the newest `limit`.
+pub async fn run_series(
+    db: &Db,
+    since: Option<&str>,
+    limit: Option<i64>,
+) -> Result<Vec<RunPoint>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, date, started_at, finished_at, status, cost_usd, selected FROM runs
+         WHERE status != 'dry_run' AND finished_at IS NOT NULL
+           AND (? IS NULL OR started_at >= ?)
+         ORDER BY id DESC LIMIT ?",
+    )
+    .bind(since)
+    .bind(since)
+    .bind(limit.unwrap_or(i64::MAX))
+    .fetch_all(db.pool())
+    .await?;
+    let mut points: Vec<RunPoint> = rows
+        .iter()
+        .map(|row| {
+            let started_at: String = row.get("started_at");
+            let finished_at: Option<String> = row.get("finished_at");
+            let duration_secs = match (
+                started_at.parse::<Timestamp>(),
+                finished_at.as_deref().map(str::parse::<Timestamp>),
+            ) {
+                (Ok(started), Some(Ok(finished))) => {
+                    Some((finished.as_second() - started.as_second()).max(0))
+                }
+                _ => None,
+            };
+            RunPoint {
+                run_id: row.get("id"),
+                date: row.get("date"),
+                started_at,
+                status: row.get("status"),
+                cost_usd: row.get("cost_usd"),
+                selected: row.get("selected"),
+                duration_secs,
+            }
+        })
+        .collect();
+    points.reverse();
+    Ok(points)
+}
+
+/// The Monday (UTC) of the week containing `ts`, as `YYYY-MM-DD`.
+pub fn week_start(ts: Timestamp) -> String {
+    let date = ts.to_zoned(jiff::tz::TimeZone::UTC).date();
+    let offset = i64::from(date.weekday().to_monday_zero_offset());
+    date.checked_sub(jiff::Span::new().days(offset))
+        .unwrap_or(date)
+        .to_string()
+}
+
+/// Gather every figure of [`StatsData`] for the last `days` days.
+pub async fn stats_data(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<StatsData> {
     let days = days.max(1);
     let since_ts = now
         .checked_sub(jiff::Span::new().hours(days.saturating_mul(24)))
@@ -641,30 +804,35 @@ pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String>
     let since = fmt_ts(since_ts);
     let utc = jiff::tz::TimeZone::UTC;
     let since_date = since_ts.to_zoned(utc.clone()).date().to_string();
-    let today = now.to_zoned(utc).date().to_string();
-    let mut out = String::new();
-    let _ = writeln!(out, "stats: last {days} days ({since_date} → {today})");
+    let today = now.to_zoned(utc.clone()).date().to_string();
+    let mut data = StatsData {
+        days,
+        since_date: since_date.clone(),
+        today,
+        ..StatsData::default()
+    };
 
     // --- issues and articles ---
-    let issues: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE date >= ?")
+    data.issues = sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE date >= ?")
         .bind(&since_date)
         .fetch_one(db.pool())
         .await?;
-    let published: i64 =
+    data.published =
         sqlx::query_scalar("SELECT COUNT(*) FROM issue_articles WHERE issue_date >= ?")
             .bind(&since_date)
             .fetch_one(db.pool())
             .await?;
-    let _ = writeln!(out, "issues: {issues}");
-    let _ = writeln!(out, "articles published: {published}");
-    let per_issue = |n: i64| {
-        if issues > 0 {
-            format!("{:.1}", n as f64 / issues as f64)
-        } else {
-            "n/a".to_string()
-        }
-    };
-    let _ = writeln!(out, "mean issue size: {} articles", per_issue(published));
+    let per_issue_rows = sqlx::query(
+        "SELECT issue_date, COUNT(*) AS n FROM issue_articles
+         WHERE issue_date >= ? GROUP BY issue_date ORDER BY issue_date",
+    )
+    .bind(&since_date)
+    .fetch_all(db.pool())
+    .await?;
+    data.selected_per_issue = per_issue_rows
+        .iter()
+        .map(|row| (row.get::<String, _>("issue_date"), row.get::<i64, _>("n")))
+        .collect();
 
     // --- explicit ratings by label ---
     let labels = sqlx::query(
@@ -674,21 +842,32 @@ pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String>
     .bind(&since)
     .fetch_all(db.pool())
     .await?;
-    let mut total_ratings = 0i64;
-    let mut by_label = Vec::new();
     for row in &labels {
         let label = row.get::<String, _>("label");
         let n = row.get::<i64, _>("n");
         if label != "cleared" {
-            total_ratings += n;
+            data.total_ratings += n;
         }
-        by_label.push((label, n));
+        data.ratings_by_label.push((label, n));
     }
-    let _ = writeln!(out, "explicit ratings: {total_ratings}");
-    for (label, n) in &by_label {
-        let _ = writeln!(out, "explicit ratings ({label}): {n}");
+    let events = sqlx::query(
+        "SELECT label, event_at FROM rating_events
+         WHERE kind = 'explicit' AND event_at >= ? ORDER BY event_at",
+    )
+    .bind(&since)
+    .fetch_all(db.pool())
+    .await?;
+    for row in &events {
+        let Ok(event_at) = row.get::<String, _>("event_at").parse::<Timestamp>() else {
+            continue;
+        };
+        *data
+            .ratings_per_week
+            .entry(week_start(event_at))
+            .or_default()
+            .entry(row.get::<String, _>("label"))
+            .or_insert(0) += 1;
     }
-    let _ = writeln!(out, "ratings per issue: {}", per_issue(total_ratings));
 
     // --- up/down per admitting retriever, from rated picks ---
     let rated_picks = sqlx::query(
@@ -712,8 +891,6 @@ pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String>
     .bind(&since)
     .fetch_all(db.pool())
     .await?;
-    let mut per_retriever: BTreeMap<String, UpDown> = BTreeMap::new();
-    let mut exploration_positive = 0i64;
     let mut seen: Option<ArticleId> = None;
     for row in &rated_picks {
         let article_id = row.get::<ArticleId, _>("article_id");
@@ -723,7 +900,7 @@ pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String>
         seen = Some(article_id);
         let value = row.get::<f64, _>("value");
         let retriever = first_retriever(row.get::<Option<String>, _>("admitted_by").as_deref());
-        let entry = per_retriever.entry(retriever).or_default();
+        let entry = data.per_retriever.entry(retriever).or_default();
         entry.rated += 1;
         if value > 0.0 {
             entry.up += 1;
@@ -735,23 +912,8 @@ pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String>
                 .map(|signals| signals.exploration)
                 .unwrap_or(false);
         if exploration && value > 0.0 {
-            exploration_positive += 1;
+            data.exploration_positive += 1;
         }
-    }
-    if per_retriever.is_empty() {
-        let _ = writeln!(out, "rated picks by admitting retriever: none");
-    }
-    for (retriever, counts) in &per_retriever {
-        let ratio = if counts.rated > 0 {
-            format!("{:.0}% up", 100.0 * counts.up as f64 / counts.rated as f64)
-        } else {
-            "n/a".to_string()
-        };
-        let _ = writeln!(
-            out,
-            "admitted by {retriever}: {} rated · {} up · {} down · {ratio}",
-            counts.rated, counts.up, counts.down
-        );
     }
 
     // --- exploration yield ---
@@ -764,31 +926,25 @@ pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String>
     .bind(&since)
     .fetch_all(db.pool())
     .await?;
-    let mut exploration_admitted = 0i64;
-    let mut exploration_selected = 0i64;
     for row in &exploration_rows {
         match row.get::<String, _>("stage").as_str() {
             "selected" => {
-                exploration_admitted += 1;
-                exploration_selected += 1;
+                data.exploration_admitted += 1;
+                data.exploration_selected += 1;
             }
-            "admitted" | "assessed" | "shortlisted" => exploration_admitted += 1,
+            "admitted" | "assessed" | "shortlisted" => data.exploration_admitted += 1,
             _ => {}
         }
     }
-    let _ = writeln!(out, "exploration admitted: {exploration_admitted}");
-    let _ = writeln!(out, "exploration selected: {exploration_selected}");
-    let _ = writeln!(out, "exploration rated positively: {exploration_positive}");
 
     // --- cost per day per provider (§7.6) ---
     let cost_rows = sqlx::query(
-        "SELECT provider_costs_json FROM runs
+        "SELECT started_at, provider_costs_json FROM runs
          WHERE started_at >= ? AND provider_costs_json IS NOT NULL",
     )
     .bind(&since)
     .fetch_all(db.pool())
     .await?;
-    let mut totals: BTreeMap<String, f64> = BTreeMap::new();
     for row in &cost_rows {
         let raw = row.get::<String, _>("provider_costs_json");
         let Ok(providers) =
@@ -796,20 +952,21 @@ pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String>
         else {
             continue;
         };
+        let day = row
+            .get::<String, _>("started_at")
+            .parse::<Timestamp>()
+            .map(|ts| ts.to_zoned(utc.clone()).date().to_string())
+            .unwrap_or_else(|_| since_date.clone());
         for (provider, usage) in providers {
-            *totals.entry(provider).or_insert(0.0) += usage.cost_usd;
+            *data.provider_totals.entry(provider.clone()).or_insert(0.0) += usage.cost_usd;
+            *data
+                .cost_by_day
+                .entry(day.clone())
+                .or_default()
+                .entry(provider)
+                .or_insert(0.0) += usage.cost_usd;
         }
     }
-    let mut grand = 0.0;
-    for (provider, total) in &totals {
-        grand += total;
-        let _ = writeln!(
-            out,
-            "cost per day ({provider}): ${:.3}",
-            total / days as f64
-        );
-    }
-    let _ = writeln!(out, "cost per day (total): ${:.3}", grand / days as f64);
 
     // --- mean generation time ---
     let run_rows = sqlx::query(
@@ -819,26 +976,81 @@ pub async fn stats(db: &Db, days: i64, now: Timestamp) -> anyhow::Result<String>
     .bind(&since)
     .fetch_all(db.pool())
     .await?;
-    let mut durations = Vec::new();
     for row in &run_rows {
         let started = row.get::<String, _>("started_at").parse::<Timestamp>();
         let finished = row.get::<String, _>("finished_at").parse::<Timestamp>();
         if let (Ok(started), Ok(finished)) = (started, finished) {
-            durations.push((finished.as_second() - started.as_second()).max(0));
+            data.durations
+                .push((finished.as_second() - started.as_second()).max(0));
         }
     }
-    if durations.is_empty() {
-        let _ = writeln!(out, "mean generation time: n/a (0 runs)");
-    } else {
-        let mean = durations.iter().sum::<i64>() / durations.len() as i64;
+
+    data.runs = run_series(db, Some(&since), None).await?;
+    Ok(data)
+}
+
+/// The CLI text of [`StatsData`], one fact per line.
+pub fn render_stats_text(data: &StatsData) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "stats: last {} days ({} → {})",
+        data.days, data.since_date, data.today
+    );
+    let _ = writeln!(out, "issues: {}", data.issues);
+    let _ = writeln!(out, "articles published: {}", data.published);
+    let _ = writeln!(out, "mean issue size: {} articles", data.mean_issue_size());
+    let _ = writeln!(out, "explicit ratings: {}", data.total_ratings);
+    for (label, n) in &data.ratings_by_label {
+        let _ = writeln!(out, "explicit ratings ({label}): {n}");
+    }
+    let _ = writeln!(out, "ratings per issue: {}", data.ratings_per_issue());
+    if data.per_retriever.is_empty() {
+        let _ = writeln!(out, "rated picks by admitting retriever: none");
+    }
+    for (retriever, counts) in &data.per_retriever {
         let _ = writeln!(
             out,
-            "mean generation time: {} ({} runs)",
-            RunReport::format_duration(mean),
-            durations.len()
+            "admitted by {retriever}: {} rated · {} up · {} down · {}",
+            counts.rated,
+            counts.up,
+            counts.down,
+            counts.ratio()
         );
     }
-    Ok(out)
+    let _ = writeln!(out, "exploration admitted: {}", data.exploration_admitted);
+    let _ = writeln!(out, "exploration selected: {}", data.exploration_selected);
+    let _ = writeln!(
+        out,
+        "exploration rated positively: {}",
+        data.exploration_positive
+    );
+    for (provider, total) in &data.provider_totals {
+        let _ = writeln!(
+            out,
+            "cost per day ({provider}): ${:.3}",
+            data.per_day(*total)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "cost per day (total): ${:.3}",
+        data.per_day(data.grand_total())
+    );
+    match data.mean_generation_secs() {
+        None => {
+            let _ = writeln!(out, "mean generation time: n/a (0 runs)");
+        }
+        Some(mean) => {
+            let _ = writeln!(
+                out,
+                "mean generation time: {} ({} runs)",
+                RunReport::format_duration(mean),
+                data.durations.len()
+            );
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1523,6 +1735,41 @@ mod tests {
             text.lines().all(|line| line.chars().count() <= 80),
             "no line wider than 80 columns"
         );
+        // Dashboard plan §12: the CLI output is byte-identical before and
+        // after the `stats_data` / `render_stats_text` split.
+        assert_eq!(text, STATS_TEXT_BEFORE_REFACTOR);
+        let data = stats_data(&db, 14, now).await.unwrap();
+        assert_eq!(render_stats_text(&data), text);
+
+        // The figures the stats page adds on top of the text.
+        assert_eq!(data.issues, 2);
+        assert_eq!(data.total_ratings, 4);
+        assert_eq!(
+            data.selected_per_issue,
+            vec![("2026-08-30".to_string(), 2), ("2026-09-01".to_string(), 1)]
+        );
+        assert_eq!(
+            data.cost_by_day["2026-08-30"]["deepseek"],
+            0.10 + 0.04,
+            "both 08-30 runs land on the same day"
+        );
+        assert_eq!(data.cost_by_day["2026-09-01"]["gemini"], 0.07);
+        assert_eq!(data.ratings_per_week["2026-08-31"]["loved"], 2);
+        assert_eq!(data.ratings_per_week["2026-08-31"]["not_for_me"], 1);
+        assert_eq!(data.ratings_per_week["2026-08-17"]["cleared"], 1);
+        assert_eq!(data.runs.len(), 3, "three finished non-dry runs");
+        assert_eq!(data.runs[0].run_id, run_ids[0], "oldest first");
+        assert_eq!(data.runs[0].duration_secs, Some(1200));
+        assert_eq!(data.runs[2].date, "2026-09-01");
+        assert_eq!(data.per_retriever["knn"].ratio(), "100% up");
+        assert_eq!(data.mean_generation_secs(), Some(900));
+
+        // The newest-N form the overview uses.
+        let last_two = run_series(&db, None, Some(2)).await.unwrap();
+        assert_eq!(
+            last_two.iter().map(|p| p.run_id).collect::<Vec<_>>(),
+            vec![run_ids[1], run_ids[2]]
+        );
 
         // An empty database still prints every heading.
         let (_dir, empty) = db_with_articles(&[]).await;
@@ -1537,6 +1784,69 @@ mod tests {
         ] {
             assert!(text.contains(line), "missing {line:?} in:\n{text}");
         }
+        assert_eq!(text, STATS_TEXT_EMPTY_BEFORE_REFACTOR);
+    }
+
+    /// `stats(db, 14, 2026-09-02T12:00:00Z)` over the seed above, captured
+    /// from the pre-refactor implementation.
+    const STATS_TEXT_BEFORE_REFACTOR: &str = "\
+stats: last 14 days (2026-08-19 → 2026-09-02)
+issues: 2
+articles published: 3
+mean issue size: 1.5 articles
+explicit ratings: 4
+explicit ratings (cleared): 1
+explicit ratings (good): 1
+explicit ratings (loved): 2
+explicit ratings (not_for_me): 1
+ratings per issue: 2.0
+admitted by blend: 1 rated · 0 up · 1 down · 0% up
+admitted by exploration: 1 rated · 1 up · 0 down · 100% up
+admitted by knn: 1 rated · 1 up · 0 down · 100% up
+exploration admitted: 2
+exploration selected: 1
+exploration rated positively: 1
+cost per day (anthropic): $0.043
+cost per day (deepseek): $0.020
+cost per day (gemini): $0.005
+cost per day (voyage): $0.001
+cost per day (total): $0.069
+mean generation time: 15m00s (3 runs)
+";
+
+    const STATS_TEXT_EMPTY_BEFORE_REFACTOR: &str = "\
+stats: last 7 days (2026-08-26 → 2026-09-02)
+issues: 0
+articles published: 0
+mean issue size: n/a articles
+explicit ratings: 0
+ratings per issue: n/a
+rated picks by admitting retriever: none
+exploration admitted: 0
+exploration selected: 0
+exploration rated positively: 0
+cost per day (total): $0.000
+mean generation time: n/a (0 runs)
+";
+
+    #[test]
+    fn week_start_is_the_utc_monday() {
+        assert_eq!(
+            week_start("2026-09-02T12:00:00Z".parse().unwrap()),
+            "2026-08-31"
+        );
+        assert_eq!(
+            week_start("2026-08-31T00:00:00Z".parse().unwrap()),
+            "2026-08-31"
+        );
+        assert_eq!(
+            week_start("2026-09-06T23:59:59Z".parse().unwrap()),
+            "2026-08-31"
+        );
+        assert_eq!(
+            week_start("2026-09-07T00:00:00Z".parse().unwrap()),
+            "2026-09-07"
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,8 @@
+<figure class="spark-figure"><figcaption>{{ spark.title }}{% if !spark.caption.is_empty() %} <span class="muted">· {{ spark.caption }}</span>{% endif %}</figcaption>
+{% if spark.empty %}<p class="muted">No data yet.</p>{% else %}<svg class="spark" viewBox="0 0 {{ spark.width }} {{ spark.height }}" width="{{ spark.width }}" height="{{ spark.height }}" role="img" aria-label="{{ spark.title }}">
+{% for bar in spark.bars %}<rect class="s{{ bar.series }}" x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.w }}" height="{{ bar.h }}"><title>{{ bar.label }}</title></rect>
+{% endfor %}{% if !spark.points.is_empty() %}<polyline class="line" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" points="{{ spark.points }}"/>{% endif %}
+</svg>
+<div class="spark-axis muted"><span>{{ spark.first_label }}</span><span>{{ spark.last_label }}</span></div>
+{% if !spark.legend.is_empty() %}<ul class="spark-legend">{% for item in spark.legend %}<li><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect class="s{{ item.series }}" width="10" height="10"/></svg> {{ item.name }}</li>{% endfor %}</ul>{% endif %}
+{% endif %}</figure>

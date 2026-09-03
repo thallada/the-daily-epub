@@ -425,9 +425,10 @@ struct OverviewTemplate {
     active_jobs: Vec<JobLine>,
     finished_jobs: Vec<JobLine>,
     config_warnings: Vec<String>,
+    sparklines: Vec<stats::Sparkline>,
 }
 
-/// `GET /dashboard` — the overview (§9.1). Sparklines arrive with step 6.
+/// `GET /dashboard` — the overview (§9.1).
 async fn overview(
     State(state): State<AppState>,
     auth: AuthSession,
@@ -443,6 +444,7 @@ async fn overview(
     let (ratings, ratings_total) = ratings_this_week(db, now).await?;
     let unrated = unrated_picks(db).await?;
     let (active_jobs, finished_jobs) = jobs_summary(db, &config).await?;
+    let sparklines = overview_sparklines(db).await?;
     let config_warnings = config
         .check_report(state.config_path.as_deref())
         .into_iter()
@@ -461,8 +463,39 @@ async fn overview(
         active_jobs,
         finished_jobs,
         config_warnings,
+        sparklines,
     })
     .into_response())
+}
+
+/// How many finished non-dry runs the overview sparklines cover (§9.1).
+const SPARKLINE_RUNS: i64 = 30;
+
+/// Cost per run, selected per run and generation seconds over the last 30
+/// non-dry runs (§9.1), drawn by `dashboard/_sparkline.html`.
+async fn overview_sparklines(db: &Db) -> Result<Vec<stats::Sparkline>, WebError> {
+    let runs = crate::curate::telemetry::run_series(db, None, Some(SPARKLINE_RUNS))
+        .await
+        .map_err(db_err)?;
+    let labels = (
+        runs.first().map(|run| run.date.as_str()).unwrap_or(""),
+        runs.last().map(|run| run.date.as_str()).unwrap_or(""),
+    );
+    let costs: Vec<f64> = runs.iter().map(|run| run.cost_usd).collect();
+    let selected: Vec<f64> = runs.iter().map(|run| run.selected as f64).collect();
+    let seconds: Vec<f64> = runs
+        .iter()
+        .map(|run| run.duration_secs.unwrap_or(0) as f64)
+        .collect();
+    Ok(vec![
+        stats::Sparkline::line("Cost per run", &costs, labels, "runs", fmt_usd),
+        stats::Sparkline::line("Selected per run", &selected, labels, "runs", |n| {
+            format!("{n:.0}")
+        }),
+        stats::Sparkline::line("Generation time", &seconds, labels, "runs", |secs| {
+            RunReport::format_duration(secs as i64)
+        }),
+    ])
 }
 
 async fn last_run_card(db: &Db, config: &Config) -> Result<Option<LastRunCard>, WebError> {
@@ -1145,5 +1178,11 @@ pub(crate) mod tests {
         assert!(body.contains("deepseek"), "{body}");
         assert!(body.contains("voyage"), "{body}");
         assert!(body.contains("Ratings this week"), "{body}");
+        // Step 6: three sparklines over the last 30 runs (two finished here).
+        assert!(body.contains("Cost per run"), "{body}");
+        assert!(body.contains("Generation time"), "{body}");
+        assert_eq!(body.matches("<polyline").count(), 3, "{body}");
+        assert!(body.contains("2 runs · max $0.11"), "{body}");
+        assert!(!body.contains("style=\""), "no inline styles under the CSP");
     }
 }

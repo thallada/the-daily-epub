@@ -101,6 +101,23 @@ impl AppState {
         }
     }
 
+    /// `new`, with a specific [`crate::web::JobRunner`]: `SystemdRunner` in
+    /// `serve`, a `MockRunner` in router tests (dashboard plan §14.4).
+    pub fn with_jobs(
+        db: Db,
+        config: Config,
+        config_path: Option<PathBuf>,
+        jobs: Arc<dyn crate::web::JobRunner>,
+    ) -> Self {
+        let mut state = Self::new(db, config, config_path);
+        state.web = Arc::new(crate::web::WebState {
+            jobs,
+            started_at: Timestamp::now(),
+            config_mtime: std::sync::Mutex::new(None),
+        });
+        state
+    }
+
     pub fn config(&self) -> Arc<Config> {
         match self.config.read() {
             Ok(config) => Arc::clone(&config),
@@ -199,7 +216,16 @@ pub async fn serve(
         }
     });
 
-    let app = router(AppState::new(db, config, config_path));
+    // The Jobs page starts `daily-epub-job@<name>.service` through systemd +
+    // polkit (§14); `server.jobs_enabled = false` swaps in the runner whose
+    // page says so.
+    let jobs: Arc<dyn crate::web::JobRunner> = if config.server.jobs_enabled {
+        Arc::new(crate::jobs::SystemdRunner::default())
+    } else {
+        tracing::info!("server.jobs_enabled is false; the Jobs page cannot start units");
+        Arc::new(crate::web::DisabledRunner)
+    };
+    let app = router(AppState::with_jobs(db, config, config_path, jobs));
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
