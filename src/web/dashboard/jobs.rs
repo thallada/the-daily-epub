@@ -129,7 +129,7 @@ async fn jobs_template(
 ) -> Result<JobsTemplate, WebError> {
     let config = state.config();
     let rows = jobs::list(&state.db, TABLE_ROWS).await.map_err(db_err)?;
-    let mut page = Page::new("Jobs", viewer, "dashboard");
+    let mut page = Page::new("Jobs", viewer, "jobs");
     page.flash = flash;
     let today = config
         .tz()
@@ -314,7 +314,7 @@ async fn show(
         Ok(log) => (log, None),
         Err(error) => (String::new(), Some(error)),
     };
-    let mut page = Page::new(format!("Job {id} · {}", row.name), viewer, "dashboard");
+    let mut page = Page::new(format!("Job {id} · {}", row.name), viewer, "jobs");
     page.flash = take_flash(&session).await?;
     Ok(Html(JobTemplate {
         page,

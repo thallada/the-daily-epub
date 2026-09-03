@@ -1,3 +1,44 @@
+const themeToggle = document.querySelector("[data-theme-toggle]");
+if (themeToggle) {
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  const readTheme = () => {
+    try {
+      const saved = localStorage.getItem("theme");
+      return saved === "light" || saved === "dark" ? saved : "system";
+    } catch (_) {
+      return "system";
+    }
+  };
+  const renderTheme = (theme) => {
+    themeToggle.setAttribute("aria-label", `Theme: ${theme}`);
+    themeToggle.querySelector("[data-theme-label]").textContent = theme[0].toUpperCase() + theme.slice(1);
+    themeToggle.querySelectorAll("[data-theme-icon]").forEach((icon) => {
+      // SVGElement has no `hidden` IDL attribute; toggle the content attribute.
+      icon.toggleAttribute("hidden", icon.getAttribute("data-theme-icon") !== theme);
+    });
+  };
+  const setTheme = (theme) => {
+    if (theme === "system") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.dataset.theme = theme;
+    try {
+      if (theme === "system") localStorage.removeItem("theme");
+      else localStorage.setItem("theme", theme);
+    } catch (_) {}
+    renderTheme(theme);
+  };
+  renderTheme(readTheme());
+  themeToggle.addEventListener("click", () => {
+    const current = readTheme();
+    setTheme(current === "system" ? "light" : current === "light" ? "dark" : "system");
+  });
+  media.addEventListener("change", () => {
+    if (readTheme() === "system") {
+      document.documentElement.removeAttribute("data-theme");
+      renderTheme("system");
+    }
+  });
+}
+
 document.addEventListener("submit", (event) => {
   const form = event.target;
   if (form.matches("form.rating") && event.submitter) {

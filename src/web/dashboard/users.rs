@@ -56,7 +56,7 @@ async fn index(
             open_sessions: row.open_sessions,
         })
         .collect();
-    let mut page = Page::new("Users", viewer, "dashboard");
+    let mut page = Page::new("Users", viewer, "users");
     page.flash = take_flash(&session).await?;
     Ok(Html(UsersTemplate { page, users }))
 }

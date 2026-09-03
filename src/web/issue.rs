@@ -219,6 +219,7 @@ struct FullEntry {
     href: String,
     source: String,
     reading_minutes: i64,
+    is_lead: bool,
     summary: String,
     why: Option<String>,
     rating: Option<RatingWidget>,
@@ -351,6 +352,7 @@ pub async fn render_full(
                     href: article_href(date, pick.article.id),
                     source: pick.article.feed_title.clone(),
                     reading_minutes: pick.article.reading_minutes(),
+                    is_lead: pick.is_lead,
                     summary: summary_for(&view.issue, pick)
                         .unwrap_or_default()
                         .to_string(),
