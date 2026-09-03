@@ -21,7 +21,7 @@ pub const REBUILD_INTERVAL_DAYS: i64 = 7;
 /// so their `current_ratings` lookback is effectively unbounded.
 const RATINGS_LOOKBACK_DAYS: i64 = 36_500;
 pub const KV_LEARNED_ADJUSTMENTS: &str = "taste_profile_learned";
-const MAX_RATINGS_IN_REBUILD: usize = 200;
+pub const MAX_RATINGS_IN_REBUILD: usize = 200;
 
 pub const NO_LEARNED_ADJUSTMENTS: &str = "No reader ratings have been collected yet. Judge purely on the stated preferences and interests above.";
 
@@ -239,7 +239,9 @@ struct ProfileVersion {
     built_at: String,
 }
 
-async fn stored_version(db: &Db) -> anyhow::Result<Option<(i64, Timestamp)>> {
+/// The stored `(version, built_at)` of the taste profile, `None` before the
+/// first build. The dashboard's profile page reads it (web plan §11).
+pub async fn stored_version(db: &Db) -> anyhow::Result<Option<(i64, Timestamp)>> {
     let Some(raw) = db.kv_get(KV_PROFILE_VERSION).await? else {
         return Ok(None);
     };

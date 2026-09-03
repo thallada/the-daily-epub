@@ -57,3 +57,19 @@ thead { position:sticky; top:0; background:var(--bg); }
 .rating-prompt { margin-right:.25rem; }
 .rating-note { flex-basis:100%; }
 @media (max-width:40rem) { .masthead { font-size:1.55rem; } .kv { display:block; } }
+/* step 4: ratings and profile pages */
+.preference-summary { font-size:1.05rem; }
+.notice { border-left:3px solid var(--accent); padding:.4rem .8rem; }
+.how ol { padding-left:1.2rem; } .how li { margin:.4rem 0; }
+.tabs { margin:1rem 0; } .tabs a { padding:.3rem .7rem; border:1px solid var(--rule); text-decoration:none; } .tabs a.active { background:var(--fg); color:var(--bg); border-color:var(--fg); }
+form.filters { display:flex; flex-wrap:wrap; align-items:end; gap:.8rem; margin:1rem 0; } form.filters label { gap:.15rem; }
+form.inline { display:inline-flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin:.8rem 0; }
+.contributions td { vertical-align:top; } .contributions .rating { margin-top:.3rem; font-size:.85rem; } .contributions .rating-prompt { display:none; }
+tr.superseded td { color:var(--muted); }
+.pager { display:flex; gap:1rem; align-items:center; margin:1rem 0; }
+.profile-grid { display:grid; grid-template-columns:3fr 2fr; gap:1.5rem; }
+.profile-form textarea { width:100%; font:.9rem/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; resize:vertical; }
+pre.preview { white-space:pre-wrap; overflow-wrap:anywhere; font:.85rem/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; border:1px solid var(--rule); padding:.6rem; max-height:28rem; overflow:auto; margin:0; }
+.versions pre.preview { max-height:6rem; border:0; padding:0; }
+.versions form { margin:0; }
+@media (max-width:60rem) { .profile-grid { display:block; } }
