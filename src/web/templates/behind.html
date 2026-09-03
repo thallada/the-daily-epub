@@ -1,0 +1,7 @@
+{% extends "layout.html" %}{% block content %}<article class="reading behind">
+<h1>Behind the paper</h1>
+<p class="fact-line">{{ summary_line }}</p><p class="fact-line">{{ admitted_line }}</p><p class="fact-line">{{ learned_line }}</p>
+<h2>Near misses</h2><p><em>Highest utility not selected.</em></p>
+{% if near_misses.is_empty() %}<p>None recorded for this run.</p>{% else %}<ul class="near-misses">{% for near_miss in near_misses %}<li>{% if page.is_admin() %}<a href="/dashboard/articles/{{ near_miss.article_id }}">{{ near_miss.line }}</a>{% else %}{{ near_miss.line }}{% endif %}</li>{% endfor %}</ul>{% endif %}
+<p class="fact-line">{{ models_line }}</p><p><a href="{{ issue_href }}">← Back to this issue</a></p>
+</article>{% endblock %}

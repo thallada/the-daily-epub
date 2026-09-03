@@ -1,5 +1,6 @@
 pub mod issue;
 pub mod public;
+pub mod rate;
 pub mod session;
 pub mod users;
 
@@ -18,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use self::session::Viewer;
+use axum_login::tower_sessions::Session;
 
 #[async_trait]
 pub trait JobRunner: Send + Sync {
@@ -133,6 +135,13 @@ impl Page {
             .as_ref()
             .is_some_and(|viewer| viewer.role == users::Role::Admin)
     }
+}
+
+pub async fn take_flash(session: &Session) -> Result<Option<Flash>, WebError> {
+    session
+        .remove("flash")
+        .await
+        .map_err(|error| WebError::Internal(error.into()))
 }
 
 pub struct Html<T: Template>(pub T);
@@ -347,9 +356,19 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
             login_url = "/login",
             redirect_field = "next"
         ));
+    let full_issues = axum::Router::new()
+        .route("/issues/{date}/articles/{article_id}", get(issue::article))
+        .route("/issues/{date}/world", get(issue::world))
+        .route("/issues/{date}/behind", get(issue::behind))
+        .route_layer(login_required!(
+            session::Backend,
+            login_url = "/login",
+            redirect_field = "next"
+        ))
+        .route_layer(from_fn(map_forbidden));
     let dashboard = axum::Router::new()
         .route("/dashboard", get(dashboard_stub))
-        .route("/rate", post(rate_stub))
+        .route("/rate", post(rate::post))
         .route_layer(permission_required!(
             session::Backend,
             login_url = "/login",
@@ -367,6 +386,7 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
         .route("/static/{file}", get(static_asset))
         .merge(login)
         .merge(account)
+        .merge(full_issues)
         .merge(dashboard)
 }
 
@@ -382,10 +402,6 @@ async fn dashboard_stub(auth: session::AuthSession) -> Result<Response, WebError
         page: Page::new("Overview", viewer, "dashboard"),
     })
     .into_response())
-}
-
-async fn rate_stub() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
 }
 
 async fn map_forbidden(request: Request, next: Next) -> Response {
@@ -674,7 +690,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(allowed_rate.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(allowed_rate.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

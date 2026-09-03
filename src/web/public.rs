@@ -1,7 +1,8 @@
 use askama::Template;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use axum_login::tower_sessions::Session;
 use jiff::civil::Date;
 
 use crate::server::AppState;
@@ -168,6 +169,7 @@ struct FeedEntryTemplate<'a> {
 pub async fn latest(
     State(state): State<AppState>,
     auth: AuthSession,
+    Extension(session): Extension<Session>,
     headers: HeaderMap,
 ) -> Result<Response, WebError> {
     let Some(date) = state.db.latest_issue_date().await? else {
@@ -181,12 +183,13 @@ pub async fn latest(
         .into_response();
         return Ok(public_cache(response, &headers));
     };
-    show_issue(State(state), auth, headers, Path(date)).await
+    show_issue(State(state), auth, Extension(session), headers, Path(date)).await
 }
 
 pub async fn show_issue(
     State(state): State<AppState>,
     auth: AuthSession,
+    Extension(session): Extension<Session>,
     headers: HeaderMap,
     Path(date): Path<Date>,
 ) -> Result<Response, WebError> {
@@ -194,15 +197,14 @@ pub async fn show_issue(
         return Err(WebError::NotFound);
     };
     let viewer = auth.user().await.map(Viewer::from);
-    let downloads = if viewer.is_some() {
-        view.downloads
-    } else {
-        Vec::new()
-    };
+    if let Some(viewer) = viewer {
+        let response = issue::render_full(&state, view, viewer, &session).await?;
+        return Ok(public_cache(response, &headers));
+    }
     let response = Html(IssuePublicTemplate {
-        page: Page::new(format!("Issue {date}"), viewer, "latest"),
+        page: Page::new(format!("Issue {date}"), None, "latest"),
         issue: PublicIssue::from(&view.issue),
-        downloads,
+        downloads: Vec::new(),
         empty: false,
     })
     .into_response();

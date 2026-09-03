@@ -1,0 +1,20 @@
+{% extends "layout.html" %}{% block content %}<article class="reading article-page">
+<header class="article-header">
+<h1><a href="{{ source_url }}">{{ title }}</a></h1>
+{% match byline %}{% when Some with (byline) %}<p class="byline">{{ byline }}</p>{% when None %}{% endmatch %}
+<p class="meta">{{ meta_line }}</p>
+{% match why %}{% when Some with (why) %}<p class="why"><em>Why it's here: {{ why }}</em></p>{% when None %}{% endmatch %}
+{% match social_line %}{% when Some with (social) %}<p class="social">{{ social }}</p>{% when None %}{% endmatch %}
+{% match summary %}{% when Some with (summary) %}<p class="summary">{{ summary }}</p>{% when None %}{% endmatch %}
+{% if excerpt_only %}<p class="notice">(excerpt only — read online)</p>{% endif %}
+</header>
+<hr class="rule">
+<div class="article-body">{{ body_html|safe }}</div>
+{% match discussion_html %}{% when Some with (discussion) %}<section class="discussion"><h2>Discussion</h2>{{ discussion|safe }}</section>{% when None %}{% endmatch %}
+<footer class="article-footer">
+{% match rating %}{% when Some with (widget) %}{% include "_rating_widget.html" %}{% when None %}{% endmatch %}
+<p><a href="{{ read_online_url }}">Read online ↗</a></p>
+<nav class="prev-next">{% match previous %}{% when Some with (previous) %}<a rel="prev" href="{{ previous.href }}">← {{ previous.title }}</a>{% when None %}<span></span>{% endmatch %}{% match next %}{% when Some with (next) %}<a rel="next" href="{{ next.href }}">{{ next.title }} →</a>{% when None %}{% endmatch %}</nav>
+<p><a href="{{ issue_href }}">← Back to this issue</a></p>
+</footer>
+</article>{% endblock %}

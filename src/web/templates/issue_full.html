@@ -1,0 +1,33 @@
+{% extends "layout.html" %}{% block content %}<article class="reading issue full-issue">
+<p class="dateline">{{ display_date }} · No. {{ issue_number }}</p>
+<p class="stats">{{ stats_line }}</p>
+<hr class="rule">
+<h1 class="kicker">The Brief</h1>
+<div class="editorial">{{ front_page_html|safe }}</div>
+{% if !downloads.is_empty() %}<p class="downloads">{% for download in downloads %}<a class="button" href="{{ download.href }}">Download {{ download.label }} <small>({{ download.size_bytes }} bytes)</small></a>{% endfor %}</p>{% endif %}
+<hr class="rule">
+<h1>In This Issue</h1>
+{% for section in sections %}<section><h2>{{ section.name }}</h2><ul class="index-list">{% for entry in section.entries %}<li class="index-entry">
+<h3><a href="{{ entry.href }}">{{ entry.title }}</a></h3>
+<p class="index-meta">{{ entry.source }} · {{ entry.reading_minutes }} min read</p>
+{% if !entry.summary.is_empty() %}<p class="index-summary">{{ entry.summary }}</p>{% endif %}
+{% match entry.why %}{% when Some with (why) %}<p class="index-why"><em>Why it's here: {{ why }}</em></p>{% when None %}{% endmatch %}
+{% match entry.rating %}{% when Some with (widget) %}{% include "_rating_widget.html" %}{% when None %}{% endmatch %}
+</li>{% endfor %}</ul></section>{% endfor %}
+{% if has_world || has_behind %}<nav class="issue-chapters">{% if has_world %}<a href="/issues/{{ date }}/world">World Briefing</a>{% endif %}{% if has_world && has_behind %} · {% endif %}{% if has_behind %}<a href="/issues/{{ date }}/behind">Behind the paper</a>{% endif %}</nav>{% endif %}
+<footer class="colophon"><h2>Colophon</h2>
+<p><em>The Daily EPUB</em> is assembled every morning from a personal feed reader.</p>
+<dl class="kv">
+<dt>Generated</dt><dd>{{ colophon.generated_at }}</dd>
+<dt>Bulk model</dt><dd>{{ colophon.bulk_model }}</dd>
+<dt>Editor model</dt><dd>{{ colophon.editor_model }}</dd>
+<dt>Summaries model</dt><dd>{{ colophon.summaries_model }}</dd>
+<dt>Entries considered</dt><dd>{{ colophon.entries_fetched }} from {{ colophon.feeds_seen }} feeds</dd>
+<dt>Candidates scored</dt><dd>{{ colophon.candidates }}</dd>
+<dt>Articles selected</dt><dd>{{ colophon.article_count }} across {{ colophon.section_count }} sections</dd>
+<dt>Words</dt><dd>{{ colophon.total_words }} · ~{{ colophon.reading_minutes }} min read</dd>
+{% for cost in colophon.provider_costs %}<dt>{{ cost.provider }} cost</dt><dd>{{ cost.cost }}</dd>{% endfor %}
+<dt>Total token cost</dt><dd>{{ colophon.cost_usd }}</dd>
+<dt>Generator</dt><dd>{{ colophon.generator_version }}</dd>
+</dl></footer>
+</article>{% endblock %}

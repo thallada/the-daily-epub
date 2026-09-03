@@ -591,10 +591,17 @@ fn confirmation_page(
     })
     .collect::<Vec<_>>()
     .join(" &nbsp; ");
+    let issue_url = format!(
+        "{}/issues/{date}",
+        config.server.public_url.trim_end_matches('/')
+    );
     let body = page_html(
         message,
         None,
-        Some(&format!("<p><small>Change it: {choices}</small></p>")),
+        Some(&format!(
+            "<p><small>Change it: {choices}</small></p><p><small><a href=\"{}\">Open this issue on the site</a></small></p>",
+            escape_attr(&issue_url)
+        )),
     );
     (
         status,
@@ -774,8 +781,8 @@ mod tests {
         assert!(safe_join(dir, "../../etc/passwd").is_none());
     }
 
-    #[test]
-    fn the_confirmation_page_is_tiny_and_self_contained() {
+    #[tokio::test]
+    async fn the_confirmation_page_is_tiny_and_self_contained() {
         let html = page_html(
             "Recorded: Loved it — thanks.",
             Some("2026-08-15 · article 42"),
@@ -790,6 +797,25 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert!(page_html("<b>x</b>", None, None).contains("&lt;b&gt;"));
+
+        let mut config = Config::default();
+        config.server.hmac_secret = Some("test-secret".into());
+        config.server.public_url = "https://daily.example".into();
+        let response =
+            confirmation_page(StatusCode::OK, "Recorded", &config, date(), 42, Vote::Loved);
+        let body = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            body.contains(
+                "href=\"https://daily.example/issues/2026-08-15\">Open this issue on the site"
+            ),
+            "{body}"
+        );
     }
 
     // -----------------------------------------------------------------
