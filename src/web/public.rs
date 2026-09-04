@@ -11,6 +11,19 @@ use crate::web::issue::{self, Download};
 use crate::web::session::{AuthSession, Viewer};
 use crate::web::{Html, Page, WebError};
 
+/// The `<meta name="description">` for the landing page before the first issue
+/// of the day exists.
+const NO_ISSUE_DESCRIPTION: &str = concat!(
+    "The latest issue of The Daily EPUB is not out yet; ",
+    "the next one lands tomorrow morning."
+);
+
+/// The `<meta name="description">` for the archive index.
+const ARCHIVE_DESCRIPTION: &str = concat!(
+    "Every issue of The Daily EPUB, newest first: browse the archive by month ",
+    "and read or download any past morning's paper."
+);
+
 #[derive(Debug, Clone)]
 pub struct PublicIssue {
     pub date: Date,
@@ -140,6 +153,20 @@ impl From<&Issue> for PublicIssue {
     }
 }
 
+impl PublicIssue {
+    /// The `<meta name="description">` for an issue page: the same counts the
+    /// masthead prints, in a sentence a search result can show.
+    fn description(&self) -> String {
+        format!(
+            "Issue No. {} for {}: {} articles across {} sections.",
+            self.issue_number,
+            self.display_date,
+            self.article_count,
+            self.sections.len(),
+        )
+    }
+}
+
 fn domain(raw: &str) -> String {
     url::Url::parse(raw)
         .ok()
@@ -193,7 +220,8 @@ pub async fn latest(
     let Some(date) = state.db.latest_issue_date().await? else {
         let viewer = auth.user().await.map(Viewer::from);
         let response = Html(IssuePublicTemplate {
-            page: Page::new("Latest issue", viewer, "latest"),
+            page: Page::new("Latest issue", viewer, "latest")
+                .with_description(NO_ISSUE_DESCRIPTION),
             issue: empty_issue(),
             downloads: Vec::new(),
             empty: true,
@@ -220,9 +248,11 @@ pub async fn show_issue(
         return Ok(public_cache(response, &headers));
     }
     let active_nav = if view.is_latest { "latest" } else { "archive" };
+    let issue = PublicIssue::from(&view.issue);
     let response = Html(IssuePublicTemplate {
-        page: Page::new(format!("Issue {date}"), None, active_nav),
-        issue: PublicIssue::from(&view.issue),
+        page: Page::new(format!("Issue {date}"), None, active_nav)
+            .with_description(issue.description()),
+        issue,
         downloads: Vec::new(),
         empty: false,
     })
@@ -259,7 +289,8 @@ pub async fn archive(
             "Issue archive",
             auth.user().await.map(Viewer::from),
             "archive",
-        ),
+        )
+        .with_description(ARCHIVE_DESCRIPTION),
         months,
     })
     .into_response();
