@@ -344,7 +344,6 @@ struct CurrentRow {
     feed_title: String,
     issue_date: String,
     badge: String,
-    verdict: String,
     widget: RatingWidget,
     when: String,
     source: String,
@@ -678,7 +677,7 @@ async fn build_current_rows(
                 .or_insert_with(|| feed_title_for(article.as_ref(), *feed_id));
         }
 
-        let (badge, verdict) = widget_label(&rating.label);
+        let (badge, _) = widget_label(&rating.label);
         if filters.label.as_deref().is_some_and(|label| label != badge) {
             continue;
         }
@@ -715,7 +714,6 @@ async fn build_current_rows(
             feed_title: rating.feed_title.clone(),
             issue_date: issue_date.clone(),
             badge: badge.to_string(),
-            verdict: verdict.to_string(),
             widget: RatingWidget {
                 article_id: rating.article_id,
                 issue_date,

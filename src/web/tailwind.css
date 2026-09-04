@@ -118,11 +118,12 @@
 
 @layer components {
   /* ---------- shared controls ---------- */
-  .btn, .button { @apply inline-flex min-h-10 items-center justify-center rounded-sm border border-rule-strong bg-transparent px-3 py-1.5 font-sans text-sm font-medium text-ink no-underline transition-colors duration-150 hover:bg-ink hover:text-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper; }
-  .btn-primary { @apply inline-flex min-h-10 items-center justify-center rounded-sm border border-ink bg-ink px-3 py-1.5 font-sans text-sm font-medium text-paper no-underline transition-colors duration-150 hover:border-accent hover:bg-accent hover:text-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper; }
+  .btn, .button { @apply inline-flex min-h-10 items-center justify-center rounded-sm border border-rule-strong bg-transparent px-3 py-1.5 font-sans text-sm font-medium text-ink no-underline duration-150 hover:bg-ink hover:text-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper; transition-property:transform, background-color, color, border-color; }
+  .btn-primary { @apply inline-flex min-h-10 items-center justify-center rounded-sm border border-ink bg-ink px-3 py-1.5 font-sans text-sm font-medium text-paper no-underline duration-150 hover:border-accent hover:bg-accent hover:text-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper; transition-property:transform, background-color, color, border-color; }
   .btn-quiet { @apply inline-flex min-h-9 items-center gap-1 rounded-sm border-0 bg-transparent px-2 py-1 font-sans text-sm text-muted underline decoration-rule underline-offset-4 hover:text-ink hover:decoration-accent; }
   .btn:disabled, .btn-primary:disabled, .btn-danger:disabled { @apply cursor-not-allowed border-rule bg-paper-2 text-muted hover:bg-paper-2 hover:text-muted; }
-  .btn-danger, button.danger { @apply inline-flex min-h-9 items-center justify-center rounded-sm border border-down bg-transparent px-2.5 py-1 font-sans text-sm font-medium text-down transition-colors duration-150 hover:bg-down hover:text-paper; }
+  .btn-danger, button.danger { @apply inline-flex min-h-9 items-center justify-center rounded-sm border border-down bg-transparent px-2.5 py-1 font-sans text-sm font-medium text-down duration-150 hover:bg-down hover:text-paper; transition-property:transform, background-color, color, border-color; }
+  .btn:active, .button:active, .btn-primary:active, .btn-danger:active, button.danger:active { transform:scale(0.96); }
 
   .badge { @apply inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 font-sans text-xs font-medium leading-5 tabular-nums; color:var(--ink-2); background:color-mix(in oklab, var(--ink) 8%, transparent); }
   .badge.selected, .badge.loved, .badge.ok { color:var(--loved); background:color-mix(in oklab, var(--loved) 14%, transparent); }
@@ -140,10 +141,13 @@
 
   .prose-body { @apply text-[1.0625rem] leading-[1.72] text-ink; }
   .prose-body > * + * { @apply mt-5; }
-  .prose-body h2 { @apply mt-10 border-t border-rule pt-4 text-2xl font-semibold leading-[1.15] tracking-[-0.01em]; }
-  .prose-body h3 { @apply mt-8 text-xl font-semibold leading-tight; }
+  .prose-body p, .index-summary { text-wrap:pretty; }
+  .prose-body h2 { @apply mt-10 border-t border-rule pt-4 text-2xl font-semibold leading-[1.1] tracking-[-0.01em]; }
+  .prose-body h3 { @apply mt-8 text-xl font-semibold leading-[1.15] tracking-[-0.01em]; }
   .prose-body a { @apply text-ink underline decoration-rule underline-offset-4 hover:text-ink hover:decoration-accent; }
-  .prose-body img { @apply mx-auto my-7 block h-auto max-w-full rounded-sm text-center font-sans text-xs italic text-muted; }
+  .prose-body img { @apply mx-auto my-7 block h-auto max-w-full rounded-sm text-center font-sans text-xs italic text-muted; outline:1px solid oklch(0 0 0 / 0.1); outline-offset:-1px; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .prose-body img { outline-color:oklch(1 0 0 / 0.1); } }
+  :root[data-theme="dark"] .prose-body img { outline-color:oklch(1 0 0 / 0.1); }
   .prose-body pre { @apply max-w-full overflow-x-auto rounded-sm bg-paper-2 p-4 text-sm leading-relaxed; }
   .prose-body :not(pre) > code { @apply rounded-sm bg-paper-2 px-1 py-0.5 text-[0.9em]; }
   .prose-body blockquote { @apply my-7 border-l-2 border-rule-strong pl-5 text-ink-2; }
@@ -152,14 +156,28 @@
   .prose-body li::marker { color:var(--muted); }
   .prose-body li + li { @apply mt-2; }
 
-  .rating { @apply my-5 flex flex-wrap items-center font-sans text-sm; }
-  .rating-prompt { @apply mr-3 text-[0.72rem] uppercase tracking-[0.1em] text-muted; }
-  .rating button[data-label]:not(.clear) { @apply -ml-px min-h-10 rounded-none border-rule bg-transparent px-3 py-1.5 text-ink first:ml-0 first:rounded-l-sm last:rounded-r-sm hover:z-10 hover:border-ink hover:bg-paper-2; }
-  .rating button[data-label]:not(.clear).active { @apply z-10 border-ink bg-ink text-paper; }
-  .rating button.clear { @apply ml-2 min-h-10 border-0 bg-transparent px-2 text-muted underline decoration-rule underline-offset-4 hover:text-ink; }
-  .rating button.clear.active { @apply font-semibold text-ink; }
-  .rating-note { @apply mt-2 flex w-full max-w-md basis-full items-center gap-2 text-muted; }
-  .rating-note input { @apply flex-1; }
+  .reader-page :where(h1, h2, h3, h4), .reader-section-heading { text-wrap:balance; }
+  .reader-section-heading { @apply border-t-[3px] border-double border-rule-strong pt-3 font-serif text-[1.05rem] font-semibold uppercase leading-[1.2] tracking-[0.15em] text-ink; }
+
+  .rating { @apply my-5 flex flex-wrap items-center gap-x-3 font-sans text-xs; }
+  .rating-prompt { @apply font-serif text-[0.8rem] italic text-muted; }
+  .rating-actions { @apply flex min-h-10 items-center whitespace-nowrap; }
+  .rating button[data-label] { @apply relative h-8 text-xs duration-150; transition-property:transform, background-color, color, border-color; }
+  .rating button[data-label]::after { content:""; @apply absolute -inset-y-1.5 inset-x-0; }
+  .rating button[data-label]:active { transform:scale(0.96); }
+  .rating button[data-label]:focus-visible { @apply z-20 ring-offset-0; }
+  .rating button[data-label]:not(.clear) { @apply -ml-px rounded-none border-rule bg-transparent px-2 py-1 text-ink-2 first:ml-0 first:rounded-l-sm last:rounded-r-sm hover:z-10 hover:border-ink hover:bg-paper-2 hover:text-ink; }
+  .rating button.active[data-label="loved"] { @apply z-10 border-loved text-loved; background:color-mix(in oklab, var(--loved) 14%, transparent); }
+  .rating button.active[data-label="good"] { @apply z-10 border-good text-good; background:color-mix(in oklab, var(--good) 14%, transparent); }
+  .rating button.active[data-label="down"] { @apply z-10 border-down text-down; background:color-mix(in oklab, var(--down) 14%, transparent); }
+  .rating button.clear { @apply invisible ml-1.5 border-0 bg-transparent px-1 text-muted underline decoration-rule underline-offset-4 hover:text-ink; }
+  .rating:has(button[data-label]:not(.clear).active) button.clear, .rating button.clear.active { @apply visible; }
+  .rating button.clear.active { @apply no-underline; }
+  .rating-cleared-label { @apply hidden; }
+  .rating button.clear.active .rating-clear-label { @apply hidden; }
+  .rating button.clear.active .rating-cleared-label { @apply inline; }
+  .rating-note { @apply mt-2 flex w-full max-w-md basis-full items-center gap-2 text-[0.72rem] text-muted; }
+  .rating-note input { @apply min-w-0 flex-1 rounded-none border-x-0 border-t-0 border-b border-rule bg-transparent px-0 py-1 shadow-none focus:border-ink; }
 
   .flash { @apply my-4 border-l-4 border-accent bg-paper-2 px-4 py-3 font-sans text-sm; }
   .error { @apply border-l-4 border-down bg-paper-2 px-4 py-3 font-sans text-sm text-down; }
@@ -227,14 +245,19 @@
   tr.superseded > td { @apply text-muted; }
   tr.superseded a { @apply text-muted; }
 
-  /* the rating widget has to fit inside a table cell */
-  td .rating, .picks .rating { @apply my-1.5 max-w-[15rem] gap-y-1 text-xs; }
+  /* the rating widget has to fit inside a table cell or a dense list */
+  td .rating, .picks .rating { @apply my-0 max-w-none gap-y-1 text-xs; }
+  .picks .rating { @apply mt-2; }
   td .rating-prompt, .picks .rating-prompt { @apply hidden; }
-  td .rating button[data-label]:not(.clear), .picks .rating button[data-label]:not(.clear) { @apply min-h-8 px-2.5 py-1 text-xs; }
-  td .rating button.clear, .picks .rating button.clear { @apply ml-2 min-h-8 px-0 text-xs; }
-  td .rating-note { @apply mt-1 max-w-[15rem] gap-1.5 text-[0.7rem]; }
-  td .rating-note input { @apply px-1.5 py-0.5 text-xs; }
-  .picks .rating { @apply max-w-none; }
+  td .rating button[data-label]:not(.clear), .picks .rating button[data-label]:not(.clear) { @apply px-1.5 py-1 text-xs; }
+  td .rating button.clear, .picks .rating button.clear { @apply ml-1.5 px-0 text-xs; }
+  td .rating-note { @apply mt-0 max-w-none gap-1.5 text-[0.7rem]; }
+  td .rating-note-label { @apply sr-only; }
+  td .rating-note input { @apply text-xs; }
+  /* the ratings table's verdict cell: one column, buttons then note, nothing wraps */
+  .rating-cell .rating { @apply grid w-[15rem] grid-cols-1 gap-y-1.5; }
+  .rating-cell .rating-actions { @apply flex w-full min-h-0 items-center; }
+  .rating-cell .rating button.clear { @apply ml-auto; }
 
   pre.block, pre.preview, pre.journal { @apply overflow-auto whitespace-pre-wrap rounded-sm bg-paper-2 p-3 font-mono text-[0.8125rem] leading-relaxed; overflow-wrap:anywhere; }
   pre.block { @apply max-h-64; }
@@ -312,7 +335,9 @@
   }
   @media (max-width:40rem) {
     .kv { @apply block; } .kv dt { @apply mt-2; }
-    .rating { @apply items-stretch; } .rating-prompt, .rating-note { @apply basis-full; } .rating-prompt { @apply mb-2; }
+    .rating { @apply items-stretch; } .rating-prompt, .rating-note { @apply basis-full; } .rating-prompt { @apply mb-1; }
+    .rating-actions { @apply min-h-11; }
+    .rating button[data-label]::after { @apply -inset-y-2; }
     .filters label { @apply w-full; }
     .filters input, .filters select { @apply w-full; }
   }
