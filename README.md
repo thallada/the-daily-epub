@@ -135,7 +135,6 @@ daily-epub features prune       # stale embeddings, old telemetry and assessment
 daily-epub backfill-social [--days 7]   # re-poll social scores for recent articles
 daily-epub db migrate           # run migrations (also automatic on every start)
 daily-epub config check         # validate the config, print the resolved roles, keys and paths
-daily-epub cdn purge            # purge the CDN edge cache for the configured zone
 daily-epub users add USER [--admin] [--password-stdin]
 daily-epub users passwd USER [--password-stdin]
 daily-epub users role USER user|admin
@@ -370,10 +369,6 @@ prints what resolved.
 | `server.login_window_minutes` | `15` | Length of the login throttle window. |
 | `server.jobs_enabled` | `true` | Allow the dashboard to start the fixed systemd job catalogue. |
 | `server.journal_lines` | `300` | Journal lines shown on a dashboard job page (10–5000). |
-| `cdn.provider` | unset | `cloudflare`, or unset for no CDN integration. Setting it requires the zone id and the token. |
-| `cdn.cloudflare_zone_id` | unset | Zone id from the Cloudflare dashboard overview. |
-| `cdn.api_token` | — | **`DAILY_EPUB_CDN__API_TOKEN`**. Needs exactly one permission: `Zone → Cache Purge`, scoped to that zone. |
-| `cdn.purge_after_publish` | `true` | Purge the whole edge cache after `generate` publishes. A failure is logged, never fatal; dry runs never purge. |
 
 `[curation.ranking]` holds the ranker's tunables. The learned signals are
 gated: `knn` (rated-neighbour preference) ramps from `knn_floor` (8) to
@@ -591,7 +586,7 @@ respect it (runbook §2). The whole matrix:
 
 | route | `Cache-Control` |
 |---|---|
-| `/`, `/issues`, `/issues/{date}`, `/feed.xml`, `/issues.json` (anonymous) | `public, max-age=300, s-maxage=86400` |
+| `/`, `/issues`, `/issues/{date}`, `/feed.xml`, `/issues.json` (anonymous) | `public, max-age=300` |
 | the same pages with a `daily_session=` cookie | `private, no-store` |
 | `/robots.txt` | `public, max-age=86400` |
 | `/static/*?v=<hash>` | `public, max-age=31536000, immutable` |
@@ -599,13 +594,13 @@ respect it (runbook §2). The whole matrix:
 | `/files/epub/*`, `/files/xtc/*`, `/opds*` (every status) | `private, no-store` |
 | `/dashboard*`, `/login`, `/account`, errors, anything else | `no-store` |
 
-The five-minute browser age and the one-day edge age are the same header doing
-two jobs: a reader's tab revalidates soon after a new issue lands, while the
-edge is allowed to answer for a whole day because `generate` purges it the
-moment it publishes (`[cdn]`, `daily-epub cdn purge`). The `no-store` on the
-last row is a default applied by the `security_headers` middleware to any
-response that set no policy of its own, so a route added later cannot silently
-inherit the CDN's default TTL.
+Five minutes is the whole freshness story: an issue changes once a day, a
+reader's tab or a CDN edge revalidates within five minutes of the new one
+landing, and signed-in requests never touch a shared cache at all. A longer
+edge age with an API purge after each publish was considered and dropped as
+not worth its moving parts. The `no-store` on the last row is a default applied
+by the `security_headers` middleware to any response that set no policy of its
+own, so a route added later cannot silently inherit the CDN's default TTL.
 
 ### Installing the XTC converter
 

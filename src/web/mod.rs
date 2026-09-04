@@ -771,7 +771,7 @@ mod tests {
         assert!(anonymous.headers().get(header::SET_COOKIE).is_none());
         assert_eq!(
             anonymous.headers().get(header::CACHE_CONTROL).unwrap(),
-            "public, max-age=300, s-maxage=86400"
+            "public, max-age=300"
         );
         assert_eq!(
             anonymous.headers().get("speculation-rules").unwrap(),

@@ -1671,7 +1671,7 @@ mod tests {
         assert_eq!(issue.status(), StatusCode::OK);
         assert_eq!(
             issue.headers().get(header::CACHE_CONTROL).unwrap(),
-            "public, max-age=300, s-maxage=86400"
+            "public, max-age=300"
         );
         let html = String::from_utf8(
             to_bytes(issue.into_body(), 1024 * 1024)
@@ -1705,7 +1705,7 @@ mod tests {
         assert_eq!(archive.status(), StatusCode::OK);
         assert_eq!(
             archive.headers().get(header::CACHE_CONTROL).unwrap(),
-            "public, max-age=300, s-maxage=86400"
+            "public, max-age=300"
         );
 
         let feed = app
@@ -1724,7 +1724,7 @@ mod tests {
         );
         assert_eq!(
             feed.headers().get(header::CACHE_CONTROL).unwrap(),
-            "public, max-age=300, s-maxage=86400"
+            "public, max-age=300"
         );
         let feed = String::from_utf8(
             to_bytes(feed.into_body(), 1024 * 1024)
@@ -1777,7 +1777,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             reports.headers().get(header::CACHE_CONTROL).unwrap(),
-            "public, max-age=300, s-maxage=86400"
+            "public, max-age=300"
         );
         let reports =
             String::from_utf8(to_bytes(reports.into_body(), 4096).await.unwrap().to_vec()).unwrap();

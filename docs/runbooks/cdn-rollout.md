@@ -1,9 +1,9 @@
 # Runbook — putting daily.hallada.net behind Cloudflare
 
-**Written:** 2026-09-04 for the production host. Steps 1–2 happen in the Cloudflare
-and registrar dashboards; steps 3–6 are on the server as an operator with `sudo`.
-The origin-side changes (the `Cache-Control` matrix and `daily-epub cdn purge`)
-ship in the same release, so deploy the new binary before step 5.
+**Written:** 2026-09-04 for the production host. Steps 1–3 happen in the Cloudflare
+and registrar dashboards; steps 4–5 are on the server as an operator with `sudo`.
+The origin-side changes (the `Cache-Control` matrix below) ship in the same
+release; deploy the new binary before enabling the proxy.
 
 Read the whole thing before starting step 1: a nameserver change is the one step
 that cannot be undone in seconds.
@@ -14,7 +14,7 @@ The app decides what is cacheable; Cloudflare is configured only to obey it.
 
 | route | `Cache-Control` |
 |---|---|
-| `/`, `/issues`, `/issues/{date}`, `/feed.xml`, `/issues.json` (anonymous) | `public, max-age=300, s-maxage=86400` |
+| `/`, `/issues`, `/issues/{date}`, `/feed.xml`, `/issues.json` (anonymous) | `public, max-age=300` |
 | the same pages with a `daily_session=` cookie | `private, no-store` |
 | `/robots.txt` | `public, max-age=86400` |
 | `/static/*?v=<hash>` | `public, max-age=31536000, immutable` |
@@ -24,10 +24,12 @@ The app decides what is cacheable; Cloudflare is configured only to obey it.
 
 Two facts follow from that table and matter for every choice below:
 
-- The edge is allowed to hold a public page for a **day** (`s-maxage=86400`).
-  That is only correct because `generate` purges the whole zone right after it
-  publishes. If the purge is broken, the site serves yesterday's paper until the
-  day elapses. Step 5 is not optional.
+- A public page is fresh for **five minutes** everywhere: browser and edge alike
+  revalidate within five minutes of a new issue landing, and nothing has to tell
+  the edge that the day changed. (A one-day edge age with an API purge after
+  every publish was tried and dropped: at this traffic an edge rarely keeps a
+  page long enough for the longer age to matter, and the purge was one more
+  token, config section and failure mode.)
 - Anything gated by a cookie or Basic auth already says `private, no-store`, so
   even a misconfigured cache-everything rule cannot make a download public. The
   cookie bypass rule in step 3 is defence in depth, not the only defence.
@@ -61,7 +63,13 @@ host. Everything else in the zone must survive the move unchanged.
 
 4. Change the nameservers at the registrar to the two Cloudflare assigns.
    Propagation is usually minutes and can be hours. Cloudflare emails when the
-   zone goes active.
+   zone goes active. **Keep `daily` DNS-only until the zone is Active *and*
+   SSL/TLS → Edge Certificates shows the Universal certificate as Active.** A
+   proxied host with no edge certificate yet fails every TLS handshake
+   (`SSL alert number 40`) while plain HTTP still redirects, which is exactly
+   what happened on the first attempt: readers whose resolvers had picked up
+   the new nameservers got a broken site. Set Full (strict) (step 2) before
+   flipping the record to Proxied.
 
 5. Before the switch, drop the TTL on the `daily` record (60 s) so a rollback is
    quick. Verify afterwards:
@@ -84,7 +92,7 @@ Under the zone's **SSL/TLS**, **Speed** and **Scrape Shield** sections:
   This one is easy to miss and quietly wrong: the default (**4 hours**) *raises*
   the `max-age` Cloudflare sends to browsers, so the deliberate 5-minute browser
   age on the public pages would become 4 hours and a reader's tab would show a
-  stale paper long after a purge.
+  stale paper for most of a morning.
 - **Speed → Optimization → Rocket Loader: OFF.**
 - **Scrape Shield → Email Address Obfuscation: OFF.**
   Both inject a Cloudflare-hosted script into the HTML. The site's CSP is
@@ -111,7 +119,13 @@ The origin already sends `private, no-store` to a cookie-bearing request, but
 this makes the bypass a property of the request rather than of the response, so
 nothing is ever *looked up* in a shared cache for a signed-in reader.
 
-**Rule 2 — "Cache by origin headers"**
+**Rule 2 — "Cache by origin headers"** *(optional)*
+
+Without this rule Cloudflare caches only its default static extensions (the
+CSS, JS, fonts and SVG here) and passes HTML straight through, which already
+captures most of the benefit: TLS terminates at the edge and the origin is
+reached over a warm connection. Add the rule if you want the HTML itself
+served from the edge; it is only safe together with rule 1.
 
 - When incoming requests match: `http.host eq "daily.hallada.net"`
 - Then: **Eligible for cache**
@@ -119,7 +133,7 @@ nothing is ever *looked up* in a shared cache for a signed-in reader.
 - **Browser TTL:** *Respect origin*
 
 That Edge TTL mode is the whole point of the origin work: a response with
-`s-maxage` is cached for exactly that long, and a response with `no-store` (or
+`max-age` is cached for exactly that long, and a response with `no-store` (or
 one that somehow arrives with no policy at all) is not cached. It is the reason
 the `security_headers` middleware defaults unknown routes to `no-store` — with
 this mode, "no header" means "do not cache" rather than "cache for 2 hours".
@@ -166,60 +180,11 @@ Check a login attempt from a phone on cellular and one from the LAN land in
 different throttle buckets, and that `journalctl -u daily-epub` shows real client
 addresses rather than Cloudflare's.
 
-## 5. Configure the purge
+## 5. Verify
 
-Create the API token in the Cloudflare dashboard: **My Profile → API Tokens →
-Create Token → Custom token**, with the single permission **Zone → Cache Purge →
-Purge**, **Zone Resources → Include → Specific zone → hallada.net**. Nothing
-else — the app makes exactly one API call. Copy the token once; it is not shown
-again. The zone id is on the zone's **Overview** page.
-
-In `/etc/daily-epub/config.toml`:
-
-```toml
-[cdn]
-provider = "cloudflare"
-cloudflare_zone_id = "…"
-purge_after_publish = true
-```
-
-and in the systemd environment file (the one the units already load, mode `0600`,
-owned by `daily-epub`):
-
-```
-DAILY_EPUB_CDN__API_TOKEN=…
-```
-
-Setting `provider` without both the zone id and the token is a **config error**:
-the app refuses to start rather than publishing into a stale edge. Confirm and
-then purge by hand:
-
-```sh
-sudo systemctl restart daily-epub
-sudo -u daily-epub daily-epub --config /etc/daily-epub/config.toml config check | grep '^cdn'
-# cdn: cloudflare · zone … · token present · purge_after_publish true
-sudo -u daily-epub daily-epub --config /etc/daily-epub/config.toml cdn purge
-# purged the whole cloudflare cache (id …)
-```
-
-`cdn purge` takes no run lock and touches neither the database nor the publish
-directories, so it is safe to run at any time, including during a `generate`.
-
-From then on `generate` purges the whole zone after every successful publish. The
-purge is *purge everything* on purpose: a new issue also changes the previous
-issue's page (its "latest" nav marker moves), `/issues`, `/feed.xml` and
-`/issues.json`, and a per-URL list of that set would rot. A purge failure is
-logged at `warn` and never fails the run — so check for it after the first live
-run:
-
-```sh
-journalctl -u daily-epub-generate.service --since today | grep -i 'purge'
-```
-
-## 6. Verify
-
-Anonymous public page — expect `HIT` on the second request (the first fills the
-edge) and the origin's own two-part `Cache-Control`:
+Anonymous public page — with rule 2, expect `HIT` on the second request (the
+first fills the edge); without it, `DYNAMIC`. Either way the origin's own
+`Cache-Control` must come through unchanged:
 
 ```sh
 curl -sI https://daily.hallada.net/ | grep -iE 'cf-cache-status|cache-control|age'
@@ -261,10 +226,9 @@ curl -sI https://daily.hallada.net/login | grep -iE 'cf-cache-status|cache-contr
 # cache-control: no-store
 ```
 
-Finally, the end-to-end check the whole exercise is about: run a `generate`, then
-immediately `curl -sI https://daily.hallada.net/ | grep -i cf-cache-status` and
-confirm it reads `MISS` (the purge emptied the edge) and that the page shows the
-new issue.
+Finally, the morning after: within five minutes of the `generate` timer firing,
+`curl -s https://daily.hallada.net/ | grep -o 'issues/[0-9-]*' | head -1` shows
+the new date from a network that is not signed in.
 
 ## Rollback
 
@@ -274,8 +238,7 @@ new issue.
 - **Something worse:** set the `daily` DNS record back to **DNS only** (grey
   cloud). Traffic goes straight to the origin again within the record's TTL, and
   nothing about the origin's behaviour depends on Cloudflare being there — the
-  `Cache-Control` headers are correct without it, and `cdn.provider` can be
-  removed from the config at leisure.
+  `Cache-Control` headers are correct without it.
 - **Full retreat:** point the registrar's nameservers back at Route 53. The
   hosted zone still exists unless it was deleted; do not delete it until the
   Cloudflare setup has run for a few weeks.

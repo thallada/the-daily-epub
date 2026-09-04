@@ -304,7 +304,7 @@ async fn handle_issues_json(State(state): State<AppState>) -> Response {
         })
         .collect();
     match serde_json::to_string_pretty(&issues) {
-        // Only publishing changes this, and publishing purges the edge (§3.12).
+        // Only publishing changes this; five minutes of staleness is fine (§3.12).
         Ok(body) => (
             StatusCode::OK,
             [

@@ -360,14 +360,14 @@ pub async fn robots() -> Response {
 
 /// `Cache-Control` for an anonymous public page (§3.12).
 ///
-/// The two ages are aimed at two different caches. `max-age=300` is the
-/// browser's: a reader who leaves a tab open revalidates within five minutes of
-/// a new issue landing. `s-maxage=86400` is the CDN's: an issue changes once a
-/// day, so the edge should be allowed to answer for a day rather than asking
-/// the origin every five minutes. That long edge life is only safe because
-/// [`crate::cdn::purge_all`] runs right after a publish; without the purge the
-/// edge would keep yesterday's paper for its whole day.
-pub const PUBLIC_CACHE: &str = "public, max-age=300, s-maxage=86400";
+/// Five minutes, for browsers and shared caches alike. An issue changes once a
+/// day, so the only staleness this allows is the few minutes after a publish,
+/// and the operator never sees even that: signed-in requests get
+/// [`PRIVATE_CACHE`]. A longer shared-cache age was tried and rejected: it
+/// needs a purge call after every publish to stay correct, and at this site's
+/// traffic an edge rarely keeps a page long enough for the extra age to pay
+/// for that machinery.
+pub const PUBLIC_CACHE: &str = "public, max-age=300";
 
 /// `Cache-Control` for anything a signed-in reader sees, and for every
 /// authenticated download. `private` keeps it out of shared caches even if a
