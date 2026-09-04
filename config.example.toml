@@ -220,3 +220,19 @@ journal_lines = 300                  # job-page journal tail; valid range 10..=5
 # routes remain public. A signed-in web user can download without Basic auth.
 # basic_auth_user = "daily"
 # basic_auth_pass = "..."
+
+# [cdn]
+# The CDN in front of the origin. Leave the whole table out (the default) and
+# nothing here applies: no purge is attempted and no token is needed.
+#
+# provider = "cloudflare"            # the only recognised value today
+# cloudflare_zone_id = "..."         # zone id from the Cloudflare dashboard overview
+# purge_after_publish = true         # purge the edge after `generate` publishes (dry runs never do)
+#
+# api_token via DAILY_EPUB_CDN__API_TOKEN env; never put it in this file.
+# The token needs exactly one permission — Zone -> Cache Purge — scoped to this
+# one zone. Nothing else is called, so nothing else should be granted.
+#
+# Setting `provider` without both the zone id and the token is a config error.
+# See docs/runbooks/cdn-rollout.md for the zone settings and cache rules that
+# make the origin's Cache-Control headers actually apply at the edge.
