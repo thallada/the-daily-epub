@@ -111,27 +111,51 @@ document.querySelectorAll("[data-refresh]").forEach((element) => {
   const seconds = Number(element.dataset.refresh);
   if (seconds > 0) setTimeout(() => window.location.reload(), seconds * 1000);
 });
-/* step 4: table-of-contents panel (below `lg`) and reading-progress bar */
+/* step 4: table-of-contents panel, current chapter, and reading progress */
 const tocPanel = document.querySelector("[data-toc-panel]");
 const tocToggle = document.querySelector("[data-toc-toggle]");
 if (tocPanel) {
+  const tocBar = document.querySelector("[data-toc-bar]");
+  const tocLinks = Array.from(tocPanel.querySelectorAll(".toc-link"));
+  const tocBars = document.querySelectorAll("[data-toc-progress]");
+  const tocLabel = document.querySelector("[data-toc-label]");
+  const tocCount = document.querySelector("[data-toc-count]");
+  const tocStatus = document.querySelector("[data-toc-status]");
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const largeScreen = window.matchMedia("(min-width: 64rem)");
+
   // Long issues overflow the sidebar; scroll just enough to show where we are.
   const revealCurrent = () => {
-    const current = tocPanel.querySelector("a[aria-current=page]");
+    const current = tocPanel.querySelector(".toc-link[aria-current]");
     if (!current || tocPanel.scrollHeight <= tocPanel.clientHeight) return;
-    const margin = 24;
-    const top = current.offsetTop - margin;
-    const bottom = current.offsetTop + current.offsetHeight + margin;
-    if (bottom > tocPanel.scrollTop + tocPanel.clientHeight) {
-      tocPanel.scrollTop = bottom - tocPanel.clientHeight;
-    } else if (top < tocPanel.scrollTop) {
-      tocPanel.scrollTop = Math.max(0, top);
-    }
+    const stickyHeader = tocPanel.querySelector(":scope > div");
+    const topMargin = (stickyHeader && stickyHeader.offsetHeight > 0 ? stickyHeader.offsetHeight : 0) + 24;
+    const panelRect = tocPanel.getBoundingClientRect();
+    const currentRect = current.getBoundingClientRect();
+    const top = tocPanel.scrollTop + currentRect.top - panelRect.top;
+    const visibleTop = tocPanel.scrollTop + topMargin;
+    const visibleBottom = tocPanel.scrollTop + tocPanel.clientHeight - 24;
+    if (top >= visibleTop && top + currentRect.height <= visibleBottom) return;
+    const target = Math.max(0, top - Math.max(topMargin, (tocPanel.clientHeight - currentRect.height) / 2));
+    tocPanel.scrollTo({ top: target, behavior: reducedMotion.matches ? "auto" : "smooth" });
+  };
+  const sizeOpenPanel = () => {
+    if (tocPanel.dataset.open !== "true" || largeScreen.matches || !tocBar) return;
+    tocPanel.style.setProperty("--toc-panel-top", `${Math.max(0, tocBar.getBoundingClientRect().bottom)}px`);
   };
   const setOpen = (open) => {
     tocPanel.dataset.open = open ? "true" : "false";
-    if (tocToggle) tocToggle.setAttribute("aria-expanded", open ? "true" : "false");
-    if (open) revealCurrent();
+    document.documentElement.classList.toggle("toc-panel-open", open && !largeScreen.matches);
+    if (tocToggle) {
+      tocToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      tocToggle.setAttribute("aria-label", open ? "Close contents" : "Contents");
+    }
+    if (open) {
+      sizeOpenPanel();
+      revealCurrent();
+    } else {
+      tocPanel.style.removeProperty("--toc-panel-top");
+    }
   };
   setOpen(false);
   revealCurrent();
@@ -147,33 +171,93 @@ if (tocPanel) {
       setOpen(false);
       tocToggle.focus();
     });
-    window.matchMedia("(min-width: 64rem)").addEventListener("change", () => setOpen(false));
+    largeScreen.addEventListener("change", () => setOpen(false));
+    window.addEventListener("resize", sizeOpenPanel);
+    if (window.visualViewport) window.visualViewport.addEventListener("resize", sizeOpenPanel);
   }
-}
-const tocBars = document.querySelectorAll("[data-toc-progress]");
-const tocChapter = document.querySelector("[data-toc-scroll]");
-if (tocBars.length && tocChapter) {
-  // "Chapter N" is worth position N once finished; show N-1 plus how far down we are.
-  const base = Math.max(0, Number(tocBars[0].getAttribute("value")) - 1);
-  let queued = false;
-  const paint = () => {
-    queued = false;
-    const start = window.scrollY + tocChapter.getBoundingClientRect().top;
-    const end = start + tocChapter.offsetHeight - window.innerHeight;
-    const read = end > start ? (window.scrollY - start) / (end - start) : 1;
-    const value = base + Math.min(1, Math.max(0, read));
-    tocBars.forEach((bar) => {
-      // The CSS transition is for navigation, not for tracking a finger.
-      bar.dataset.live = "true";
-      bar.value = value;
+
+  let currentLink = tocPanel.querySelector(".toc-link[aria-current]");
+  // Chapters above the current one read as "already passed" in ink rather than ink-2.
+  const markPassed = (link) => {
+    let passed = true;
+    tocLinks.forEach((candidate) => {
+      if (candidate === link) passed = false;
+      candidate.toggleAttribute("data-passed", passed);
     });
   };
-  const schedule = () => {
-    if (queued) return;
-    queued = true;
-    window.requestAnimationFrame(paint);
+  if (currentLink) markPassed(currentLink);
+  const setCurrent = (link) => {
+    if (!link || (link === currentLink && link.getAttribute("aria-current") === "location")) return;
+    tocLinks.forEach((candidate) => candidate.removeAttribute("aria-current"));
+    markPassed(link);
+    link.setAttribute("aria-current", "location");
+    currentLink = link;
+    const position = Math.max(0, Number(link.dataset.tocPosition));
+    const total = tocBars.length ? Number(tocBars[0].max) : 0;
+    const isEnd = link.hasAttribute("data-toc-end");
+    const label = link.querySelector("[data-toc-link-label]");
+    if (tocLabel && label) tocLabel.textContent = label.textContent;
+    if (tocCount) {
+      tocCount.hidden = position === 0 || isEnd;
+      tocCount.textContent = `${position} / ${total}`;
+    }
+    if (tocStatus) tocStatus.textContent = isEnd ? "End of issue" : position > 0 ? `Chapter ${position} of ${total}` : "Front page";
+    tocBars.forEach((bar) => {
+      delete bar.dataset.live;
+      bar.value = position;
+    });
+    revealCurrent();
   };
-  window.addEventListener("scroll", schedule, { passive: true });
-  window.addEventListener("resize", schedule);
-  schedule();
+
+  const tocEntries = Array.from(document.querySelectorAll("[data-toc-entry]")).map((entry) => ({
+    entry,
+    link: tocLinks.find((candidate) => candidate.getAttribute("href") === entry.dataset.tocEntry),
+  })).filter(({ link }) => link);
+  if (tocEntries.length) {
+    let queued = false;
+    const paintCurrent = () => {
+      queued = false;
+      const threshold = (tocBar ? tocBar.offsetHeight : 0) + window.innerHeight / 3;
+      let next = tocEntries[0].link;
+      tocEntries.forEach(({ entry, link }) => {
+        if (entry.getBoundingClientRect().top <= threshold) next = link;
+      });
+      setCurrent(next);
+    };
+    const scheduleCurrent = () => {
+      if (queued) return;
+      queued = true;
+      window.requestAnimationFrame(paintCurrent);
+    };
+    window.addEventListener("scroll", scheduleCurrent, { passive: true });
+    window.addEventListener("resize", scheduleCurrent);
+    scheduleCurrent();
+  }
+
+  const tocChapter = document.querySelector("[data-toc-scroll]");
+  if (tocBars.length && tocChapter) {
+    // "Chapter N" is worth position N once finished; show N-1 plus how far down we are.
+    const base = Math.max(0, Number(tocBars[0].getAttribute("value")) - 1);
+    let queued = false;
+    const paint = () => {
+      queued = false;
+      const start = window.scrollY + tocChapter.getBoundingClientRect().top;
+      const end = start + tocChapter.offsetHeight - window.innerHeight;
+      const read = end > start ? (window.scrollY - start) / (end - start) : 1;
+      const value = base + Math.min(1, Math.max(0, read));
+      tocBars.forEach((bar) => {
+        // The CSS transition is for navigation, not for tracking a finger.
+        bar.dataset.live = "true";
+        bar.value = value;
+      });
+    };
+    const schedule = () => {
+      if (queued) return;
+      queued = true;
+      window.requestAnimationFrame(paint);
+    };
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    schedule();
+  }
 }
