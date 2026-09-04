@@ -157,15 +157,16 @@
   .prose-body li + li { @apply mt-2; }
 
   .reader-page :where(h1, h2, h3, h4), .reader-section-heading { text-wrap:balance; }
-  .reader-section-heading { @apply border-t-2 border-rule-strong pt-3 font-serif text-xl font-semibold leading-[1.1] tracking-[-0.01em] text-ink; }
+  .reader-section-heading { @apply border-t-[3px] border-double border-rule-strong pt-3 font-serif text-[1.05rem] font-semibold uppercase leading-[1.2] tracking-[0.15em] text-ink; }
 
   .rating { @apply my-5 flex flex-wrap items-center gap-x-3 font-sans text-xs; }
   .rating-prompt { @apply font-serif text-[0.8rem] italic text-muted; }
   .rating-actions { @apply flex min-h-10 items-center whitespace-nowrap; }
   .rating button[data-label] { @apply relative h-8 text-xs duration-150; transition-property:transform, background-color, color, border-color; }
-  .rating button[data-label]::after { content:""; @apply absolute -inset-y-1 inset-x-0; }
+  .rating button[data-label]::after { content:""; @apply absolute -inset-y-1.5 inset-x-0; }
   .rating button[data-label]:active { transform:scale(0.96); }
-  .rating button[data-label]:not(.clear) { @apply -ml-px rounded-none border-rule bg-transparent px-2 py-1 text-ink first:ml-0 first:rounded-l-sm last:rounded-r-sm hover:z-10 hover:border-ink hover:bg-paper-2; }
+  .rating button[data-label]:focus-visible { @apply z-20 ring-offset-0; }
+  .rating button[data-label]:not(.clear) { @apply -ml-px rounded-none border-rule bg-transparent px-2 py-1 text-ink-2 first:ml-0 first:rounded-l-sm last:rounded-r-sm hover:z-10 hover:border-ink hover:bg-paper-2 hover:text-ink; }
   .rating button.active[data-label="loved"] { @apply z-10 border-loved text-loved; background:color-mix(in oklab, var(--loved) 14%, transparent); }
   .rating button.active[data-label="good"] { @apply z-10 border-good text-good; background:color-mix(in oklab, var(--good) 14%, transparent); }
   .rating button.active[data-label="down"] { @apply z-10 border-down text-down; background:color-mix(in oklab, var(--down) 14%, transparent); }
@@ -176,7 +177,7 @@
   .rating button.clear.active .rating-clear-label { @apply hidden; }
   .rating button.clear.active .rating-cleared-label { @apply inline; }
   .rating-note { @apply mt-2 flex w-full max-w-md basis-full items-center gap-2 text-[0.72rem] text-muted; }
-  .rating-note input { @apply min-w-0 flex-1; }
+  .rating-note input { @apply min-w-0 flex-1 rounded-none border-x-0 border-t-0 border-b border-rule bg-transparent px-0 py-1 shadow-none focus:border-ink; }
 
   .flash { @apply my-4 border-l-4 border-accent bg-paper-2 px-4 py-3 font-sans text-sm; }
   .error { @apply border-l-4 border-down bg-paper-2 px-4 py-3 font-sans text-sm text-down; }
@@ -244,16 +245,19 @@
   tr.superseded > td { @apply text-muted; }
   tr.superseded a { @apply text-muted; }
 
-  /* the rating widget has to fit inside a table cell */
-  td .rating, .picks .rating { @apply my-0 max-w-[15rem] gap-y-0 text-xs; }
+  /* the rating widget has to fit inside a table cell or a dense list */
+  td .rating, .picks .rating { @apply my-0 max-w-none gap-y-1 text-xs; }
+  .picks .rating { @apply mt-2; }
   td .rating-prompt, .picks .rating-prompt { @apply hidden; }
-  td .rating button[data-label]:not(.clear), .picks .rating button[data-label]:not(.clear) { @apply px-2 py-1 text-xs; }
+  td .rating button[data-label]:not(.clear), .picks .rating button[data-label]:not(.clear) { @apply px-1.5 py-1 text-xs; }
   td .rating button.clear, .picks .rating button.clear { @apply ml-1.5 px-0 text-xs; }
-  td .rating-note { @apply mt-1 max-w-[13rem] gap-0 text-[0.7rem]; }
+  td .rating-note { @apply mt-0 max-w-none gap-1.5 text-[0.7rem]; }
   td .rating-note-label { @apply sr-only; }
-  td .rating-note input { @apply rounded-none border-x-0 border-t-0 border-b border-transparent bg-transparent px-0 py-1 text-xs shadow-none focus:border-ink focus:ring-0; }
-  .rating-cell .rating { @apply w-[13rem]; }
-  .picks .rating { @apply max-w-none; }
+  td .rating-note input { @apply text-xs; }
+  /* the ratings table's verdict cell: one column, buttons then note, nothing wraps */
+  .rating-cell .rating { @apply grid w-[15rem] grid-cols-1 gap-y-1.5; }
+  .rating-cell .rating-actions { @apply flex w-full min-h-0 items-center; }
+  .rating-cell .rating button.clear { @apply ml-auto; }
 
   pre.block, pre.preview, pre.journal { @apply overflow-auto whitespace-pre-wrap rounded-sm bg-paper-2 p-3 font-mono text-[0.8125rem] leading-relaxed; overflow-wrap:anywhere; }
   pre.block { @apply max-h-64; }
@@ -333,7 +337,7 @@
     .kv { @apply block; } .kv dt { @apply mt-2; }
     .rating { @apply items-stretch; } .rating-prompt, .rating-note { @apply basis-full; } .rating-prompt { @apply mb-1; }
     .rating-actions { @apply min-h-11; }
-    .rating button[data-label]::after { @apply -inset-y-1.5; }
+    .rating button[data-label]::after { @apply -inset-y-2; }
     .filters label { @apply w-full; }
     .filters input, .filters select { @apply w-full; }
   }
