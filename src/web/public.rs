@@ -339,7 +339,7 @@ pub async fn feed(State(state): State<AppState>) -> Result<Response, WebError> {
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "application/atom+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=300"),
+            (header::CACHE_CONTROL, PUBLIC_CACHE),
         ],
         body,
     )
@@ -349,11 +349,30 @@ pub async fn feed(State(state): State<AppState>) -> Result<Response, WebError> {
 pub async fn robots() -> Response {
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
         "User-agent: *\nAllow: /\nAllow: /issues\nDisallow: /dashboard\nDisallow: /login\nDisallow: /files\nDisallow: /r\nDisallow: /opds\n",
     )
         .into_response()
 }
+
+/// `Cache-Control` for an anonymous public page (§3.12).
+///
+/// The two ages are aimed at two different caches. `max-age=300` is the
+/// browser's: a reader who leaves a tab open revalidates within five minutes of
+/// a new issue landing. `s-maxage=86400` is the CDN's: an issue changes once a
+/// day, so the edge should be allowed to answer for a day rather than asking
+/// the origin every five minutes. That long edge life is only safe because
+/// [`crate::cdn::purge_all`] runs right after a publish; without the purge the
+/// edge would keep yesterday's paper for its whole day.
+pub const PUBLIC_CACHE: &str = "public, max-age=300, s-maxage=86400";
+
+/// `Cache-Control` for anything a signed-in reader sees, and for every
+/// authenticated download. `private` keeps it out of shared caches even if a
+/// CDN cache rule is misconfigured; `no-store` keeps it off disk.
+pub const PRIVATE_CACHE: &str = "private, no-store";
 
 fn public_cache(mut response: Response, request_headers: &HeaderMap) -> Response {
     let value = if request_headers
@@ -361,9 +380,9 @@ fn public_cache(mut response: Response, request_headers: &HeaderMap) -> Response
         .and_then(|value| value.to_str().ok())
         .is_some_and(|cookies| cookies.contains("daily_session="))
     {
-        "private, no-store"
+        PRIVATE_CACHE
     } else {
-        "public, max-age=300"
+        PUBLIC_CACHE
     };
     response.headers_mut().insert(
         header::CACHE_CONTROL,

@@ -214,13 +214,13 @@ pub struct Page {
     pub flash: Option<Flash>,
     pub active_nav: String,
     pub version: &'static str,
-    /// Cache-busting token for `/static/*.css|js` URLs: a content hash, so
-    /// any stylesheet or script change reaches browsers that cached the
-    /// previous build (they are served with an immutable one-year `max-age`).
+    /// Cache-busting token for every `/static/*` URL the site references: a
+    /// content hash, so any asset change reaches browsers and edge caches that
+    /// hold the previous build (a `?v=`-carrying `/static/*` URL is served with
+    /// an immutable one-year `max-age`).
     pub asset_version: &'static str,
 }
 
-/// First 12 hex digits of the SHA-256 over the embedded CSS and JS assets.
 const NEWSREADER: &[u8] = include_bytes!("static/fonts/Newsreader.woff2");
 const NEWSREADER_ITALIC: &[u8] = include_bytes!("static/fonts/Newsreader-italic.woff2");
 
@@ -235,12 +235,12 @@ const NEWSREADER_ITALIC: &[u8] = include_bytes!("static/fonts/Newsreader-italic.
 /// ~305 KB and pushed first paint out by more than a second on mobile.
 ///
 /// So the URLs stay URLs, carrying `?v=<ASSET_VERSION>` so the immutable
-/// one-year `max-age` on `/static/*` is safe across deploys. The fonts are part
-/// of the `ASSET_VERSION` hash, so a new face mints a new URL. Neither face is
-/// preloaded — that only takes bandwidth from this sheet, which is what first
-/// paint actually waits on. Instead both use `font-display: swap` behind
-/// metric-matched local fallbacks, so first paint is immediate and the swap
-/// shifts nothing.
+/// one-year `max-age` on a versioned `/static/*` URL is safe across deploys.
+/// The fonts are part of the `ASSET_VERSION` hash, so a new face mints a new
+/// URL. Neither face is preloaded — that only takes bandwidth from this sheet,
+/// which is what first paint actually waits on. Instead both use
+/// `font-display: swap` behind metric-matched local fallbacks, so first paint
+/// is immediate and the swap shifts nothing.
 pub static APP_CSS: LazyLock<String> = LazyLock::new(|| {
     let version = ASSET_VERSION.as_str();
     include_str!("static/app.css")
@@ -254,6 +254,14 @@ pub static APP_CSS: LazyLock<String> = LazyLock::new(|| {
         )
 });
 
+/// First 12 hex digits of the SHA-256 over *every* embedded static asset.
+///
+/// Every file listed here must also be referenced with `?v={ASSET_VERSION}`,
+/// and every file referenced with `?v=` must be hashed here — the two halves
+/// are what make the immutable one-year `max-age` safe. The favicon and the
+/// speculation rules are in the hash for exactly that reason: they used to be
+/// referenced by bare URL while still being served `immutable`, so editing
+/// either one could never have reached a browser (or the CDN) again.
 pub static ASSET_VERSION: LazyLock<String> = LazyLock::new(|| {
     let mut hasher = Sha256::new();
     hasher.update(include_str!("static/app.css"));
@@ -261,7 +269,21 @@ pub static ASSET_VERSION: LazyLock<String> = LazyLock::new(|| {
     hasher.update(NEWSREADER_ITALIC);
     hasher.update(include_str!("static/app.js"));
     hasher.update(include_str!("static/theme.js"));
+    hasher.update(include_str!("static/favicon.svg"));
+    hasher.update(include_str!("static/speculation.json"));
     hex::encode(hasher.finalize())[..12].to_string()
+});
+
+/// The `Speculation-Rules` header value: a versioned URL, so a change to
+/// `speculation.json` is picked up rather than pinned behind the immutable
+/// one-year `max-age` on `/static/*`. Built once, like [`APP_CSS`], because it
+/// interpolates [`ASSET_VERSION`] and so cannot be a `from_static`.
+static SPECULATION_RULES: LazyLock<HeaderValue> = LazyLock::new(|| {
+    HeaderValue::from_str(&format!(
+        "\"/static/speculation.json?v={}\"",
+        ASSET_VERSION.as_str()
+    ))
+    .expect("the asset version is hex, so the header value is valid")
 });
 
 impl Page {
@@ -478,6 +500,15 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     if path.starts_with("/dashboard") {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
+    // Fail closed. A response that names no policy of its own — `/login`,
+    // `/account`, a redirect, an error page, or whatever route is added next —
+    // is uncacheable, because a CDN with a cache-everything rule would
+    // otherwise apply its own default TTL (Cloudflare: two hours on a 200) to
+    // a page that may well be personalised. Handlers that mean to be cached
+    // say so explicitly, and this never overrides them (§3.12).
+    if !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -486,7 +517,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         headers.append(header::VARY, HeaderValue::from_static("Cookie"));
         headers.insert(
             header::HeaderName::from_static("speculation-rules"),
-            HeaderValue::from_static("\"/static/speculation.json\""),
+            SPECULATION_RULES.clone(),
         );
     }
     response
@@ -585,8 +616,24 @@ async fn map_forbidden(request: Request, next: Next) -> Response {
     }
 }
 
+/// The `?v=` cache-buster on a `/static/*` URL, when the reference carries one.
+#[derive(Debug, Deserialize)]
+struct AssetQuery {
+    #[serde(default)]
+    v: Option<String>,
+}
+
+/// A versioned URL names one immutable build, so it may be held for a year.
+const VERSIONED_CACHE: &str = "public, max-age=31536000, immutable";
+
+/// A bare `/static/…` URL is not a promise about its content, so it gets an
+/// hour and revalidates against the ETag. Someone else's link or an old
+/// bookmark must not pin a stale asset for a year.
+const UNVERSIONED_CACHE: &str = "public, max-age=3600";
+
 async fn static_asset(
     axum::extract::Path(file): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<AssetQuery>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     let asset: (&str, &'static [u8]) = match file.as_str() {
@@ -611,6 +658,11 @@ async fn static_asset(
         "Newsreader-italic.woff2" => ("font/woff2", NEWSREADER_ITALIC),
         _ => return WebError::NotFound.into_response(),
     };
+    let cache_control = if query.v.is_some() {
+        VERSIONED_CACHE
+    } else {
+        UNVERSIONED_CACHE
+    };
     let etag = format!("\"{}\"", hex::encode(Sha256::digest(asset.1)));
     if headers
         .get(header::IF_NONE_MATCH)
@@ -621,10 +673,7 @@ async fn static_asset(
             StatusCode::NOT_MODIFIED,
             [
                 (header::ETAG, etag),
-                (
-                    header::CACHE_CONTROL,
-                    "public, max-age=31536000, immutable".into(),
-                ),
+                (header::CACHE_CONTROL, cache_control.to_string()),
             ],
         )
             .into_response();
@@ -633,10 +682,7 @@ async fn static_asset(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, asset.0.to_string()),
-            (
-                header::CACHE_CONTROL,
-                "public, max-age=31536000, immutable".into(),
-            ),
+            (header::CACHE_CONTROL, cache_control.to_string()),
             (header::ETAG, etag),
         ],
         asset.1,
@@ -725,11 +771,11 @@ mod tests {
         assert!(anonymous.headers().get(header::SET_COOKIE).is_none());
         assert_eq!(
             anonymous.headers().get(header::CACHE_CONTROL).unwrap(),
-            "public, max-age=300"
+            "public, max-age=300, s-maxage=86400"
         );
         assert_eq!(
             anonymous.headers().get("speculation-rules").unwrap(),
-            "\"/static/speculation.json\""
+            &format!("\"/static/speculation.json?v={}\"", ASSET_VERSION.as_str())
         );
 
         let response = app
@@ -1207,11 +1253,12 @@ mod tests {
     async fn static_assets_use_content_hash_etags() {
         let (_dir, state) = test_state(Config::default()).await;
         let app = router(state);
+        let versioned = format!("/static/app.css?v={}", ASSET_VERSION.as_str());
         let first = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/static/app.css")
+                    .uri(versioned.as_str())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1227,8 +1274,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/static/app.css")
-                    .header(header::IF_NONE_MATCH, etag)
+                    .uri(versioned.as_str())
+                    .header(header::IF_NONE_MATCH, etag.clone())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1240,10 +1287,48 @@ mod tests {
             "public, max-age=31536000, immutable"
         );
 
+        // Without `?v=` the URL is not a promise about its content: an hour,
+        // revalidated against the same ETag, never a pinned year.
+        let bare = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/static/app.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bare.status(), StatusCode::OK);
+        assert_eq!(
+            bare.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=3600"
+        );
+        assert_eq!(bare.headers().get(header::ETAG).unwrap(), &etag);
+        let bare_cached = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/static/app.css")
+                    .header(header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bare_cached.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            bare_cached.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=3600"
+        );
+
         let rules = app
             .oneshot(
                 Request::builder()
-                    .uri("/static/speculation.json")
+                    .uri(format!(
+                        "/static/speculation.json?v={}",
+                        ASSET_VERSION.as_str()
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1253,6 +1338,107 @@ mod tests {
         assert_eq!(
             rules.headers().get(header::CONTENT_TYPE).unwrap(),
             "application/speculationrules+json"
+        );
+        assert_eq!(
+            rules.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    /// Everything the layout and the headers point at must carry `?v=`: an
+    /// unversioned reference to an immutably cached asset can never be updated.
+    #[tokio::test]
+    async fn every_referenced_static_url_is_versioned() {
+        let (_dir, state) = test_state(Config::default()).await;
+        let app = router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let version = ASSET_VERSION.as_str();
+        assert_eq!(
+            response.headers().get("speculation-rules").unwrap(),
+            &format!("\"/static/speculation.json?v={version}\"")
+        );
+        let html = response_text(response).await;
+        for asset in ["favicon.svg", "app.css", "theme.js"] {
+            assert!(
+                html.contains(&format!("/static/{asset}?v={version}")),
+                "{asset} is referenced without ?v= in {html}"
+            );
+            assert!(
+                !html.contains(&format!("\"/static/{asset}\"")),
+                "{asset} still has a bare reference in {html}"
+            );
+        }
+        // The fonts are reached through the stylesheet, not the layout.
+        assert!(APP_CSS.contains(&format!("url(/static/Newsreader.woff2?v={version})")));
+    }
+
+    /// A response that names no policy of its own must not be cacheable: a CDN
+    /// cache-everything rule would otherwise give it the CDN's default TTL.
+    #[tokio::test]
+    async fn responses_without_a_policy_default_to_no_store() {
+        let (_dir, state) = test_state(Config::default()).await;
+        let app = router(state);
+        for uri in ["/login", "/healthz", "/no-such-page"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-store",
+                "{uri}"
+            );
+        }
+    }
+
+    /// Cookie- and Basic-auth-gated routes must be uncacheable everywhere, on
+    /// every status code, whatever the CDN is told to do.
+    #[tokio::test]
+    async fn download_and_opds_routes_are_private_no_store() {
+        let mut config = Config::default();
+        config.publish.epub_dir = std::path::PathBuf::from("/nonexistent/epub");
+        config.publish.xtc_dir = std::path::PathBuf::from("/nonexistent/xtc");
+        let (_dir, state) = test_state(config).await;
+        let app = router(state);
+        for uri in [
+            "/opds",
+            "/opds/",
+            crate::publish::OPDS_PATH,
+            "/files/epub/missing.epub",
+            "/files/xtc/missing.xtch",
+            "/files/epub/..%2Fescape",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "private, no-store",
+                "{uri} answered {}",
+                response.status()
+            );
+        }
+
+        // The Basic auth challenge is a response too.
+        let mut config = Config::default();
+        config.server.basic_auth_user = Some("daily".into());
+        config.server.basic_auth_pass = Some("hunter2".into());
+        let (_dir, state) = test_state(config).await;
+        let app = router(state);
+        let challenge = app
+            .oneshot(Request::builder().uri("/opds").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(challenge.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            challenge.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, no-store"
         );
     }
 

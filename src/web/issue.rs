@@ -1671,7 +1671,7 @@ mod tests {
         assert_eq!(issue.status(), StatusCode::OK);
         assert_eq!(
             issue.headers().get(header::CACHE_CONTROL).unwrap(),
-            "public, max-age=300"
+            "public, max-age=300, s-maxage=86400"
         );
         let html = String::from_utf8(
             to_bytes(issue.into_body(), 1024 * 1024)
@@ -1703,6 +1703,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(archive.status(), StatusCode::OK);
+        assert_eq!(
+            archive.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=300, s-maxage=86400"
+        );
 
         let feed = app
             .clone()
@@ -1717,6 +1721,10 @@ mod tests {
         assert_eq!(
             feed.headers().get(header::CONTENT_TYPE).unwrap(),
             "application/atom+xml; charset=utf-8"
+        );
+        assert_eq!(
+            feed.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=300, s-maxage=86400"
         );
         let feed = String::from_utf8(
             to_bytes(feed.into_body(), 1024 * 1024)
@@ -1750,6 +1758,10 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            robots.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=86400"
+        );
         let robots =
             String::from_utf8(to_bytes(robots.into_body(), 4096).await.unwrap().to_vec()).unwrap();
         assert!(robots.contains("Disallow: /dashboard"));
@@ -1763,6 +1775,10 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            reports.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=300, s-maxage=86400"
+        );
         let reports =
             String::from_utf8(to_bytes(reports.into_body(), 4096).await.unwrap().to_vec()).unwrap();
         assert!(reports.contains("\"status\": \"ok\""));

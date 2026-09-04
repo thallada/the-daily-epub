@@ -13,7 +13,10 @@
 //! | `GET /healthz` | liveness |
 //! | `GET /issues.json` | the last 30 run reports, newest first |
 //!
-//! `/opds/*` and `/files/*` sit behind optional Basic auth (`server.basic_auth_*`).
+//! `/opds/*` and `/files/*` sit behind optional Basic auth (`server.basic_auth_*`)
+//! and are therefore `private, no-store` on every response, 401s and 404s
+//! included: the site sits behind a CDN whose cache-everything rule would
+//! otherwise turn an authenticated download into a public one (§3.12).
 //!
 //! The EPUB article footer (§3.10) mints its three verdict links with the very same
 //! [`rating_url`] this module verifies with — both re-export [`crate::auth`],
@@ -44,6 +47,7 @@ use tower_http::trace::TraceLayer;
 use crate::config::Config;
 use crate::db::Db;
 use crate::types::{ArticleId, RatingEvent, Vote};
+use crate::web::public::{PRIVATE_CACHE, PUBLIC_CACHE};
 
 /// Characters of the hex HMAC kept in rating links (§3.9).
 pub const TOKEN_LEN: usize = crate::auth::TOKEN_LEN;
@@ -300,9 +304,13 @@ async fn handle_issues_json(State(state): State<AppState>) -> Response {
         })
         .collect();
     match serde_json::to_string_pretty(&issues) {
+        // Only publishing changes this, and publishing purges the edge (§3.12).
         Ok(body) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, PUBLIC_CACHE),
+            ],
             body,
         )
             .into_response(),
@@ -406,7 +414,7 @@ async fn handle_opds(State(state): State<AppState>, headers: HeaderMap) -> Respo
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, OPDS_CONTENT_TYPE),
-                (header::CACHE_CONTROL, "no-cache"),
+                (header::CACHE_CONTROL, PRIVATE_CACHE),
             ],
             feed,
         )
@@ -415,6 +423,7 @@ async fn handle_opds(State(state): State<AppState>, headers: HeaderMap) -> Respo
             tracing::error!(error = %e, "could not build the OPDS feed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CACHE_CONTROL, PRIVATE_CACHE)],
                 "could not build the feed",
             )
                 .into_response()
@@ -465,7 +474,12 @@ async fn serve_file(
     }
     let Some(path) = safe_join(dir, name) else {
         tracing::warn!(name, "rejected an unsafe file name");
-        return (StatusCode::BAD_REQUEST, "bad file name").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::CACHE_CONTROL, PRIVATE_CACHE)],
+            "bad file name",
+        )
+            .into_response();
     };
     // An XTCH issue is a pre-rendered page bitmap per page — ~100 MB for a full
     // day. Stream it rather than buffering the whole file per request (§3.11).
@@ -476,7 +490,12 @@ async fn serve_file(
         }
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "file not found");
-            return (StatusCode::NOT_FOUND, "not found").into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                [(header::CACHE_CONTROL, PRIVATE_CACHE)],
+                "not found",
+            )
+                .into_response();
         }
     };
     // CrossPoint dispatches on the saved file's extension, not on this header,
@@ -488,6 +507,12 @@ async fn serve_file(
     };
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    // Downloads are cookie- or Basic-auth gated: a shared cache must never hold
+    // one, whatever cache rule the CDN in front of us is configured with (§3.12).
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(PRIVATE_CACHE),
+    );
     if let Ok(value) = HeaderValue::from_str(&format!(
         "attachment; filename=\"{}\"",
         name.replace('"', "")
@@ -563,7 +588,13 @@ fn check_basic_auth(config: &Config, headers: &HeaderMap) -> Option<Response> {
     Some(
         (
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, challenge)],
+            [
+                (header::WWW_AUTHENTICATE, challenge),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static(PRIVATE_CACHE),
+                ),
+            ],
             "authentication required",
         )
             .into_response(),
