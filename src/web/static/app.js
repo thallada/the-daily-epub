@@ -9,17 +9,14 @@ if (themeToggle) {
       return "system";
     }
   };
-  const renderTheme = (theme) => {
-    themeToggle.setAttribute("aria-label", `Theme: ${theme}`);
-    themeToggle.querySelector("[data-theme-label]").textContent = theme[0].toUpperCase() + theme.slice(1);
-    themeToggle.querySelectorAll("[data-theme-icon]").forEach((icon) => {
-      // SVGElement has no `hidden` IDL attribute; toggle the content attribute.
-      icon.toggleAttribute("hidden", icon.getAttribute("data-theme-icon") !== theme);
-    });
-  };
+  // Icons and label are picked by CSS from `html[data-theme]`, which theme.js sets
+  // before first paint, so nothing here repaints the toggle after load.
+  const renderTheme = (theme) => themeToggle.setAttribute("aria-label", `Theme: ${theme}`);
   const setTheme = (theme) => {
     if (theme === "system") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.dataset.theme = theme;
+    const scheme = document.querySelector('meta[name="color-scheme"]');
+    if (scheme) scheme.content = theme === "system" ? "light dark" : theme;
     try {
       if (theme === "system") localStorage.removeItem("theme");
       else localStorage.setItem("theme", theme);
@@ -83,14 +80,19 @@ document.querySelectorAll("details[id]").forEach((details) => {
 /* step 3: filter-as-you-type on tables with data-filter (this page's rows only) */
 document.querySelectorAll("table[data-filter]").forEach((table) => {
   const rows = table.querySelectorAll("tbody tr");
-  if (rows.length < 2) return;
-  const input = document.createElement("input");
-  input.type = "search";
-  input.className = "table-filter";
-  input.placeholder = "Filter rows on this page";
-  input.setAttribute("aria-label", "Filter rows on this page");
   const host = table.closest(".scroll-x") || table;
-  host.parentNode.insertBefore(input, host);
+  // The template renders the input (shown only under `.has-js`) so the table does
+  // not jump when this script runs after first paint; create one if it is missing.
+  let input = host.previousElementSibling;
+  if (!(input && input.matches("input[data-table-filter]"))) {
+    if (rows.length < 2) return;
+    input = document.createElement("input");
+    input.type = "search";
+    input.className = "table-filter";
+    input.placeholder = "Filter rows on this page";
+    input.setAttribute("aria-label", "Filter rows on this page");
+    host.parentNode.insertBefore(input, host);
+  }
   input.addEventListener("input", () => {
     const needle = input.value.trim().toLowerCase();
     rows.forEach((row) => {

@@ -4,7 +4,7 @@
 <p class="page-desc">Every account on this server, with its role and open sessions.</p>
 </div></header>
 <p class="muted text-sm">Accounts are read-only here. Create, change, disable, enable, or sign out users with the <code>daily-epub users</code> CLI on the server.</p>
-<div class="scroll-x tall"><table data-filter>
+{% if users.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table data-filter>
 <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Last login</th><th class="num">Open sessions</th></tr></thead>
 <tbody>{% for user in users %}<tr>
 <td class="font-medium text-ink">{{ user.username }}</td>

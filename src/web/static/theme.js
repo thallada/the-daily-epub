@@ -2,10 +2,18 @@
   // Marks the document as scripted before first paint so progressively enhanced
   // widgets (the contents panel) can start collapsed without a flash.
   document.documentElement.classList.add("has-js");
+  // The color-scheme meta decides what the browser paints before the stylesheet
+  // arrives; keep it in step with an explicit theme so that first paint is not
+  // the wrong shade.
+  const scheme = document.querySelector('meta[name="color-scheme"]');
   try {
     const theme = localStorage.getItem("theme");
-    if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
-    else document.documentElement.removeAttribute("data-theme");
+    if (theme === "light" || theme === "dark") {
+      document.documentElement.dataset.theme = theme;
+      if (scheme) scheme.content = theme;
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+    }
   } catch (_) {
     document.documentElement.removeAttribute("data-theme");
   }

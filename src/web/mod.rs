@@ -211,9 +211,38 @@ pub struct Page {
 }
 
 /// First 12 hex digits of the SHA-256 over the embedded CSS and JS assets.
+const NEWSREADER: &[u8] = include_bytes!("static/fonts/Newsreader.woff2");
+const NEWSREADER_ITALIC: &[u8] = include_bytes!("static/fonts/Newsreader-italic.woff2");
+
+/// The stylesheet with both Newsreader faces embedded as `data:` URIs.
+///
+/// A font referenced by URL is applied *after* first paint whenever the browser
+/// has to bring it back from the disk cache (Firefox drops fonts from memory as
+/// soon as no page uses them), which shows as a flash of invisible or fallback
+/// text on the first navigation after an idle spell. Fonts embedded in the
+/// render-blocking stylesheet are decoded synchronously, so the first paint is
+/// already set in Newsreader.
+pub static APP_CSS: LazyLock<String> = LazyLock::new(|| {
+    use base64::Engine;
+    let data_uri = |bytes: &[u8]| {
+        format!(
+            "url(data:font/woff2;base64,{})",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    };
+    include_str!("static/app.css")
+        .replace("url(/static/Newsreader.woff2)", &data_uri(NEWSREADER))
+        .replace(
+            "url(/static/Newsreader-italic.woff2)",
+            &data_uri(NEWSREADER_ITALIC),
+        )
+});
+
 pub static ASSET_VERSION: LazyLock<String> = LazyLock::new(|| {
     let mut hasher = Sha256::new();
     hasher.update(include_str!("static/app.css"));
+    hasher.update(NEWSREADER);
+    hasher.update(NEWSREADER_ITALIC);
     hasher.update(include_str!("static/app.js"));
     hasher.update(include_str!("static/theme.js"));
     hex::encode(hasher.finalize())[..12].to_string()
@@ -411,7 +440,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     headers.insert(
         header::HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
-            "default-src 'self'; img-src * data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; form-action 'self'",
+            "default-src 'self'; img-src * data:; font-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; form-action 'self'",
         ),
     );
     headers.insert(
@@ -537,10 +566,7 @@ async fn static_asset(
     headers: axum::http::HeaderMap,
 ) -> Response {
     let asset: (&str, &'static [u8]) = match file.as_str() {
-        "app.css" => (
-            "text/css; charset=utf-8",
-            include_str!("static/app.css").as_bytes(),
-        ),
+        "app.css" => ("text/css; charset=utf-8", APP_CSS.as_bytes()),
         "app.js" => (
             "application/javascript; charset=utf-8",
             include_str!("static/app.js").as_bytes(),
@@ -557,14 +583,8 @@ async fn static_asset(
             "image/svg+xml",
             include_str!("static/favicon.svg").as_bytes(),
         ),
-        "Newsreader.woff2" => (
-            "font/woff2",
-            include_bytes!("static/fonts/Newsreader.woff2"),
-        ),
-        "Newsreader-italic.woff2" => (
-            "font/woff2",
-            include_bytes!("static/fonts/Newsreader-italic.woff2"),
-        ),
+        "Newsreader.woff2" => ("font/woff2", NEWSREADER),
+        "Newsreader-italic.woff2" => ("font/woff2", NEWSREADER_ITALIC),
         _ => return WebError::NotFound.into_response(),
     };
     let etag = format!("\"{}\"", hex::encode(Sha256::digest(asset.1)));
@@ -1080,8 +1100,16 @@ mod tests {
         let expected = format!("/static/app.css?v={}", ASSET_VERSION.as_str());
         assert!(html.contains(&expected), "{html}");
         assert!(!html.contains(&format!("/static/app.css?v={}", crate::VERSION)));
-        assert!(html.contains("rel=\"preload\" href=\"/static/Newsreader.woff2\""));
-        assert!(html.contains("rel=\"preload\" href=\"/static/Newsreader-italic.woff2\""));
+        // The fonts ride inside the stylesheet; a preload would fetch them twice.
+        assert!(!html.contains("rel=\"preload\""), "{html}");
+    }
+
+    #[test]
+    fn stylesheet_embeds_both_newsreader_faces() {
+        let css = APP_CSS.as_str();
+        assert_eq!(css.matches("url(data:font/woff2;base64,").count(), 2);
+        assert!(!css.contains("/static/Newsreader"));
+        assert!(css.contains("font-display:block"), "{}", &css[..200]);
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@
 <label>Status <select name="status"><option value="">any</option>{% for name in statuses %}<option value="{{ name }}"{% if status == *name %} selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
 <div class="filter-actions"><button class="btn" type="submit">Filter</button>{% if !status.is_empty() %}<a class="btn-quiet" href="/dashboard/runs">Reset</a>{% endif %}</div>
 </form>
-<div class="scroll-x tall"><table data-filter>
+{% if runs.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table data-filter>
 <thead><tr><th>run</th><th>date</th><th>status</th><th>started</th><th>duration</th><th>considered → eligible → triaged → assessed → shortlisted → selected</th><th>cost</th><th class="num">total</th><th class="num">warnings</th></tr></thead>
 <tbody>{% for run in runs %}<tr>
 <td class="num"><a href="/dashboard/runs/{{ run.id }}">{{ run.id }}</a></td>

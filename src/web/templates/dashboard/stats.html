@@ -27,12 +27,12 @@
 </div>
 
 <h2>Spend by day</h2>
-{% if cost_rows.is_empty() %}<p class="muted text-sm">No provider costs recorded in the window.</p>{% else %}<div class="scroll-x tall"><table data-filter>
+{% if cost_rows.is_empty() %}<p class="muted text-sm">No provider costs recorded in the window.</p>{% else %}{% if cost_rows.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table data-filter>
 <thead><tr><th>day (UTC)</th>{% for provider in providers %}<th class="num">{{ provider }}</th>{% endfor %}<th class="num">total</th></tr></thead>
 <tbody>{% for row in cost_rows %}<tr><td class="cell-tight">{{ row.date }}</td>{% for cell in row.cells %}<td class="num text-muted">{{ cell }}</td>{% endfor %}<td class="num">{{ row.total }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
 
 <h2>Runs in the window</h2>
-{% if runs.is_empty() %}<p class="muted text-sm">No finished runs in the window.</p>{% else %}<div class="scroll-x tall"><table data-filter>
+{% if runs.is_empty() %}<p class="muted text-sm">No finished runs in the window.</p>{% else %}{% if runs.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table data-filter>
 <thead><tr><th class="num">run</th><th>date</th><th>status</th><th class="num">cost</th><th class="num">selected</th><th class="num">duration</th></tr></thead>
 <tbody>{% for run in runs %}<tr><td class="num"><a href="/dashboard/runs/{{ run.run_id }}">{{ run.run_id }}</a></td><td class="cell-tight"><a href="/issues/{{ run.date }}">{{ run.date }}</a></td><td class="cell-tight"><span class="badge {{ run.status }}">{{ run.status }}</span></td><td class="num">{{ run.cost }}</td><td class="num">{{ run.selected }}</td><td class="num text-muted">{{ run.duration }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
 

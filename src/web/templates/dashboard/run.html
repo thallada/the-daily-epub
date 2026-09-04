@@ -58,7 +58,7 @@
 <div class="filter-actions"><button class="btn" type="submit">Apply</button> <a class="btn-quiet" href="/dashboard/runs/{{ run.id }}">Reset</a></div>
 </form>
 {% include "dashboard/_pager.html" %}
-<div class="scroll-x tall"><table class="candidates" data-filter>
+{% if candidates.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table class="candidates" data-filter>
 <thead><tr><th>title</th><th>feed</th><th class="num">words</th><th>stage</th><th>reason</th><th>admitted by</th><th class="num">utility</th><th class="num">rank</th><th class="num">cluster</th><th class="num">triage</th><th class="num">quality</th><th class="num">fit</th><th>flags</th><th>editor</th></tr></thead>
 <tbody>{% for candidate in candidates %}{% include "_candidate_row.html" %}{% endfor %}{% if candidates.is_empty() %}<tr><td colspan="14" class="text-muted">No candidates match this filter.</td></tr>{% endif %}</tbody></table></div>
 {% include "dashboard/_pager.html" %}

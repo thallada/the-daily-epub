@@ -17,7 +17,7 @@
 <div class="filter-actions"><button class="btn" type="submit">Apply</button> <a class="btn-quiet" href="/dashboard/articles">Reset</a></div>
 </form>
 {% include "dashboard/_pager.html" %}
-<div class="scroll-x tall"><table class="articles" data-filter>
+{% if articles.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table class="articles" data-filter>
 <thead><tr><th>first seen</th><th>title</th><th>feed</th><th class="num">words</th><th>last stage</th><th>reason</th><th class="num">utility</th><th class="num">triage</th><th class="num">quality</th><th class="num">fit</th><th>rating</th><th>published</th></tr></thead>
 <tbody>{% for article in articles %}<tr>
 <td class="cell-tight text-muted">{{ article.first_seen }}</td>

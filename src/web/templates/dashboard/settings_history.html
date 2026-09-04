@@ -3,7 +3,7 @@
 <h1>Settings history</h1>
 <p class="page-desc">Every settings change made through the dashboard, newest first. Hand edits to <code>config.toml</code> on disk are not recorded here.</p>
 </div><div class="page-actions"><a class="btn" href="/dashboard/settings">Back to settings</a></div></header>
-{% if changes.is_empty() %}<p class="muted text-sm">No settings have been changed through the dashboard yet.</p>{% else %}<div class="scroll-x tall"><table class="history" data-filter>
+{% if changes.is_empty() %}<p class="muted text-sm">No settings have been changed through the dashboard yet.</p>{% else %}{% if changes.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table class="history" data-filter>
 <thead><tr><th>When</th><th>Who</th><th>Key</th><th>Before</th><th>After</th></tr></thead>
 <tbody>{% for change in changes %}<tr>
 <td class="cell-tight text-muted">{{ change.changed_at }}</td>
