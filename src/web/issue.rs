@@ -659,6 +659,8 @@ struct TocItem {
     href: String,
     number: Option<usize>,
     minutes: Option<i64>,
+    /// Progress position used by the shared TOC UI (0 for The Brief).
+    progress: usize,
     current: bool,
     /// First entry of the back-matter group; the template draws a hairline above it.
     divider: bool,
@@ -667,6 +669,10 @@ struct TocItem {
 impl TocItem {
     fn is_section(&self) -> bool {
         matches!(self.kind, TocKind::Section)
+    }
+
+    fn is_colophon(&self) -> bool {
+        matches!(self.kind, TocKind::Colophon)
     }
 }
 
@@ -703,12 +709,18 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
     let issue = &view.issue;
     let date = issue.meta.date;
     let issue_href = issue_href(date);
-    let plain = |kind: TocKind, label: &str, href: String, current: bool, divider: bool| TocItem {
+    let plain = |kind: TocKind,
+                 label: &str,
+                 href: String,
+                 progress: usize,
+                 current: bool,
+                 divider: bool| TocItem {
         kind,
         label: label.to_string(),
         href,
         number: None,
         minutes: None,
+        progress,
         current,
         divider,
     };
@@ -717,13 +729,21 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
         TocKind::Brief,
         "The Brief",
         issue_href.clone(),
+        0,
         current == TocPosition::FrontPage,
         false,
     )];
     let mut position = 0usize;
     let mut total = 0usize;
     for name in chapters::section_names(issue) {
-        items.push(plain(TocKind::Section, &name, String::new(), false, false));
+        items.push(plain(
+            TocKind::Section,
+            &name,
+            String::new(),
+            0,
+            false,
+            false,
+        ));
         for pick in issue.lineup.section_picks(&name) {
             total += 1;
             let is_current = current == TocPosition::Article(pick.article.id);
@@ -736,6 +756,7 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
                 href: article_href(date, pick.article.id),
                 number: Some(total),
                 minutes: Some(pick.article.reading_minutes()),
+                progress: total,
                 current: is_current,
                 divider: false,
             });
@@ -753,6 +774,7 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
             TocKind::World,
             "World Briefing",
             format!("/issues/{date}/world"),
+            total,
             is_current,
             divider,
         ));
@@ -768,6 +790,7 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
             TocKind::Behind,
             "Behind the paper",
             format!("/issues/{date}/behind"),
+            total,
             is_current,
             divider,
         ));
@@ -777,6 +800,7 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
         TocKind::Colophon,
         "Colophon",
         format!("{issue_href}#colophon"),
+        total,
         false,
         divider,
     ));
@@ -2160,6 +2184,15 @@ mod tests {
         assert_eq!(front.position, 0);
         assert_eq!(front.current_label(), "The Brief");
         assert_eq!(front.short_date, "Sat, Aug 15");
+        assert_eq!(
+            front
+                .items
+                .iter()
+                .filter(|item| !item.is_section())
+                .map(|item| item.progress)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 4]
+        );
         // Exactly one hairline, above the first back-matter entry.
         assert_eq!(
             front
@@ -2234,13 +2267,30 @@ mod tests {
             let html = response_text(response).await;
             assert!(html.contains("data-toc-toggle"), "{path} has no toc bar");
             assert!(html.contains("id=\"toc\""), "{path} has no toc panel");
-            assert!(html.contains(progress), "{path} is missing {progress:?}");
             assert!(
-                html.contains(&format!("href=\"{current}\" aria-current=\"page\"")),
+                html.contains("data-toc-status"),
+                "{path} has no live status"
+            );
+            assert!(html.contains(progress), "{path} is missing {progress:?}");
+            let current_link = html
+                .split(&format!("class=\"toc-link\" href=\"{current}\""))
+                .nth(1)
+                .and_then(|rest| rest.split("</a>").next());
+            assert!(
+                current_link.is_some_and(|link| link.contains("aria-current=\"page\"")),
                 "{path} does not mark {current} as current"
             );
             assert!(html.contains(&format!("{}#colophon", issue_href(date))));
             assert!(html.contains("A Niche Delight &#38; Other Tales"));
+            if path == issue_href(date) {
+                assert!(html.contains(&format!(
+                    "data-toc-entry=\"{}\"",
+                    article_href(date, source.lineup.picks[0].article.id)
+                )));
+                assert!(
+                    html.contains(&format!("data-toc-entry=\"{}#colophon\"", issue_href(date)))
+                );
+            }
         }
 
         let anonymous = app

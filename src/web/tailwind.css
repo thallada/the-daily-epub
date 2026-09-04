@@ -259,9 +259,22 @@
   /* While JS drives the bar from scroll position it must track the finger exactly. */
   .toc-progress[data-live]::-webkit-progress-value { transition:none; }
   @media (prefers-reduced-motion: reduce) { .toc-progress::-webkit-progress-value { transition:none; } }
-  [data-toc-panel] { scrollbar-width:thin; scrollbar-color:var(--rule) transparent; }
+  [data-toc-panel] { scrollbar-width:thin; scrollbar-color:var(--rule) transparent; scrollbar-gutter:stable; }
+  [data-toc-panel]::-webkit-scrollbar { width:0.5rem; }
+  [data-toc-panel]::-webkit-scrollbar-thumb { border:2px solid transparent; background:var(--rule); background-clip:padding-box; }
+  .toc-link { @apply flex min-h-11 items-baseline gap-2 border-l-2 border-transparent py-2.5 pl-3 text-ink-2 no-underline transition-colors duration-150 hover:border-rule-strong hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper lg:min-h-10 lg:py-1.5; }
+  .toc-link[data-passed] { @apply text-ink; }
+  .toc-link[data-passed] > span:first-child { @apply text-ink; }
+  .toc-link[aria-current] { @apply border-accent font-semibold text-ink; }
+  .toc-toggle-icon { opacity:1; scale:1; filter:blur(0); transition-property:opacity, scale, filter; transition-duration:150ms; transition-timing-function:cubic-bezier(0.2, 0, 0, 1); }
+  .toc-toggle-icon-close { opacity:0; scale:0.25; filter:blur(4px); }
+  [data-toc-toggle][aria-expanded="true"] .toc-toggle-icon-menu { opacity:0; scale:0.25; filter:blur(4px); }
+  [data-toc-toggle][aria-expanded="true"] .toc-toggle-icon-close { opacity:1; scale:1; filter:blur(0); }
   /* Without JS the panel is simply visible under the bar; `has-js` is set in the head. */
   @media (width < 64rem) {
+    /* Lock only the root: locking body as well makes body its own scroll container and un-sticks the bar. */
+    html.toc-panel-open { overflow:hidden; scrollbar-gutter:stable; }
+    .has-js [data-toc-panel][data-open="true"] { height:calc(100dvh - var(--toc-panel-top, 3rem)); max-height:calc(100dvh - var(--toc-panel-top, 3rem)); }
     .has-js [data-toc-panel]:not([data-open="true"]) { display:none; }
   }
   @media (max-width:40rem) {
