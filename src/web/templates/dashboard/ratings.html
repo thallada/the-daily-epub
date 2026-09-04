@@ -62,7 +62,7 @@
 <thead><tr><th>Verdict</th><th>Article</th><th>When · by</th><th>Note</th><th>Age → decay</th><th class="num">Neighbour weight</th><th>Feed credit</th><th>In prompt</th><th>In rebuild</th><th>Used last run</th></tr></thead>
 <tbody>
 {% for row in current %}<tr>
-<td class="min-w-[13rem]"><span class="badge {{ row.badge }}">{{ row.verdict }}</span>{% let widget = row.widget %}{% include "_rating_widget.html" %}</td>
+<td class="rating-cell min-w-[13rem]">{% let widget = row.widget %}{% include "_rating_widget.html" %}</td>
 <td class="cell-wrap"><a href="/dashboard/articles/{{ row.article_id }}">{{ row.title }}</a><br><span class="meta text-xs">{{ row.feed_title }}{% if !row.issue_date.is_empty() %} · <a href="/issues/{{ row.issue_date }}">{{ row.issue_date }}</a>{% endif %}</span></td>
 <td class="cell-tight">{{ row.when }}<br><span class="meta text-xs">{{ row.source }} · <span class="by">{{ row.username }}</span></span></td>
 <td class="cell-wrap text-muted">{{ row.note }}</td>
