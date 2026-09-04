@@ -236,8 +236,9 @@ const NEWSREADER_ITALIC: &[u8] = include_bytes!("static/fonts/Newsreader-italic.
 ///
 /// So the URLs stay URLs, carrying `?v=<ASSET_VERSION>` so the immutable
 /// one-year `max-age` on `/static/*` is safe across deploys. The fonts are part
-/// of the `ASSET_VERSION` hash, so a new face mints a new URL. `layout.html`
-/// preloads the regular face, and the faces use `font-display: swap` behind
+/// of the `ASSET_VERSION` hash, so a new face mints a new URL. Neither face is
+/// preloaded — that only takes bandwidth from this sheet, which is what first
+/// paint actually waits on. Instead both use `font-display: swap` behind
 /// metric-matched local fallbacks, so first paint is immediate and the swap
 /// shifts nothing.
 pub static APP_CSS: LazyLock<String> = LazyLock::new(|| {
@@ -1123,14 +1124,21 @@ mod tests {
         let expected = format!("/static/app.css?v={}", ASSET_VERSION.as_str());
         assert!(html.contains(&expected), "{html}");
         assert!(!html.contains(&format!("/static/app.css?v={}", crate::VERSION)));
-        // The regular face is preloaded so it starts downloading alongside the
-        // stylesheet that declares it; the italic face is left to load on demand.
-        let preload = format!(
-            "<link rel=\"preload\" href=\"/static/Newsreader.woff2?v={}\" as=\"font\" type=\"font/woff2\" crossorigin>",
+        // Nothing is preloaded. A preload of the 132 KB regular face shares
+        // bandwidth with the 12 KB render-blocking stylesheet, which is what
+        // first paint actually waits on: it pushed simulated FCP from ~1.0 s to
+        // ~1.8 s on Lighthouse mobile, for a face the metric-matched fallbacks
+        // already stand in for.
+        assert!(!html.contains("rel=\"preload\""), "{html}");
+        // The italic face is never referenced from the HTML either.
+        assert!(!html.contains("Newsreader-italic.woff2"), "{html}");
+        // `defer` keeps app.js out of Lighthouse's render-blocking list; it has
+        // no readyState or DOMContentLoaded dependence, so deferring is safe.
+        let app_js = format!(
+            "<script defer src=\"/static/app.js?v={}\"></script>",
             ASSET_VERSION.as_str()
         );
-        assert!(html.contains(&preload), "{html}");
-        assert!(!html.contains("Newsreader-italic.woff2"), "{html}");
+        assert!(html.contains(&app_js), "{html}");
     }
 
     #[test]

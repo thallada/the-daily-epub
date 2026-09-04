@@ -6,12 +6,11 @@
   <meta name="description" content="{{ page.description }}">
   <meta name="color-scheme" content="light dark">
   <title>{{ page.title }} · The Daily EPUB</title>
-  {# Start the regular face downloading with the stylesheet rather than after
-     it parses. `crossorigin` is required even same-origin: font fetches are
-     CORS-mode, so without it the preload would not match the @font-face
-     request and the file would be fetched twice. Only the regular face —
-     italic is rare enough that on-demand loading is the right trade. #}
-  <link rel="preload" href="/static/Newsreader.woff2?v={{ page.asset_version }}" as="font" type="font/woff2" crossorigin>
+  {# No font preload here on purpose. Preloading the 132 KB regular face made
+     it share bandwidth with this 12 KB render-blocking sheet, so the sheet —
+     and therefore first paint — landed later: simulated FCP went from ~1.0 s
+     to ~1.8 s on Lighthouse mobile. The metric-matched fallbacks in
+     tailwind.css make waiting for the real face cost nothing visible. #}
   <link rel="stylesheet" href="/static/app.css?v={{ page.asset_version }}">
   {# Keep this synchronous script *after* the stylesheet: Gecko will not run a
      parser-blocking script while a stylesheet is pending, so the parser stalls
@@ -58,6 +57,6 @@
   {% match page.flash %}{% when Some with (flash) %}<div class="mx-auto max-w-7xl px-4 sm:px-6"><div class="flash {{ flash.kind }}" role="status">{{ flash.text }}</div></div>{% when None %}{% endmatch %}
   <main id="content" class="min-h-[68vh]">{% block content %}{% endblock %}</main>
   <footer class="mx-auto mt-16 flex max-w-7xl flex-wrap justify-between gap-2 border-t border-rule px-4 py-6 font-sans text-[0.72rem] uppercase tracking-[0.1em] text-muted sm:px-6"><span>The Daily EPUB</span><span>daily-epub {{ page.version }}</span></footer>
-  <script src="/static/app.js?v={{ page.asset_version }}"></script>
+  <script defer src="/static/app.js?v={{ page.asset_version }}"></script>
 </body>
 </html>
