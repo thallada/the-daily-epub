@@ -35,6 +35,7 @@ pub struct IssueView {
     pub downloads: Vec<Download>,
     pub from_json: bool,
     pub world_html: Option<String>,
+    pub is_latest: bool,
     has_behind: bool,
     legacy_counts: Option<LegacyColophonCounts>,
 }
@@ -80,6 +81,7 @@ pub async fn load(
     let Some(row) = db.issue_by_date(date).await? else {
         return Ok(None);
     };
+    let is_latest = db.latest_issue_date().await? == Some(date);
     let legacy = if row.issue_json.is_none() {
         Some(load_legacy_facts(db, date, row.report_json.as_deref()).await?)
     } else {
@@ -273,6 +275,7 @@ pub async fn load(
         downloads,
         from_json,
         world_html,
+        is_latest,
         has_behind: from_json || legacy.as_ref().is_some_and(|facts| facts.has_source),
         legacy_counts: legacy.map(|facts| LegacyColophonCounts {
             entries_fetched: facts.entries_fetched,
@@ -659,6 +662,8 @@ struct TocItem {
     href: String,
     number: Option<usize>,
     minutes: Option<i64>,
+    /// Progress position used by the shared TOC UI (0 for The Brief).
+    progress: usize,
     current: bool,
     /// First entry of the back-matter group; the template draws a hairline above it.
     divider: bool,
@@ -667,6 +672,10 @@ struct TocItem {
 impl TocItem {
     fn is_section(&self) -> bool {
         matches!(self.kind, TocKind::Section)
+    }
+
+    fn is_colophon(&self) -> bool {
+        matches!(self.kind, TocKind::Colophon)
     }
 }
 
@@ -703,12 +712,18 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
     let issue = &view.issue;
     let date = issue.meta.date;
     let issue_href = issue_href(date);
-    let plain = |kind: TocKind, label: &str, href: String, current: bool, divider: bool| TocItem {
+    let plain = |kind: TocKind,
+                 label: &str,
+                 href: String,
+                 progress: usize,
+                 current: bool,
+                 divider: bool| TocItem {
         kind,
         label: label.to_string(),
         href,
         number: None,
         minutes: None,
+        progress,
         current,
         divider,
     };
@@ -717,13 +732,21 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
         TocKind::Brief,
         "The Brief",
         issue_href.clone(),
+        0,
         current == TocPosition::FrontPage,
         false,
     )];
     let mut position = 0usize;
     let mut total = 0usize;
     for name in chapters::section_names(issue) {
-        items.push(plain(TocKind::Section, &name, String::new(), false, false));
+        items.push(plain(
+            TocKind::Section,
+            &name,
+            String::new(),
+            0,
+            false,
+            false,
+        ));
         for pick in issue.lineup.section_picks(&name) {
             total += 1;
             let is_current = current == TocPosition::Article(pick.article.id);
@@ -736,6 +759,7 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
                 href: article_href(date, pick.article.id),
                 number: Some(total),
                 minutes: Some(pick.article.reading_minutes()),
+                progress: total,
                 current: is_current,
                 divider: false,
             });
@@ -753,6 +777,7 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
             TocKind::World,
             "World Briefing",
             format!("/issues/{date}/world"),
+            total,
             is_current,
             divider,
         ));
@@ -768,6 +793,7 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
             TocKind::Behind,
             "Behind the paper",
             format!("/issues/{date}/behind"),
+            total,
             is_current,
             divider,
         ));
@@ -777,6 +803,7 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
         TocKind::Colophon,
         "Colophon",
         format!("{issue_href}#colophon"),
+        total,
         false,
         divider,
     ));
@@ -955,7 +982,8 @@ pub async fn render_full(
         })
         .collect();
     let colophon = colophon_view(&view.issue, view.legacy_counts.as_ref());
-    let mut page = Page::new(format!("Issue {date}"), Some(viewer), "latest");
+    let active_nav = if view.is_latest { "latest" } else { "archive" };
+    let mut page = Page::new(format!("Issue {date}"), Some(viewer), active_nav);
     page.flash = take_flash(session).await?;
     Ok(Html(IssueFullTemplate {
         page,
@@ -1023,7 +1051,8 @@ pub async fn article(
             href: article_href(date, next.article.id),
         });
     let article = &pick.article;
-    let mut page = Page::new(article.title.clone(), Some(viewer.clone()), "latest");
+    let active_nav = if view.is_latest { "latest" } else { "archive" };
+    let mut page = Page::new(article.title.clone(), Some(viewer.clone()), active_nav);
     page.flash = take_flash(&session).await?;
     Ok(Html(ArticleTemplate {
         page,
@@ -1089,7 +1118,8 @@ pub async fn world(
     } else {
         return Err(WebError::NotFound);
     };
-    let mut page = Page::new("World Briefing", Some(viewer), "latest");
+    let active_nav = if view.is_latest { "latest" } else { "archive" };
+    let mut page = Page::new("World Briefing", Some(viewer), active_nav);
     page.flash = take_flash(&session).await?;
     Ok(Html(WorldTemplate {
         page,
@@ -1122,7 +1152,8 @@ pub async fn behind(
     }
     let toc = issue_toc(&view, TocPosition::Behind);
     let behind = &view.issue.behind;
-    let mut page = Page::new("Behind the paper", Some(viewer), "latest");
+    let active_nav = if view.is_latest { "latest" } else { "archive" };
+    let mut page = Page::new("Behind the paper", Some(viewer), active_nav);
     page.flash = take_flash(&session).await?;
     Ok(Html(BehindTemplate {
         page,
@@ -1534,6 +1565,89 @@ mod tests {
                 .all(|pick| pick.discussion.is_none())
         );
         assert!(loaded.issue.editorial.front_page_html.contains("coffee"));
+    }
+
+    #[tokio::test]
+    async fn issue_navigation_marks_only_the_newest_issue_as_latest() {
+        let (_dir, db, source) = seeded_issue(true).await;
+        let old_date = source.meta.date;
+        let latest_date: Date = "2026-08-16".parse().unwrap();
+        let mut latest = source.clone();
+        latest.meta.date = latest_date;
+        latest.meta.issue_number += 1;
+        latest.meta.display_date = display_date(latest_date);
+        latest.lineup.date = latest_date;
+        if let Some(world) = &mut latest.world_briefing {
+            world.date = latest_date;
+        }
+        let latest_json = serde_json::to_string(&latest).unwrap();
+        db.upsert_issue(
+            latest_date,
+            latest.meta.issue_number,
+            latest.meta.generated_at,
+            None,
+            None,
+            None,
+            Some(&latest.editorial.front_page_html),
+            None,
+            Some(&latest_json),
+        )
+        .await
+        .unwrap();
+        db.replace_issue_articles(latest_date, &latest.lineup.picks)
+            .await
+            .unwrap();
+
+        let old_view = load(&db, &crate::config::Config::default(), old_date)
+            .await
+            .unwrap()
+            .unwrap();
+        let latest_view = load(&db, &crate::config::Config::default(), latest_date)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!old_view.is_latest);
+        assert!(latest_view.is_latest);
+
+        let app = crate::server::router(crate::server::AppState::new(
+            db,
+            crate::config::Config::default(),
+            None,
+        ));
+        let old = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{old_date}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old.status(), StatusCode::OK);
+        let old = response_text(old).await;
+        assert!(
+            old.contains("href=\"/issues\" aria-current=\"page\">Archive</a>"),
+            "{old}"
+        );
+        assert!(!old.contains("href=\"/\" aria-current=\"page\">Latest</a>"));
+
+        let latest = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{latest_date}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(latest.status(), StatusCode::OK);
+        let latest = response_text(latest).await;
+        assert!(
+            latest.contains("href=\"/\" aria-current=\"page\">Latest</a>"),
+            "{latest}"
+        );
+        assert!(!latest.contains("href=\"/issues\" aria-current=\"page\">Archive</a>"));
     }
 
     #[tokio::test]
@@ -2160,6 +2274,15 @@ mod tests {
         assert_eq!(front.position, 0);
         assert_eq!(front.current_label(), "The Brief");
         assert_eq!(front.short_date, "Sat, Aug 15");
+        assert_eq!(
+            front
+                .items
+                .iter()
+                .filter(|item| !item.is_section())
+                .map(|item| item.progress)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 4]
+        );
         // Exactly one hairline, above the first back-matter entry.
         assert_eq!(
             front
@@ -2234,13 +2357,30 @@ mod tests {
             let html = response_text(response).await;
             assert!(html.contains("data-toc-toggle"), "{path} has no toc bar");
             assert!(html.contains("id=\"toc\""), "{path} has no toc panel");
-            assert!(html.contains(progress), "{path} is missing {progress:?}");
             assert!(
-                html.contains(&format!("href=\"{current}\" aria-current=\"page\"")),
+                html.contains("data-toc-status"),
+                "{path} has no live status"
+            );
+            assert!(html.contains(progress), "{path} is missing {progress:?}");
+            let current_link = html
+                .split(&format!("class=\"toc-link\" href=\"{current}\""))
+                .nth(1)
+                .and_then(|rest| rest.split("</a>").next());
+            assert!(
+                current_link.is_some_and(|link| link.contains("aria-current=\"page\"")),
                 "{path} does not mark {current} as current"
             );
             assert!(html.contains(&format!("{}#colophon", issue_href(date))));
             assert!(html.contains("A Niche Delight &#38; Other Tales"));
+            if path == issue_href(date) {
+                assert!(html.contains(&format!(
+                    "data-toc-entry=\"{}\"",
+                    article_href(date, source.lineup.picks[0].article.id)
+                )));
+                assert!(
+                    html.contains(&format!("data-toc-entry=\"{}#colophon\"", issue_href(date)))
+                );
+            }
         }
 
         let anonymous = app

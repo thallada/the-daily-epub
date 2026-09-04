@@ -9,7 +9,7 @@
   font-style: normal;
   font-weight: 200 800;
   font-stretch: normal;
-  font-display: swap;
+  font-display: block;
   src: url("/static/Newsreader.woff2") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
@@ -19,7 +19,7 @@
   font-style: italic;
   font-weight: 200 800;
   font-stretch: normal;
-  font-display: swap;
+  font-display: block;
   src: url("/static/Newsreader-italic.woff2") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
@@ -82,6 +82,39 @@
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior:auto !important; transition-duration:0.01ms !important; } }
 }
 
+@view-transition {
+  navigation: auto;
+}
+
+.site-header {
+  view-transition-name: site-header;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 140ms;
+  animation-timing-function: ease-out;
+}
+
+::view-transition-group(site-header),
+::view-transition-new(site-header) {
+  animation: none;
+}
+
+::view-transition-old(site-header) {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(site-header),
+  ::view-transition-old(root),
+  ::view-transition-new(root),
+  ::view-transition-old(site-header),
+  ::view-transition-new(site-header) {
+    animation: none;
+  }
+}
+
 
 @layer components {
   /* ---------- shared controls ---------- */
@@ -92,7 +125,7 @@
   .btn-danger, button.danger { @apply inline-flex min-h-9 items-center justify-center rounded-sm border border-down bg-transparent px-2.5 py-1 font-sans text-sm font-medium text-down duration-150 hover:bg-down hover:text-paper; transition-property:transform, background-color, color, border-color; }
   .btn:active, .button:active, .btn-primary:active, .btn-danger:active, button.danger:active { transform:scale(0.96); }
 
-  .badge { @apply inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 font-sans text-xs font-medium leading-5; color:var(--ink-2); background:color-mix(in oklab, var(--ink) 8%, transparent); }
+  .badge { @apply inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 font-sans text-xs font-medium leading-5 tabular-nums; color:var(--ink-2); background:color-mix(in oklab, var(--ink) 8%, transparent); }
   .badge.selected, .badge.loved, .badge.ok { color:var(--loved); background:color-mix(in oklab, var(--loved) 14%, transparent); }
   .badge.good, .badge.assessed, .badge.triaged, .badge.degraded { color:var(--good); background:color-mix(in oklab, var(--good) 14%, transparent); }
   .badge.down, .badge.excluded, .badge.failed, .badge.dry_run { color:var(--down); background:color-mix(in oklab, var(--down) 14%, transparent); }
@@ -199,14 +232,14 @@
   .form-inline label { @apply flex items-center gap-2 text-sm; }
   .table-filter { @apply my-2 w-80 max-w-full font-sans text-sm; }
 
-  .pager { @apply flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-1 font-sans text-sm text-muted; }
+  .pager { @apply flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-1 font-sans text-sm tabular-nums text-muted; }
   .pager a { @apply text-ink no-underline hover:text-accent; }
   .run-nav { @apply flex flex-wrap items-center justify-between gap-x-6 gap-y-2 font-sans text-sm; }
   .run-nav a { @apply text-ink no-underline hover:text-accent; }
   .tabs { @apply flex flex-wrap items-center gap-x-6 border-b border-rule font-sans text-[0.72rem] font-medium uppercase tracking-[0.12em]; }
   .tabs a { @apply -mb-px flex min-h-10 items-center border-b-2 border-transparent text-muted no-underline hover:text-ink; }
   .tabs a.active { @apply border-accent text-ink; }
-  .pagination { @apply font-sans text-sm text-muted; }
+  .pagination { @apply font-sans text-sm tabular-nums text-muted; }
 
   tr.superseded > td { @apply text-muted; }
   tr.superseded a { @apply text-muted; }
@@ -278,9 +311,22 @@
   /* While JS drives the bar from scroll position it must track the finger exactly. */
   .toc-progress[data-live]::-webkit-progress-value { transition:none; }
   @media (prefers-reduced-motion: reduce) { .toc-progress::-webkit-progress-value { transition:none; } }
-  [data-toc-panel] { scrollbar-width:thin; scrollbar-color:var(--rule) transparent; }
+  [data-toc-panel] { scrollbar-width:thin; scrollbar-color:var(--rule) transparent; scrollbar-gutter:stable; }
+  [data-toc-panel]::-webkit-scrollbar { width:0.5rem; }
+  [data-toc-panel]::-webkit-scrollbar-thumb { border:2px solid transparent; background:var(--rule); background-clip:padding-box; }
+  .toc-link { @apply flex min-h-11 items-baseline gap-2 border-l-2 border-transparent py-2.5 pl-3 text-ink-2 no-underline transition-colors duration-150 hover:border-rule-strong hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper lg:min-h-10 lg:py-1.5; }
+  .toc-link[data-passed] { @apply text-ink; }
+  .toc-link[data-passed] > span:first-child { @apply text-ink; }
+  .toc-link[aria-current] { @apply border-accent font-semibold text-ink; }
+  .toc-toggle-icon { opacity:1; scale:1; filter:blur(0); transition-property:opacity, scale, filter; transition-duration:150ms; transition-timing-function:cubic-bezier(0.2, 0, 0, 1); }
+  .toc-toggle-icon-close { opacity:0; scale:0.25; filter:blur(4px); }
+  [data-toc-toggle][aria-expanded="true"] .toc-toggle-icon-menu { opacity:0; scale:0.25; filter:blur(4px); }
+  [data-toc-toggle][aria-expanded="true"] .toc-toggle-icon-close { opacity:1; scale:1; filter:blur(0); }
   /* Without JS the panel is simply visible under the bar; `has-js` is set in the head. */
   @media (width < 64rem) {
+    /* Lock only the root: locking body as well makes body its own scroll container and un-sticks the bar. */
+    html.toc-panel-open { overflow:hidden; scrollbar-gutter:stable; }
+    .has-js [data-toc-panel][data-open="true"] { height:calc(100dvh - var(--toc-panel-top, 3rem)); max-height:calc(100dvh - var(--toc-panel-top, 3rem)); }
     .has-js [data-toc-panel]:not([data-open="true"]) { display:none; }
   }
   @media (max-width:40rem) {
