@@ -197,9 +197,19 @@ pub struct Flash {
     pub text: String,
 }
 
+/// The site-wide `<meta name="description">`, used by every page that does not
+/// set one of its own. Search engines truncate around 160 characters.
+pub const DEFAULT_DESCRIPTION: &str = concat!(
+    "A daily newspaper of the web: articles hand-picked from one reader's feeds, ",
+    "published every morning as an EPUB and readable here."
+);
+
 #[derive(Debug, Clone)]
 pub struct Page {
     pub title: String,
+    /// The `<meta name="description">` for this page; `DEFAULT_DESCRIPTION`
+    /// unless a handler overrides it with [`Page::with_description`].
+    pub description: String,
     pub viewer: Option<Viewer>,
     pub flash: Option<Flash>,
     pub active_nav: String,
@@ -257,12 +267,20 @@ impl Page {
     pub fn new(title: impl Into<String>, viewer: Option<Viewer>, active_nav: &str) -> Self {
         Self {
             title: title.into(),
+            description: DEFAULT_DESCRIPTION.to_string(),
             viewer,
             flash: None,
             active_nav: active_nav.to_string(),
             version: crate::VERSION,
             asset_version: ASSET_VERSION.as_str(),
         }
+    }
+
+    /// Replace the site-wide description with one written for this page.
+    #[must_use]
+    pub fn with_description(mut self, text: impl Into<String>) -> Self {
+        self.description = text.into();
+        self
     }
 
     pub fn is_admin(&self) -> bool {
@@ -1113,6 +1131,46 @@ mod tests {
         );
         assert!(html.contains(&preload), "{html}");
         assert!(!html.contains("Newsreader-italic.woff2"), "{html}");
+    }
+
+    #[test]
+    fn pages_render_a_meta_description_and_escape_it() {
+        let render = |page: Page| {
+            ErrorTemplate {
+                page,
+                heading: "h".into(),
+                message: "m".into(),
+            }
+            .render()
+            .unwrap()
+        };
+
+        // Every page carries a description; the default one when none is set.
+        assert!(DEFAULT_DESCRIPTION.len() <= 160, "{DEFAULT_DESCRIPTION}");
+        let html = render(Page::new("t", None, "latest"));
+        assert!(
+            html.contains(
+                "<meta name=\"description\" content=\"A daily newspaper of the web: articles \
+                 hand-picked from one reader&#39;s feeds, published every morning as an EPUB and \
+                 readable here.\">"
+            ),
+            "{html}"
+        );
+
+        // A page-specific one replaces it, HTML-escaped into the attribute.
+        let page = Page::new("t", None, "latest")
+            .with_description("Issue \"No. 3\" & <b>4</b> for O'Donnell");
+        assert_eq!(page.description, "Issue \"No. 3\" & <b>4</b> for O'Donnell");
+        let html = render(page);
+        assert!(
+            html.contains(
+                "<meta name=\"description\" content=\"Issue &#34;No. 3&#34; &#38; \
+                 &#60;b&#62;4&#60;/b&#62; for O&#39;Donnell\">"
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("<b>4</b>"), "{html}");
+        assert!(!html.contains(DEFAULT_DESCRIPTION), "{html}");
     }
 
     #[test]

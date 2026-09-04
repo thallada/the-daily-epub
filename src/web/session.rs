@@ -280,10 +280,16 @@ struct AccountTemplate {
     error: String,
 }
 
+/// The `<meta name="description">` for both renders of the sign-in page.
+const LOGIN_DESCRIPTION: &str = concat!(
+    "Sign in to The Daily EPUB to read the full issue, ",
+    "rate what you read, and download the morning's editions."
+);
+
 pub async fn login_page(auth: AuthSession, Query(query): Query<LoginQuery>) -> Response {
     let viewer = auth.user().await.map(Viewer::from);
     Html(LoginTemplate {
-        page: Page::new("Sign in", viewer, "login"),
+        page: Page::new("Sign in", viewer, "login").with_description(LOGIN_DESCRIPTION),
         next: valid_next(query.next.as_deref()).to_string(),
         error: String::new(),
     })
@@ -316,7 +322,7 @@ pub async fn login(
         None => Ok((
             StatusCode::UNAUTHORIZED,
             Html(LoginTemplate {
-                page: Page::new("Sign in", None, "login"),
+                page: Page::new("Sign in", None, "login").with_description(LOGIN_DESCRIPTION),
                 next: destination,
                 error: "invalid username or password".into(),
             }),
