@@ -214,27 +214,32 @@ pub struct Page {
 const NEWSREADER: &[u8] = include_bytes!("static/fonts/Newsreader.woff2");
 const NEWSREADER_ITALIC: &[u8] = include_bytes!("static/fonts/Newsreader-italic.woff2");
 
-/// The stylesheet with both Newsreader faces embedded as `data:` URIs.
+/// The stylesheet with both Newsreader faces pointed at versioned URLs.
 ///
-/// A font referenced by URL is applied *after* first paint whenever the browser
-/// has to bring it back from the disk cache (Firefox drops fonts from memory as
-/// soon as no page uses them), which shows as a flash of invisible or fallback
-/// text on the first navigation after an idle spell. Fonts embedded in the
-/// render-blocking stylesheet are decoded synchronously, so the first paint is
-/// already set in Newsreader.
+/// The faces used to be inlined here as `data:` URIs on the theory that a font
+/// fetched by URL lands after first paint and flashes. That theory was wrong:
+/// the flash of unstyled content came from script ordering (a parser-blocking
+/// `theme.js` ahead of the stylesheet let Gecko paint before the sheet applied,
+/// Bugzilla 1459305), and moving the script after the `<link>` fixed it. What
+/// the inlining did cost was real: it tripled the render-blocking stylesheet to
+/// ~305 KB and pushed first paint out by more than a second on mobile.
+///
+/// So the URLs stay URLs, carrying `?v=<ASSET_VERSION>` so the immutable
+/// one-year `max-age` on `/static/*` is safe across deploys. The fonts are part
+/// of the `ASSET_VERSION` hash, so a new face mints a new URL. `layout.html`
+/// preloads the regular face, and the faces use `font-display: swap` behind
+/// metric-matched local fallbacks, so first paint is immediate and the swap
+/// shifts nothing.
 pub static APP_CSS: LazyLock<String> = LazyLock::new(|| {
-    use base64::Engine;
-    let data_uri = |bytes: &[u8]| {
-        format!(
-            "url(data:font/woff2;base64,{})",
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        )
-    };
+    let version = ASSET_VERSION.as_str();
     include_str!("static/app.css")
-        .replace("url(/static/Newsreader.woff2)", &data_uri(NEWSREADER))
+        .replace(
+            "url(/static/Newsreader.woff2)",
+            &format!("url(/static/Newsreader.woff2?v={version})"),
+        )
         .replace(
             "url(/static/Newsreader-italic.woff2)",
-            &data_uri(NEWSREADER_ITALIC),
+            &format!("url(/static/Newsreader-italic.woff2?v={version})"),
         )
 });
 
@@ -1100,16 +1105,36 @@ mod tests {
         let expected = format!("/static/app.css?v={}", ASSET_VERSION.as_str());
         assert!(html.contains(&expected), "{html}");
         assert!(!html.contains(&format!("/static/app.css?v={}", crate::VERSION)));
-        // The fonts ride inside the stylesheet; a preload would fetch them twice.
-        assert!(!html.contains("rel=\"preload\""), "{html}");
+        // The regular face is preloaded so it starts downloading alongside the
+        // stylesheet that declares it; the italic face is left to load on demand.
+        let preload = format!(
+            "<link rel=\"preload\" href=\"/static/Newsreader.woff2?v={}\" as=\"font\" type=\"font/woff2\" crossorigin>",
+            ASSET_VERSION.as_str()
+        );
+        assert!(html.contains(&preload), "{html}");
+        assert!(!html.contains("Newsreader-italic.woff2"), "{html}");
     }
 
     #[test]
-    fn stylesheet_embeds_both_newsreader_faces() {
+    fn stylesheet_points_both_newsreader_faces_at_versioned_urls() {
         let css = APP_CSS.as_str();
-        assert_eq!(css.matches("url(data:font/woff2;base64,").count(), 2);
-        assert!(!css.contains("/static/Newsreader"));
-        assert!(css.contains("font-display:block"), "{}", &css[..200]);
+        let version = ASSET_VERSION.as_str();
+        assert!(
+            css.contains(&format!("url(/static/Newsreader.woff2?v={version})")),
+            "regular face missing from stylesheet"
+        );
+        assert!(
+            css.contains(&format!("url(/static/Newsreader-italic.woff2?v={version})")),
+            "italic face missing from stylesheet"
+        );
+        // Unversioned references would be cached forever under a stale URL, and
+        // inlined faces would put ~280 KB back into the render-blocking sheet.
+        assert!(!css.contains("url(/static/Newsreader.woff2)"));
+        assert!(!css.contains("url(/static/Newsreader-italic.woff2)"));
+        assert!(!css.contains("data:font"));
+        // `swap` paints immediately in the metric-matched local fallback.
+        assert_eq!(css.matches("font-display:swap").count(), 2);
+        assert!(!css.contains("font-display:block"));
     }
 
     #[tokio::test]

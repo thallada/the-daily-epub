@@ -9,7 +9,7 @@
   font-style: normal;
   font-weight: 200 800;
   font-stretch: normal;
-  font-display: block;
+  font-display: swap;
   src: url("/static/Newsreader.woff2") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
@@ -19,9 +19,64 @@
   font-style: italic;
   font-weight: 200 800;
   font-stretch: normal;
-  font-display: block;
+  font-display: swap;
   src: url("/static/Newsreader-italic.woff2") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Metric-matched local fallbacks for Newsreader.
+   `font-display: swap` paints text immediately in whichever of these the
+   platform has; the overrides make that first paint occupy the same box as
+   Newsreader, so the swap changes glyph shapes and nothing else (CLS 0).
+
+   size-adjust  = (Newsreader xWidthAvg/upm) / (fallback xWidthAvg/upm)
+   ascent/descent-override = (Newsreader ascent|descent / upm) / size-adjust
+
+   Newsreader (src/web/static/fonts/Newsreader.woff2, wght 400 at opsz 17, the
+   body size): upm 2000, ascent 1470, descent -530, lineGap 0, and a
+   frequency-weighted average character width of 837 (0.4185 em). Fallback
+   widths are @capsizecss/metrics v4.2.0 `xWidthAvg`, which uses the same
+   weighting, except DejaVu Serif which is measured the same way from
+   /usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf. */
+
+@font-face {
+  font-family: "Newsreader Fallback Georgia";
+  src: local("Georgia");
+  /* xWidthAvg 913 / upm 2048 */
+  size-adjust: 93.88%;
+  ascent-override: 78.29%;
+  descent-override: 28.23%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "Newsreader Fallback Times";
+  src: local("Times New Roman"), local("Liberation Serif"), local("Tinos");
+  /* xWidthAvg 832 / upm 2048 */
+  size-adjust: 103.02%;
+  ascent-override: 71.35%;
+  descent-override: 25.72%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "Newsreader Fallback Noto Serif";
+  src: local("Noto Serif");
+  /* xWidthAvg 481 / upm 1000 */
+  size-adjust: 87.01%;
+  ascent-override: 84.48%;
+  descent-override: 30.46%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "Newsreader Fallback DejaVu Serif";
+  src: local("DejaVu Serif");
+  /* xWidthAvg 1058 / upm 2048 */
+  size-adjust: 81.01%;
+  ascent-override: 90.73%;
+  descent-override: 32.71%;
+  line-gap-override: 0%;
 }
 
 :root {
@@ -50,7 +105,9 @@
   --color-rule-strong:var(--rule-strong); --color-accent:var(--accent);
   --color-accent-hover:var(--accent-hover); --color-loved:var(--loved); --color-good:var(--good);
   --color-down:var(--down); --color-warn:var(--warn);
-  --font-serif:"Newsreader", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --font-serif:"Newsreader", "Newsreader Fallback Georgia", "Newsreader Fallback Times",
+    "Newsreader Fallback Noto Serif", "Newsreader Fallback DejaVu Serif",
+    "Iowan Old Style", "Palatino Linotype", Georgia, serif;
   --font-sans:ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono:ui-monospace, SFMono-Regular, Menlo, monospace;
 }

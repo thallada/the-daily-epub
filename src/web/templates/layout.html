@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>{{ page.title }} · The Daily EPUB</title>
+  {# Start the regular face downloading with the stylesheet rather than after
+     it parses. `crossorigin` is required even same-origin: font fetches are
+     CORS-mode, so without it the preload would not match the @font-face
+     request and the file would be fetched twice. Only the regular face —
+     italic is rare enough that on-demand loading is the right trade. #}
+  <link rel="preload" href="/static/Newsreader.woff2?v={{ page.asset_version }}" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/app.css?v={{ page.asset_version }}">
   {# Keep this synchronous script *after* the stylesheet: Gecko will not run a
      parser-blocking script while a stylesheet is pending, so the parser stalls
