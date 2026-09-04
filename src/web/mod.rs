@@ -206,7 +206,7 @@ pub struct Page {
     pub version: &'static str,
     /// Cache-busting token for `/static/*.css|js` URLs: a content hash, so
     /// any stylesheet or script change reaches browsers that cached the
-    /// previous build (they are served with a one-day `max-age`).
+    /// previous build (they are served with an immutable one-year `max-age`).
     pub asset_version: &'static str,
 }
 
@@ -235,6 +235,22 @@ impl Page {
         self.viewer
             .as_ref()
             .is_some_and(|viewer| viewer.role == users::Role::Admin)
+    }
+
+    pub fn is_dashboard(&self) -> bool {
+        self.is_admin()
+            && matches!(
+                self.active_nav.as_str(),
+                "dashboard"
+                    | "runs"
+                    | "articles"
+                    | "ratings"
+                    | "profile"
+                    | "stats"
+                    | "jobs"
+                    | "settings"
+                    | "users"
+            )
     }
 }
 
@@ -415,6 +431,10 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         .is_some_and(|value| value.starts_with("text/html"))
     {
         headers.append(header::VARY, HeaderValue::from_static("Cookie"));
+        headers.insert(
+            header::HeaderName::from_static("speculation-rules"),
+            HeaderValue::from_static("\"/static/speculation.json\""),
+        );
     }
     response
 }
@@ -529,6 +549,10 @@ async fn static_asset(
             "application/javascript; charset=utf-8",
             include_str!("static/theme.js").as_bytes(),
         ),
+        "speculation.json" => (
+            "application/speculationrules+json",
+            include_str!("static/speculation.json").as_bytes(),
+        ),
         "favicon.svg" => (
             "image/svg+xml",
             include_str!("static/favicon.svg").as_bytes(),
@@ -553,7 +577,10 @@ async fn static_asset(
             StatusCode::NOT_MODIFIED,
             [
                 (header::ETAG, etag),
-                (header::CACHE_CONTROL, "public, max-age=86400".into()),
+                (
+                    header::CACHE_CONTROL,
+                    "public, max-age=31536000, immutable".into(),
+                ),
             ],
         )
             .into_response();
@@ -562,7 +589,10 @@ async fn static_asset(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, asset.0.to_string()),
-            (header::CACHE_CONTROL, "public, max-age=86400".into()),
+            (
+                header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable".into(),
+            ),
             (header::ETAG, etag),
         ],
         asset.1,
@@ -652,6 +682,10 @@ mod tests {
         assert_eq!(
             anonymous.headers().get(header::CACHE_CONTROL).unwrap(),
             "public, max-age=300"
+        );
+        assert_eq!(
+            anonymous.headers().get("speculation-rules").unwrap(),
+            "\"/static/speculation.json\""
         );
 
         let response = app
@@ -791,6 +825,27 @@ mod tests {
         assert_eq!(
             allowed.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
+        );
+        let settings = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/settings")
+                    .header(header::COOKIE, &admin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settings.status(), StatusCode::OK);
+        let settings = response_text(settings).await;
+        assert!(settings.contains("<span>Dashboard</span>"), "{settings}");
+        assert!(!settings.contains("Morning edition"), "{settings}");
+        assert!(
+            settings.contains(
+                "border-accent text-ink\" href=\"/dashboard/settings\" aria-current=\"page\""
+            ),
+            "{settings}"
         );
         let allowed_rate = app
             .oneshot(
@@ -1025,6 +1080,8 @@ mod tests {
         let expected = format!("/static/app.css?v={}", ASSET_VERSION.as_str());
         assert!(html.contains(&expected), "{html}");
         assert!(!html.contains(&format!("/static/app.css?v={}", crate::VERSION)));
+        assert!(html.contains("rel=\"preload\" href=\"/static/Newsreader.woff2\""));
+        assert!(html.contains("rel=\"preload\" href=\"/static/Newsreader-italic.woff2\""));
     }
 
     #[tokio::test]
@@ -1044,10 +1101,11 @@ mod tests {
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(
             first.headers().get(header::CACHE_CONTROL).unwrap(),
-            "public, max-age=86400"
+            "public, max-age=31536000, immutable"
         );
         let etag = first.headers().get(header::ETAG).unwrap().clone();
         let cached = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/static/app.css")
@@ -1058,6 +1116,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            cached.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+
+        let rules = app
+            .oneshot(
+                Request::builder()
+                    .uri("/static/speculation.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rules.status(), StatusCode::OK);
+        assert_eq!(
+            rules.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/speculationrules+json"
+        );
     }
 
     #[tokio::test]

@@ -219,8 +219,9 @@ pub async fn show_issue(
         let response = issue::render_full(&state, view, viewer, &session).await?;
         return Ok(public_cache(response, &headers));
     }
+    let active_nav = if view.is_latest { "latest" } else { "archive" };
     let response = Html(IssuePublicTemplate {
-        page: Page::new(format!("Issue {date}"), None, "latest"),
+        page: Page::new(format!("Issue {date}"), None, active_nav),
         issue: PublicIssue::from(&view.issue),
         downloads: Vec::new(),
         empty: false,
