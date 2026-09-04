@@ -108,7 +108,13 @@ Under the zone's **SSL/TLS**, **Speed** and **Scrape Shield** sections:
 
 ## 3. Cache Rules
 
-**Caching → Cache Rules.** Order matters: rule 1 must sit above rule 2.
+**Caching → Cache Rules.** Order matters, and not the intuitive way: when
+several rules match one request, **the last matching rule wins** for each
+setting. So a "bypass" rule placed *above* a "cache" rule is silently overruled
+for every cookie-bearing request, and signed-in readers get `HIT`s of the
+anonymous page (this happened on the first rollout). Two safe layouts: put the
+bypass rule **last**, or, better, write the cookie exclusion into the cache
+rule's own expression as shown below so order no longer matters.
 
 **Rule 1 — "Bypass cache for signed-in readers"**
 
@@ -117,7 +123,9 @@ Under the zone's **SSL/TLS**, **Speed** and **Scrape Shield** sections:
 
 The origin already sends `private, no-store` to a cookie-bearing request, but
 this makes the bypass a property of the request rather than of the response, so
-nothing is ever *looked up* in a shared cache for a signed-in reader.
+nothing is ever *looked up* in a shared cache for a signed-in reader. If rule 2
+carries the `not http.cookie contains` clause this rule is belt-and-braces;
+keep it anyway, and keep it **below** rule 2.
 
 **Rule 2 — "Cache by origin headers"** *(optional)*
 
@@ -127,7 +135,8 @@ captures most of the benefit: TLS terminates at the edge and the origin is
 reached over a warm connection. Add the rule if you want the HTML itself
 served from the edge; it is only safe together with rule 1.
 
-- When incoming requests match: `http.host eq "daily.hallada.net"`
+- When incoming requests match:
+  `http.host eq "daily.hallada.net" and not http.cookie contains "daily_session="`
 - Then: **Eligible for cache**
 - **Edge TTL:** *Use cache-control header if present, bypass cache if not*
 - **Browser TTL:** *Respect origin*
@@ -191,7 +200,9 @@ curl -sI https://daily.hallada.net/ | grep -iE 'cf-cache-status|cache-control|ag
 curl -sI https://daily.hallada.net/ | grep -i cf-cache-status     # HIT
 ```
 
-Signed in — the cookie rule must take it out of the cache entirely:
+Signed in — the cookie rule must take it out of the cache entirely. A `HIT`
+here, with the anonymous page's `/login` link in the body, means the bypass rule
+is being overruled by the cache rule: see the ordering note in step 3.
 
 ```sh
 curl -sI -H 'Cookie: daily_session=whatever' https://daily.hallada.net/ \
