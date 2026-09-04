@@ -135,6 +135,7 @@ daily-epub features prune       # stale embeddings, old telemetry and assessment
 daily-epub backfill-social [--days 7]   # re-poll social scores for recent articles
 daily-epub db migrate           # run migrations (also automatic on every start)
 daily-epub config check         # validate the config, print the resolved roles, keys and paths
+daily-epub cdn purge            # purge the CDN edge cache for the configured zone
 daily-epub users add USER [--admin] [--password-stdin]
 daily-epub users passwd USER [--password-stdin]
 daily-epub users role USER user|admin
@@ -369,6 +370,10 @@ prints what resolved.
 | `server.login_window_minutes` | `15` | Length of the login throttle window. |
 | `server.jobs_enabled` | `true` | Allow the dashboard to start the fixed systemd job catalogue. |
 | `server.journal_lines` | `300` | Journal lines shown on a dashboard job page (10–5000). |
+| `cdn.provider` | unset | `cloudflare`, or unset for no CDN integration. Setting it requires the zone id and the token. |
+| `cdn.cloudflare_zone_id` | unset | Zone id from the Cloudflare dashboard overview. |
+| `cdn.api_token` | — | **`DAILY_EPUB_CDN__API_TOKEN`**. Needs exactly one permission: `Zone → Cache Purge`, scoped to that zone. |
+| `cdn.purge_after_publish` | `true` | Purge the whole edge cache after `generate` publishes. A failure is logged, never fatal; dry runs never purge. |
 
 `[curation.ranking]` holds the ranker's tunables. The learned signals are
 gated: `knn` (rated-neighbour preference) ramps from `knn_floor` (8) to
@@ -464,27 +469,63 @@ Node for the XTC converter, whose JIT needs W+X pages.
 The rating links baked into every article chapter point at
 `server.public_url`, so `daily.hallada.net` must resolve and serve TLS from the
 internet (e-readers tap these links). The OPDS catalog rides on the same host.
-The login throttle's `SmartIpKeyExtractor` trusts `X-Forwarded-For`; this is
-safe only because the configured bind address is loopback and nginx is the
-only process that can reach it.
-With an existing certificate, a minimal nginx site is:
+
+The login throttle's `SmartIpKeyExtractor` keys on the first entry of
+`X-Forwarded-For`, so nginx must *set* that header from the connection's peer
+address rather than appending to whatever the client sent — otherwise anyone
+can mint a fresh throttle bucket per attempt by sending their own header. With
+Cloudflare in front, the connection's peer is Cloudflare, so `real_ip` has to
+rewrite `$remote_addr` from `CF-Connecting-IP` first (see the snippet below).
+The whole arrangement is only safe because the configured bind address is
+loopback and nginx is the only process that can reach it.
+
+The site is served through Cloudflare; `docs/runbooks/cdn-rollout.md` covers the
+zone setup and cache rules. The nginx side of it is the `set_real_ip_from`
+snippet and the `X-Forwarded-For` line below.
 
 ```nginx
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name daily.hallada.net;
 
     ssl_certificate     /etc/letsencrypt/live/daily.hallada.net/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/daily.hallada.net/privkey.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/daily.hallada.net/fullchain.pem;
+
+    include /etc/nginx/snippets/security-headers.conf;
+
+    # Trust Cloudflare's edge for the client address: $remote_addr becomes the
+    # visitor, not the proxy. Must come before the X-Forwarded-For line below.
+    include /etc/nginx/snippets/cloudflare-real-ip.conf;
+
+    # The global `gzip on` only covers text/html. The stylesheet is ~12 KB of
+    # plain CSS again — the Newsreader faces are separate .woff2 URLs, not
+    # base64 inside it (see the doc comment on `web::APP_CSS`) — so this list is
+    # about the JSON, XML and SVG responses. woff2 is already compressed and is
+    # deliberately absent.
+    gzip_types text/css application/javascript application/json
+                        application/speculationrules+json image/svg+xml
+                        application/atom+xml application/xml text/plain;
+    gzip_min_length 1024;
+    gzip_vary on;
+    gzip_proxied any;
+
+    # Keep a browser's connection open longer than the 75 s default so the
+    # first click after a pause reuses it instead of paying a new TLS handshake.
+    keepalive_timeout 300s;
 
     # XTCH files can be tens of MB; don't buffer them through nginx memory.
     proxy_max_temp_file_size 0;
 
     location / {
         proxy_pass http://127.0.0.1:3499;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # SET, not append. The login throttle keys on the first X-Forwarded-For
+        # entry, so a client-supplied header must never survive into the app.
+        # $remote_addr is the real visitor because of the real_ip snippet above.
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
@@ -497,11 +538,74 @@ server {
 }
 ```
 
-Enable it (`ln -s` into `sites-enabled`, `nginx -t`, `systemctl reload nginx`),
-then `curl https://daily.hallada.net/healthz` should return `ok`. No auth is
-needed at the proxy layer: rating links are self-authenticating (HMAC tokens)
-and the OPDS/file routes use the app-level Basic auth from
+`/etc/nginx/snippets/cloudflare-real-ip.conf` is one `set_real_ip_from` line per
+published Cloudflare range plus the header to read. Cloudflare adds ranges from
+time to time, so **regenerate it from the source rather than copying this list**
+(<https://www.cloudflare.com/ips-v4>, <https://www.cloudflare.com/ips-v6>):
+
+```sh
+{ curl -s https://www.cloudflare.com/ips-v4; echo; \
+  curl -s https://www.cloudflare.com/ips-v6; echo; } \
+| awk 'NF {print "set_real_ip_from " $0 ";"} END {print "real_ip_header CF-Connecting-IP;"}' \
+| sudo tee /etc/nginx/snippets/cloudflare-real-ip.conf
+```
+
+As of this writing that produces:
+
+```nginx
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 103.21.244.0/22;
+set_real_ip_from 103.22.200.0/22;
+set_real_ip_from 103.31.4.0/22;
+set_real_ip_from 141.101.64.0/18;
+set_real_ip_from 108.162.192.0/18;
+set_real_ip_from 190.93.240.0/20;
+set_real_ip_from 188.114.96.0/20;
+set_real_ip_from 197.234.240.0/22;
+set_real_ip_from 198.41.128.0/17;
+set_real_ip_from 162.158.0.0/15;
+set_real_ip_from 104.16.0.0/13;
+set_real_ip_from 104.24.0.0/14;
+set_real_ip_from 172.64.0.0/13;
+set_real_ip_from 131.0.72.0/22;
+set_real_ip_from 2400:cb00::/32;
+set_real_ip_from 2606:4700::/32;
+set_real_ip_from 2803:f800::/32;
+set_real_ip_from 2405:b500::/32;
+set_real_ip_from 2405:8100::/32;
+set_real_ip_from 2a06:98c0::/29;
+set_real_ip_from 2c0f:f248::/32;
+real_ip_header CF-Connecting-IP;
+```
+
+Enable the site (`ln -s` into `sites-enabled`, `nginx -t`, `systemctl reload
+nginx`), then `curl https://daily.hallada.net/healthz` should return `ok`. No
+auth is needed at the proxy layer: rating links are self-authenticating (HMAC
+tokens) and the OPDS/file routes use the app-level Basic auth from
 `server.basic_auth_user`/`_pass` if you set them.
+
+#### HTTP caching
+
+The origin says what may be cached and for how long; the CDN is configured to
+respect it (runbook §2). The whole matrix:
+
+| route | `Cache-Control` |
+|---|---|
+| `/`, `/issues`, `/issues/{date}`, `/feed.xml`, `/issues.json` (anonymous) | `public, max-age=300, s-maxage=86400` |
+| the same pages with a `daily_session=` cookie | `private, no-store` |
+| `/robots.txt` | `public, max-age=86400` |
+| `/static/*?v=<hash>` | `public, max-age=31536000, immutable` |
+| `/static/*` with no `?v=` | `public, max-age=3600` |
+| `/files/epub/*`, `/files/xtc/*`, `/opds*` (every status) | `private, no-store` |
+| `/dashboard*`, `/login`, `/account`, errors, anything else | `no-store` |
+
+The five-minute browser age and the one-day edge age are the same header doing
+two jobs: a reader's tab revalidates soon after a new issue lands, while the
+edge is allowed to answer for a whole day because `generate` purges it the
+moment it publishes (`[cdn]`, `daily-epub cdn purge`). The `no-store` on the
+last row is a default applied by the `security_headers` middleware to any
+response that set no policy of its own, so a route added later cannot silently
+inherit the CDN's default TTL.
 
 ### Installing the XTC converter
 
