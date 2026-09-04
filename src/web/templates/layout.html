@@ -5,8 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>{{ page.title }} · The Daily EPUB</title>
-  <script src="/static/theme.js?v={{ page.asset_version }}"></script>
   <link rel="stylesheet" href="/static/app.css?v={{ page.asset_version }}">
+  {# Keep this synchronous script *after* the stylesheet: Gecko will not run a
+     parser-blocking script while a stylesheet is pending, so the parser stalls
+     here and nothing unstyled exists to paint if something forces a layout
+     flush (Bugzilla 1459305). Chrome blocks rendering on the sheet regardless. #}
+  <script src="/static/theme.js?v={{ page.asset_version }}"></script>
   <link rel="alternate" type="application/atom+xml" title="The Daily EPUB" href="/feed.xml">
   <link rel="icon" href="/static/favicon.svg">
 </head>
