@@ -1,0 +1,26 @@
+{
+  "prerender": [
+    {
+      "source": "document",
+      "where": {
+        "and": [
+          { "href_matches": ["/", "/issues/*"] },
+          { "not": { "href_matches": ["/logout", "/rate", "/static/*", "/*\\?*"] } }
+        ]
+      },
+      "eagerness": "moderate"
+    }
+  ],
+  "prefetch": [
+    {
+      "source": "document",
+      "where": {
+        "and": [
+          { "href_matches": ["/dashboard", "/dashboard/*"] },
+          { "not": { "href_matches": ["/logout", "/rate", "/static/*", "/*\\?*"] } }
+        ]
+      },
+      "eagerness": "moderate"
+    }
+  ]
+}

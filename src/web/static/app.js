@@ -109,7 +109,13 @@ document.addEventListener("click", (event) => {
 /* step 6: reload a job page every N seconds while its job is requested/running */
 document.querySelectorAll("[data-refresh]").forEach((element) => {
   const seconds = Number(element.dataset.refresh);
-  if (seconds > 0) setTimeout(() => window.location.reload(), seconds * 1000);
+  if (seconds <= 0) return;
+  const schedule = () => setTimeout(() => window.location.reload(), seconds * 1000);
+  if (document.prerendering) {
+    document.addEventListener("prerenderingchange", schedule, { once: true });
+  } else {
+    schedule();
+  }
 });
 /* step 4: table-of-contents panel (below `lg`) and reading-progress bar */
 const tocPanel = document.querySelector("[data-toc-panel]");

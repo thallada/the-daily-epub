@@ -35,6 +35,7 @@ pub struct IssueView {
     pub downloads: Vec<Download>,
     pub from_json: bool,
     pub world_html: Option<String>,
+    pub is_latest: bool,
     has_behind: bool,
     legacy_counts: Option<LegacyColophonCounts>,
 }
@@ -80,6 +81,7 @@ pub async fn load(
     let Some(row) = db.issue_by_date(date).await? else {
         return Ok(None);
     };
+    let is_latest = db.latest_issue_date().await? == Some(date);
     let legacy = if row.issue_json.is_none() {
         Some(load_legacy_facts(db, date, row.report_json.as_deref()).await?)
     } else {
@@ -273,6 +275,7 @@ pub async fn load(
         downloads,
         from_json,
         world_html,
+        is_latest,
         has_behind: from_json || legacy.as_ref().is_some_and(|facts| facts.has_source),
         legacy_counts: legacy.map(|facts| LegacyColophonCounts {
             entries_fetched: facts.entries_fetched,
@@ -955,7 +958,8 @@ pub async fn render_full(
         })
         .collect();
     let colophon = colophon_view(&view.issue, view.legacy_counts.as_ref());
-    let mut page = Page::new(format!("Issue {date}"), Some(viewer), "latest");
+    let active_nav = if view.is_latest { "latest" } else { "archive" };
+    let mut page = Page::new(format!("Issue {date}"), Some(viewer), active_nav);
     page.flash = take_flash(session).await?;
     Ok(Html(IssueFullTemplate {
         page,
@@ -1023,7 +1027,8 @@ pub async fn article(
             href: article_href(date, next.article.id),
         });
     let article = &pick.article;
-    let mut page = Page::new(article.title.clone(), Some(viewer.clone()), "latest");
+    let active_nav = if view.is_latest { "latest" } else { "archive" };
+    let mut page = Page::new(article.title.clone(), Some(viewer.clone()), active_nav);
     page.flash = take_flash(&session).await?;
     Ok(Html(ArticleTemplate {
         page,
@@ -1089,7 +1094,8 @@ pub async fn world(
     } else {
         return Err(WebError::NotFound);
     };
-    let mut page = Page::new("World Briefing", Some(viewer), "latest");
+    let active_nav = if view.is_latest { "latest" } else { "archive" };
+    let mut page = Page::new("World Briefing", Some(viewer), active_nav);
     page.flash = take_flash(&session).await?;
     Ok(Html(WorldTemplate {
         page,
@@ -1122,7 +1128,8 @@ pub async fn behind(
     }
     let toc = issue_toc(&view, TocPosition::Behind);
     let behind = &view.issue.behind;
-    let mut page = Page::new("Behind the paper", Some(viewer), "latest");
+    let active_nav = if view.is_latest { "latest" } else { "archive" };
+    let mut page = Page::new("Behind the paper", Some(viewer), active_nav);
     page.flash = take_flash(&session).await?;
     Ok(Html(BehindTemplate {
         page,
@@ -1534,6 +1541,89 @@ mod tests {
                 .all(|pick| pick.discussion.is_none())
         );
         assert!(loaded.issue.editorial.front_page_html.contains("coffee"));
+    }
+
+    #[tokio::test]
+    async fn issue_navigation_marks_only_the_newest_issue_as_latest() {
+        let (_dir, db, source) = seeded_issue(true).await;
+        let old_date = source.meta.date;
+        let latest_date: Date = "2026-08-16".parse().unwrap();
+        let mut latest = source.clone();
+        latest.meta.date = latest_date;
+        latest.meta.issue_number += 1;
+        latest.meta.display_date = display_date(latest_date);
+        latest.lineup.date = latest_date;
+        if let Some(world) = &mut latest.world_briefing {
+            world.date = latest_date;
+        }
+        let latest_json = serde_json::to_string(&latest).unwrap();
+        db.upsert_issue(
+            latest_date,
+            latest.meta.issue_number,
+            latest.meta.generated_at,
+            None,
+            None,
+            None,
+            Some(&latest.editorial.front_page_html),
+            None,
+            Some(&latest_json),
+        )
+        .await
+        .unwrap();
+        db.replace_issue_articles(latest_date, &latest.lineup.picks)
+            .await
+            .unwrap();
+
+        let old_view = load(&db, &crate::config::Config::default(), old_date)
+            .await
+            .unwrap()
+            .unwrap();
+        let latest_view = load(&db, &crate::config::Config::default(), latest_date)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!old_view.is_latest);
+        assert!(latest_view.is_latest);
+
+        let app = crate::server::router(crate::server::AppState::new(
+            db,
+            crate::config::Config::default(),
+            None,
+        ));
+        let old = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{old_date}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old.status(), StatusCode::OK);
+        let old = response_text(old).await;
+        assert!(
+            old.contains("href=\"/issues\" aria-current=\"page\">Archive</a>"),
+            "{old}"
+        );
+        assert!(!old.contains("href=\"/\" aria-current=\"page\">Latest</a>"));
+
+        let latest = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{latest_date}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(latest.status(), StatusCode::OK);
+        let latest = response_text(latest).await;
+        assert!(
+            latest.contains("href=\"/\" aria-current=\"page\">Latest</a>"),
+            "{latest}"
+        );
+        assert!(!latest.contains("href=\"/issues\" aria-current=\"page\">Archive</a>"));
     }
 
     #[tokio::test]
