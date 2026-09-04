@@ -218,12 +218,9 @@ const OPTIONAL_KEYS: &[(&str, FieldKind)] = &[
     ("server.basic_auth_user", FieldKind::Text),
     ("server.basic_auth_pass", FieldKind::Secret),
     ("xtc.settings", FieldKind::Path),
-    ("cdn.provider", FieldKind::Text),
-    ("cdn.cloudflare_zone_id", FieldKind::Text),
-    ("cdn.api_token", FieldKind::Secret),
 ];
 
-const SECRET_SUFFIXES: &[&str] = &["api_key", "hmac_secret", "basic_auth_pass", "api_token"];
+const SECRET_SUFFIXES: &[&str] = &["api_key", "hmac_secret", "basic_auth_pass"];
 
 const PATH_KEYS: &[&str] = &[
     "database_path",
@@ -258,7 +255,6 @@ const GROUP_ORDER: &[&str] = &[
     "publish",
     "xtc",
     "server",
-    "cdn",
     "miniflux",
 ];
 
@@ -371,10 +367,6 @@ pub const SETTINGS_HELP: &[(&str, &str)] = &[
     ("server.login_window_minutes", "Length of the login throttle window."),
     ("server.jobs_enabled", "Allow the dashboard to start the fixed systemd job catalogue."),
     ("server.journal_lines", "Journal lines shown on a dashboard job page (10-5000)."),
-    ("cdn.provider", "cloudflare, or empty for no CDN integration at all. Setting it requires both cdn.cloudflare_zone_id and the API token."),
-    ("cdn.cloudflare_zone_id", "Zone id from the Cloudflare dashboard overview for the site's zone."),
-    ("cdn.api_token", "Environment only (DAILY_EPUB_CDN__API_TOKEN). Needs exactly one permission: Zone -> Cache Purge, scoped to that one zone."),
-    ("cdn.purge_after_publish", "Purge the whole edge cache after generate publishes an issue. A purge failure is logged and does not fail the run; dry runs never purge."),
 ];
 
 /// `DAILY_EPUB_` + the path upper-cased with `.` → `__` (§13.1 item 2).
@@ -1691,7 +1683,6 @@ mod tests {
                 "publish",
                 "xtc",
                 "server",
-                "cdn",
                 "miniflux",
             ]
         );

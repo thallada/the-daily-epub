@@ -64,15 +64,6 @@ enum Command {
     /// Operator jobs (what `daily-epub-job@<name>.service` runs).
     #[command(subcommand)]
     Job(JobCommand),
-    /// CDN cache maintenance.
-    #[command(subcommand)]
-    Cdn(CdnCommand),
-}
-
-#[derive(Debug, Subcommand)]
-enum CdnCommand {
-    /// Purge the whole edge cache for the configured zone.
-    Purge,
 }
 
 #[derive(Debug, Subcommand)]
@@ -378,17 +369,6 @@ async fn main() -> Result<()> {
             db.migrate().await?;
             println!("migrations up to date: {}", config.database_path.display());
         }
-        Command::Cdn(CdnCommand::Purge) => {
-            // No database, no files, no provider budgets: nothing the run lock
-            // protects, so `generate` and a purge may safely overlap.
-            match daily_epub::cdn::purge_all(&config).await {
-                Ok(outcome) => println!("{outcome}"),
-                Err(error) => {
-                    eprintln!("cdn purge failed: {error}");
-                    std::process::exit(1);
-                }
-            }
-        }
         Command::Config(ConfigCommand::Check) => {
             // Reaching here means `Config::load` already validated it; a bad
             // config exited non-zero above. Nothing is opened, nothing locked.
@@ -446,7 +426,6 @@ fn lock_holder(command: &Command) -> Option<&'static str> {
         | Command::Features(FeaturesCommand::Prune)
         | Command::Db(_)
         | Command::Config(_)
-        | Command::Cdn(_)
         | Command::Users(_) => None,
     }
 }
@@ -1122,7 +1101,6 @@ mod tests {
             vec!["db", "migrate"],
             vec!["features", "prune"],
             vec!["config", "check"],
-            vec!["cdn", "purge"],
             vec!["job", "run", "features-prune"],
             vec!["job", "run", "not-a-job"],
         ] {

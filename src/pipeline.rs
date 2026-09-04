@@ -786,11 +786,6 @@ async fn run_stages(
         record_issue(db, &issue, &published)
             .await
             .context("recording the issue")?;
-        // The edge holds the public pages for `s-maxage=86400`, so it has to be
-        // told the day changed. Best effort: the paper is already published and
-        // recorded, and a stale edge for a few hours is not worth failing a run
-        // that otherwise succeeded (§3.12).
-        purge_cdn(config).await;
         Some(published)
     };
     report.timings.record("publish", elapsed_ms(stage));
@@ -801,23 +796,6 @@ async fn run_stages(
         xtc,
         published,
     })
-}
-
-/// Purge the CDN after a successful publish, never failing the run.
-async fn purge_cdn(config: &Config) {
-    if !config.cdn.purge_after_publish {
-        tracing::debug!("cdn purge skipped: cdn.purge_after_publish is false");
-        return;
-    }
-    match crate::cdn::purge_all(config).await {
-        Ok(crate::cdn::PurgeOutcome::Disabled) => {
-            tracing::debug!("cdn purge skipped: no cdn.provider configured");
-        }
-        Ok(outcome) => tracing::info!("{outcome}"),
-        Err(error) => {
-            tracing::warn!(%error, "the CDN cache purge failed; the edge may serve the previous issue until its s-maxage expires")
-        }
-    }
 }
 
 /// Near misses listed in the "Behind the paper" chapter (§15.1).

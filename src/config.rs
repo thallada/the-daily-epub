@@ -82,8 +82,6 @@ pub struct Config {
     pub publish: PublishConfig,
     pub xtc: XtcConfig,
     pub server: ServerConfig,
-    /// `[cdn]` — the CDN in front of the origin, and the post-publish purge.
-    pub cdn: CdnConfig,
 }
 
 impl Default for Config {
@@ -108,7 +106,6 @@ impl Default for Config {
             publish: PublishConfig::default(),
             xtc: XtcConfig::default(),
             server: ServerConfig::default(),
-            cdn: CdnConfig::default(),
         }
     }
 }
@@ -731,111 +728,6 @@ impl Default for ServerConfig {
     }
 }
 
-/// The only CDN provider the purge knows how to talk to.
-pub const CDN_CLOUDFLARE: &str = "cloudflare";
-
-/// `[cdn]` — the CDN in front of the origin (§3.12).
-///
-/// Everything here is off by default: with no `provider` the app behaves
-/// exactly as it did before a CDN existed. The one thing the origin does when
-/// a provider *is* configured is purge the edge right after a successful
-/// publish, so the new issue (and the previous issue's "latest" nav marker)
-/// stop being served stale for the `s-maxage` day.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct CdnConfig {
-    /// `"cloudflare"`, or unset to disable the purge entirely.
-    pub provider: Option<String>,
-    /// The zone the site lives in, from the Cloudflare dashboard's overview.
-    pub cloudflare_zone_id: Option<String>,
-    /// Supply only via `DAILY_EPUB_CDN__API_TOKEN`; never put it in the TOML.
-    ///
-    /// The token needs a single permission — `Zone → Cache Purge` — scoped to
-    /// the one zone.
-    pub api_token: Option<String>,
-    /// Purge the edge after `generate` publishes an issue (dry runs never do).
-    pub purge_after_publish: bool,
-}
-
-impl Default for CdnConfig {
-    fn default() -> Self {
-        Self {
-            provider: None,
-            cloudflare_zone_id: None,
-            api_token: None,
-            purge_after_publish: true,
-        }
-    }
-}
-
-impl CdnConfig {
-    /// The only place the token may come from.
-    pub fn api_token_env_var() -> String {
-        format!("{ENV_PREFIX}CDN{ENV_SPLIT}API_TOKEN")
-    }
-
-    /// The provider name, trimmed and lowercased, when one is configured.
-    pub fn provider_name(&self) -> Option<String> {
-        self.provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_lowercase)
-    }
-
-    /// The zone id, trimmed, when one is configured.
-    pub fn zone_id(&self) -> Option<&str> {
-        self.cloudflare_zone_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-    }
-
-    /// The token, trimmed, when one is configured.
-    pub fn api_token(&self) -> Option<&str> {
-        self.api_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-    }
-
-    /// True when a recognised provider is configured.
-    pub fn is_enabled(&self) -> bool {
-        self.provider_name().is_some()
-    }
-
-    /// A copy safe to log or persist: the token is stripped.
-    pub fn redacted(&self) -> Self {
-        Self {
-            api_token: None,
-            ..self.clone()
-        }
-    }
-
-    fn validate(&self) -> Result<(), ConfigError> {
-        let Some(provider) = self.provider_name() else {
-            return Ok(());
-        };
-        if provider != CDN_CLOUDFLARE {
-            return Err(ConfigError::Invalid(format!(
-                "cdn.provider {provider:?} is not recognised; the only supported value is \"{CDN_CLOUDFLARE}\""
-            )));
-        }
-        if self.zone_id().is_none() {
-            return Err(ConfigError::Invalid(
-                "cdn.provider = \"cloudflare\" requires cdn.cloudflare_zone_id".into(),
-            ));
-        }
-        if self.api_token().is_none() {
-            return Err(ConfigError::Invalid(format!(
-                "cdn.provider = \"cloudflare\" requires an API token; set {}",
-                Self::api_token_env_var()
-            )));
-        }
-        Ok(())
-    }
-}
-
 /// Config keys that moved from `[deepseek]` to `[llm]`; anywhere else they are
 /// a stale-configuration error.
 const LLM_ROLE_KEYS: &[&str] = &[
@@ -1048,19 +940,6 @@ impl Config {
         ));
         lines.push(file_line("publish.epub_dir", &self.publish.epub_dir));
         lines.push(file_line("publish.xtc_dir", &self.publish.xtc_dir));
-        lines.push(match self.cdn.provider_name() {
-            None => "cdn: disabled (no cdn.provider)".to_string(),
-            Some(provider) => format!(
-                "cdn: {provider} · zone {} · {} · purge_after_publish {}",
-                self.cdn.zone_id().unwrap_or("MISSING"),
-                if self.cdn.api_token().is_some() {
-                    "token present".to_string()
-                } else {
-                    format!("token MISSING (set {})", CdnConfig::api_token_env_var())
-                },
-                self.cdn.purge_after_publish,
-            ),
-        });
         lines
     }
 
@@ -1193,7 +1072,6 @@ impl Config {
                 "curation.sections must not be empty".into(),
             ));
         }
-        self.cdn.validate()?;
         self.tz()?;
         Ok(())
     }
@@ -1413,10 +1291,6 @@ mod tests {
                 command = "node"
                 args = ["/opt/epub-to-xtc-converter/cli/index.js", "convert"]
                 format = "xtc"
-
-                [cdn]
-                provider = "cloudflare"
-                cloudflare_zone_id = "zone-abc"
                 "#,
             )?;
             jail.set_env("DAILY_EPUB_MINIFLUX__API_KEY", "secret-token");
@@ -1426,7 +1300,6 @@ mod tests {
             jail.set_env("DAILY_EPUB_VOYAGE__ENABLED", "false");
             jail.set_env("DAILY_EPUB_PROVIDERS__GEMINI__API_KEY", "gemini-key");
             jail.set_env("DAILY_EPUB_LLM__EDITOR", "gemini");
-            jail.set_env("DAILY_EPUB_CDN__API_TOKEN", "cdn-token");
 
             let c = Config::load(None).map_err(|e| figment::Error::from(e.to_string()))?;
             assert_eq!(c.voyage.api_key.as_deref(), Some("voyage-key"));
@@ -1451,20 +1324,6 @@ mod tests {
             assert_eq!(c.miniflux.api_key.as_deref(), Some("secret-token"));
             assert_eq!(c.target_article_count, 12);
             assert_eq!(c.server.hmac_secret.as_deref(), Some("hunter2"));
-            // The CDN token arrives only through the environment, and the whole
-            // section validates as a unit (provider ⇒ zone id ⇒ token).
-            assert_eq!(c.cdn.api_token(), Some("cdn-token"));
-            assert_eq!(c.cdn.zone_id(), Some("zone-abc"));
-            assert!(c.cdn.purge_after_publish);
-            assert!(
-                c.check_report(None)
-                    .iter()
-                    .any(|line| line.starts_with("cdn: cloudflare ")
-                        && line.contains("token present")
-                        && !line.contains("cdn-token")),
-                "{:?}",
-                c.check_report(None)
-            );
             // untouched default
             assert_eq!(c.retention_days, 21);
             assert_eq!(c.timezone, "America/New_York");
