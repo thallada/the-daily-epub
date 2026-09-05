@@ -526,10 +526,17 @@ pub struct IssueMeta {
     pub reading_minutes: i64,
 }
 
+/// The issue name for a date, without an edition tag:
+/// "The Daily EPUB — 2026-08-15". Shared by [`IssueMeta::title`] and callers
+/// that only have a date (the BookOrbit lookup matches OPDS titles against it).
+pub fn issue_title(date: Date) -> String {
+    format!("The Daily EPUB — {date}")
+}
+
 impl IssueMeta {
     /// The issue's name, without an edition tag: "The Daily EPUB — 2026-08-15".
     pub fn title(&self) -> String {
-        format!("The Daily EPUB — {}", self.date)
+        issue_title(self.date)
     }
 
     /// `dc:title` for one edition: [`title`](Self::title) plus the edition tag

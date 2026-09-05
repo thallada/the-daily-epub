@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path as FsPath, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use askama::Template;
-use axum::extract::{Extension, Path, State};
-use axum::response::{IntoResponse, Response};
+use axum::extract::{Extension, Path, Query, State};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum_login::tower_sessions::Session;
 use jiff::civil::Date;
+use serde::Deserialize;
 use sqlx::Row;
 
 use crate::db::Db;
@@ -32,6 +34,8 @@ pub struct Download {
 #[derive(Debug, Clone)]
 pub struct IssueView {
     pub issue: Issue,
+    /// Signed-in BookOrbit redirect route when the Standard EPUB can be downloaded.
+    pub read_href: Option<String>,
     pub downloads: Vec<Download>,
     pub from_json: bool,
     pub world_html: Option<String>,
@@ -255,18 +259,21 @@ pub async fn load(
     } else {
         recover_world_html(&row, config)
     };
-    let downloads = [
-        (
-            "EPUB",
-            row.epub_path.as_deref(),
-            Some(config.publish.epub_dir.join(crate::publish::issue_filename(
-                date,
-                Edition::Standard,
-                "epub",
-            ))),
+    let standard_download = download(
+        "EPUB",
+        row.epub_path.as_deref(),
+        Some(config.publish.epub_dir.join(crate::publish::issue_filename(
+            date,
+            Edition::Standard,
             "epub",
-        ),
-        (
+        ))),
+        "epub",
+    );
+    let read_href = (config.bookorbit.is_active() && standard_download.is_some())
+        .then(|| format!("/issues/{date}/read"));
+    let downloads = [
+        standard_download,
+        download(
             "X4 EPUB",
             row.x4_path.as_deref(),
             Some(config.publish.epub_dir.join(crate::publish::issue_filename(
@@ -276,13 +283,14 @@ pub async fn load(
             ))),
             "epub",
         ),
-        ("XTC", row.xtc_path.as_deref(), None, "xtc"),
+        download("XTC", row.xtc_path.as_deref(), None, "xtc"),
     ]
     .into_iter()
-    .filter_map(|(label, raw, fallback, kind)| download(label, raw, fallback, kind))
+    .flatten()
     .collect();
     Ok(Some(IssueView {
         issue,
+        read_href,
         downloads,
         from_json,
         world_html,
@@ -881,6 +889,7 @@ struct IssueFullTemplate {
     issue_number: i64,
     stats_line: String,
     front_page_html: String,
+    read_href: Option<String>,
     downloads: Vec<Download>,
     sections: Vec<FullSection>,
     has_world: bool,
@@ -1003,6 +1012,7 @@ pub async fn render_full(
         issue_number: view.issue.meta.issue_number,
         stats_line: view.issue.meta.stats_line(),
         front_page_html: view.issue.editorial.front_page_html.clone(),
+        read_href: view.read_href,
         downloads: view.downloads,
         sections,
         has_world: view.issue.world_briefing.is_some() || view.world_html.is_some(),
@@ -1184,6 +1194,96 @@ pub async fn behind(
         issue_href: issue_href(date),
     })
     .into_response())
+}
+
+/// Query parameters accepted by the BookOrbit reader redirect.
+#[derive(Debug, Default, Deserialize)]
+pub struct ReadQuery {
+    #[serde(default)]
+    refresh: Option<String>,
+}
+
+/// Open the Standard edition of an issue in BookOrbit's browser reader.
+pub async fn read(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    Path(date): Path<Date>,
+    Query(query): Query<ReadQuery>,
+) -> Result<Response, WebError> {
+    let _viewer = auth
+        .user()
+        .await
+        .map(Viewer::from)
+        .ok_or_else(|| WebError::Unauthenticated {
+            next: format!("/issues/{date}/read"),
+        })?;
+    let config = state.config();
+    if !config.bookorbit.is_active() {
+        return Err(WebError::NotFound);
+    }
+    let Some(row) = state.db.issue_by_date(date).await? else {
+        return Err(WebError::NotFound);
+    };
+    let refresh = query.refresh.as_deref() == Some("1");
+    if refresh {
+        state.db.set_bookorbit_ids(date, None).await?;
+    } else if let (Some(book_id), Some(file_id)) = (row.bookorbit_book_id, row.bookorbit_file_id) {
+        let ids = crate::bookorbit::BookorbitIds { book_id, file_id };
+        return Ok(Redirect::to(&crate::bookorbit::reader_url(
+            config.bookorbit.public_url(),
+            ids,
+        ))
+        .into_response());
+    }
+
+    let client = crate::http::build_client(Duration::from_secs(5))
+        .map_err(|error| WebError::BadGateway(format!("BookOrbit error: {error}")))?;
+    let opds_user = config
+        .bookorbit
+        .opds_user
+        .as_deref()
+        .ok_or(WebError::NotFound)?;
+    let opds_pass = config
+        .bookorbit
+        .opds_pass
+        .as_deref()
+        .ok_or(WebError::NotFound)?;
+    let issue_title = crate::types::issue_title(date);
+    match crate::bookorbit::find_issue(
+        &client,
+        config.bookorbit.api_url(),
+        opds_user,
+        opds_pass,
+        &issue_title,
+        date,
+    )
+    .await
+    {
+        Ok(Some(ids)) => {
+            state
+                .db
+                .set_bookorbit_ids(date, Some((ids.book_id, ids.file_id)))
+                .await?;
+            tracing::info!(
+                %date,
+                book_id = ids.book_id,
+                file_id = ids.file_id,
+                "cached BookOrbit issue ids"
+            );
+            Ok(Redirect::to(&crate::bookorbit::reader_url(
+                config.bookorbit.public_url(),
+                ids,
+            ))
+            .into_response())
+        }
+        Ok(None) => Err(WebError::ServiceUnavailable(
+            "BookOrbit has not indexed this issue yet. Try again in a minute.".to_string(),
+        )),
+        Err(error) => {
+            tracing::warn!(%date, %error, "BookOrbit issue lookup failed");
+            Err(WebError::BadGateway(error.to_string()))
+        }
+    }
 }
 
 fn article_href(date: Date, article_id: ArticleId) -> String {
@@ -2089,6 +2189,214 @@ mod tests {
         assert!(!issue.contains("2048 bytes"));
         assert!(!issue.contains("Download X4 EPUB"));
         assert!(!issue.contains("Download XTC"));
+    }
+
+    #[tokio::test]
+    async fn bookorbit_read_is_hidden_and_not_found_when_inactive() {
+        let (_dir, db, source) = seeded_issue(false).await;
+        crate::web::users::add(&db, "reader", "correct horse battery", false)
+            .await
+            .unwrap();
+        let app = crate::server::router(crate::server::AppState::new(
+            db,
+            crate::config::Config::default(),
+            None,
+        ));
+        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+
+        let issue = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}", source.meta.date))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let issue = response_text(issue).await;
+        assert!(issue.contains("Download EPUB"));
+        assert!(!issue.contains("Read in BookOrbit"));
+
+        let read = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}/read", source.meta.date))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn bookorbit_read_button_and_cached_redirect_use_the_public_url() {
+        let (dir, db, source) = seeded_issue(true).await;
+        crate::web::users::add(&db, "reader", "correct horse battery", false)
+            .await
+            .unwrap();
+        let epub_dir = dir.path().join("epubs");
+        std::fs::create_dir(&epub_dir).unwrap();
+        std::fs::write(
+            epub_dir.join(crate::publish::issue_filename(
+                source.meta.date,
+                Edition::Standard,
+                "epub",
+            )),
+            b"standard epub",
+        )
+        .unwrap();
+        db.set_bookorbit_ids(source.meta.date, Some((12, 34)))
+            .await
+            .unwrap();
+
+        let mut config = crate::config::Config::default();
+        config.publish.epub_dir = epub_dir.clone();
+        config.bookorbit.enabled = true;
+        config.bookorbit.opds_user = Some("reader".into());
+        config.bookorbit.opds_pass = Some("secret".into());
+        config.bookorbit.api_url = "http://127.0.0.1:9".into();
+        let app = crate::server::router(crate::server::AppState::new(
+            db.clone(),
+            config.clone(),
+            None,
+        ));
+        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+
+        let issue = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}", source.meta.date))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let issue = response_text(issue).await;
+        assert!(issue.contains("Read in BookOrbit"));
+        assert!(issue.contains(&format!("href=\"/issues/{}/read\"", source.meta.date)));
+
+        let read = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}/read", source.meta.date))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            read.headers().get(header::LOCATION).unwrap(),
+            "https://bookorbit.hallada.net/read/12/34"
+        );
+
+        config.bookorbit.public_url = "https://example.test/".into();
+        let app = crate::server::router(crate::server::AppState::new(db, config, None));
+        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+        let read = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}/read", source.meta.date))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            read.headers().get(header::LOCATION).unwrap(),
+            "https://example.test/read/12/34"
+        );
+    }
+
+    #[tokio::test]
+    async fn bookorbit_read_button_is_hidden_without_the_standard_epub() {
+        let (dir, db, source) = seeded_issue(true).await;
+        crate::web::users::add(&db, "reader", "correct horse battery", false)
+            .await
+            .unwrap();
+        let mut config = crate::config::Config::default();
+        config.publish.epub_dir = dir.path().join("missing-epubs");
+        config.bookorbit.enabled = true;
+        config.bookorbit.opds_user = Some("reader".into());
+        config.bookorbit.opds_pass = Some("secret".into());
+        let app = crate::server::router(crate::server::AppState::new(db, config, None));
+        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+
+        let issue = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}", source.meta.date))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let issue = response_text(issue).await;
+        assert!(!issue.contains("Read in BookOrbit"));
+        assert!(!issue.contains(&format!("href=\"/issues/{}/read\"", source.meta.date)));
+    }
+
+    #[tokio::test]
+    async fn bookorbit_read_reports_upstream_connection_errors() {
+        let (_dir, db, source) = seeded_issue(true).await;
+        crate::web::users::add(&db, "reader", "correct horse battery", false)
+            .await
+            .unwrap();
+        let mut config = crate::config::Config::default();
+        config.bookorbit.enabled = true;
+        config.bookorbit.opds_user = Some("reader".into());
+        config.bookorbit.opds_pass = Some("secret".into());
+        config.bookorbit.api_url = "http://127.0.0.1:9".into();
+        let app = crate::server::router(crate::server::AppState::new(db, config, None));
+        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+
+        let read = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}/read", source.meta.date))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::BAD_GATEWAY);
+        assert!(response_text(read).await.contains("BookOrbit"));
+    }
+
+    #[tokio::test]
+    async fn anonymous_bookorbit_read_redirects_to_login() {
+        let (_dir, db, source) = seeded_issue(true).await;
+        let mut config = crate::config::Config::default();
+        config.bookorbit.enabled = true;
+        config.bookorbit.opds_user = Some("reader".into());
+        config.bookorbit.opds_pass = Some("secret".into());
+        let app = crate::server::router(crate::server::AppState::new(db, config, None));
+
+        let read = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}/read", source.meta.date))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::FOUND);
+        assert_eq!(
+            read.headers().get(header::LOCATION).unwrap(),
+            format!("/login?next=%2Fissues%2F{}%2Fread", source.meta.date).as_str()
+        );
     }
 
     #[test]
