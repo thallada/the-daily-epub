@@ -649,8 +649,11 @@ async fn build_current_rows(
     let mut rows = Vec::new();
     let mut feeds: BTreeMap<FeedId, String> = BTreeMap::new();
     let mut rank = 0usize;
+    let ids: Vec<ArticleId> = ratings.iter().map(|rating| rating.article_id).collect();
+    let articles = db.get_articles(&ids).await?;
+    let sources = event_sources_for(db, &ids).await?;
     for rating in ratings {
-        let article = db.get_article(rating.article_id).await?;
+        let article = articles.get(&rating.article_id);
         let this_rank = if rating.label == "cleared" {
             None
         } else {
@@ -659,22 +662,12 @@ async fn build_current_rows(
             Some(current)
         };
         let has_embedding = embedded.contains(&rating.article_id);
-        let contribution = contribution(
-            rating,
-            article.as_ref(),
-            has_embedding,
-            this_rank,
-            now,
-            config,
-        );
-        let direct = article
-            .as_ref()
-            .map(signals::direct_feeds)
-            .unwrap_or_default();
+        let contribution = contribution(rating, article, has_embedding, this_rank, now, config);
+        let direct = article.map(signals::direct_feeds).unwrap_or_default();
         for feed_id in &direct {
             feeds
                 .entry(*feed_id)
-                .or_insert_with(|| feed_title_for(article.as_ref(), *feed_id));
+                .or_insert_with(|| feed_title_for(article, *feed_id));
         }
 
         let (badge, _) = widget_label(&rating.label);
@@ -691,7 +684,7 @@ async fn build_current_rows(
         {
             continue;
         }
-        let source = event_source_for(db, rating).await?;
+        let source = sources.get(&rating.article_id).cloned().unwrap_or_default();
         if filters
             .source
             .as_deref()
@@ -754,21 +747,43 @@ async fn build_current_rows(
     Ok((rows, feeds))
 }
 
-/// The `source` of the event behind a current verdict (`RatedArticle` does not
-/// carry it).
-async fn event_source_for(db: &Db, rating: &RatedArticle) -> Result<String, WebError> {
-    let row = sqlx::query(
-        "SELECT source FROM rating_events
-         WHERE article_id = ? AND kind = 'explicit'
-         ORDER BY event_at DESC, id DESC LIMIT 1",
-    )
-    .bind(rating.article_id)
-    .fetch_optional(db.pool())
-    .await
-    .map_err(DbError::from)?;
-    Ok(row
-        .map(|row| row.get::<String, _>("source"))
-        .unwrap_or_default())
+/// The `source` of the event behind each current verdict (`RatedArticle` does
+/// not carry it), for every article of the page in one statement per chunk.
+/// An article with no explicit event is absent from the map; the caller shows
+/// an empty source for it.
+async fn event_sources_for(
+    db: &Db,
+    ids: &[ArticleId],
+) -> Result<HashMap<ArticleId, String>, WebError> {
+    let mut sources = HashMap::with_capacity(ids.len());
+    // SQLite's default bound-parameter ceiling is 32 766; stay well under.
+    for chunk in ids.chunks(500) {
+        // Only the placeholder count is interpolated; every value is bound,
+        // which is what `AssertSqlSafe` asserts.
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT article_id, source FROM (
+                 SELECT article_id, source,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY article_id
+                            ORDER BY event_at DESC, id DESC
+                        ) AS event_rank
+                 FROM rating_events
+                 WHERE kind = 'explicit' AND article_id IN ({placeholders})
+             )
+             WHERE event_rank = 1"
+        )));
+        for id in chunk {
+            query = query.bind(*id);
+        }
+        for row in query.fetch_all(db.pool()).await.map_err(DbError::from)? {
+            sources.insert(
+                row.get::<ArticleId, _>("article_id"),
+                row.get::<String, _>("source"),
+            );
+        }
+    }
+    Ok(sources)
 }
 
 async fn load_events(
@@ -1292,6 +1307,12 @@ mod tests {
         assert!(body.contains("Postgres failover story"));
         assert!(!body.contains("A listicle"));
 
+        let by_source_current =
+            get(&app, "/dashboard/ratings?source=dashboard", Some(&cookie)).await;
+        let body = text(by_source_current).await;
+        assert!(body.contains("Postgres failover story"));
+        assert!(!body.contains("A listicle"));
+
         let events = get(&app, "/dashboard/ratings?tab=events", Some(&cookie)).await;
         assert_eq!(events.status(), StatusCode::OK);
         let body = text(events).await;
@@ -1324,6 +1345,40 @@ mod tests {
         let body = text(by_user).await;
         assert!(body.contains("Postgres failover story"));
         assert!(!body.contains("A listicle"));
+    }
+
+    #[tokio::test]
+    async fn event_sources_take_the_newest_explicit_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("db.sqlite"))
+            .await
+            .unwrap();
+        let rated = seed_article(&db, 1, 1001, "Rated twice").await;
+        let unrated = seed_article(&db, 2, 1002, "Never rated").await;
+        seed_event(
+            &db,
+            rated,
+            "good",
+            0.35,
+            "cli",
+            None,
+            "2026-08-01T00:00:00Z",
+        )
+        .await;
+        seed_event(
+            &db,
+            rated,
+            "loved",
+            1.0,
+            "dashboard",
+            None,
+            "2026-08-20T00:00:00Z",
+        )
+        .await;
+        let sources = event_sources_for(&db, &[rated, unrated]).await.unwrap();
+        assert_eq!(sources.get(&rated).map(String::as_str), Some("dashboard"));
+        assert_eq!(sources.get(&unrated), None);
+        assert!(event_sources_for(&db, &[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]
