@@ -4,8 +4,17 @@
       "source": "document",
       "where": {
         "and": [
-          { "href_matches": ["/", "/issues/*"] },
-          { "not": { "href_matches": ["/logout", "/rate", "/static/*", "/*\\?*"] } }
+          { "href_matches": ["/", "/issues", "/issues/*"] },
+          {
+            "not": {
+              "href_matches": [
+                "/logout",
+                "/rate",
+                "/static/*",
+                { "pathname": "/*", "search": "(.+)" }
+              ]
+            }
+          }
         ]
       },
       "eagerness": "moderate"
@@ -17,7 +26,16 @@
       "where": {
         "and": [
           { "href_matches": ["/dashboard", "/dashboard/*"] },
-          { "not": { "href_matches": ["/logout", "/rate", "/static/*", "/*\\?*"] } }
+          {
+            "not": {
+              "href_matches": [
+                "/logout",
+                "/rate",
+                "/static/*",
+                { "pathname": "/*", "search": "(.+)" }
+              ]
+            }
+          }
         ]
       },
       "eagerness": "moderate"

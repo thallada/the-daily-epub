@@ -1662,6 +1662,80 @@ mod tests {
         assert!(APP_CSS.contains(&format!("url(/static/Newsreader.woff2?v={version})")));
     }
 
+    /// A `\\?` inside an `href_matches` *string* never means what it looks
+    /// like. A URL pattern string is split into components before escapes are
+    /// resolved, so the `?` still ends the pathname: `"/*\\?*"` parses as
+    /// pathname `/*` with search `*`, which matches every same-origin URL.
+    /// Buried in a `not`, that silently excluded everything and no link was
+    /// ever speculated. Filter on the query with the object form instead —
+    /// `{"pathname": "/*", "search": "(.+)"}` — whose components are separate
+    /// by construction.
+    #[test]
+    fn speculation_rules_never_match_the_query_string_from_a_pattern_string() {
+        let rules: serde_json::Value =
+            serde_json::from_str(include_str!("static/speculation.json"))
+                .expect("speculation.json is valid JSON");
+
+        fn walk(value: &serde_json::Value, strings: &mut Vec<String>, objects: &mut usize) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        if key == "href_matches" {
+                            let patterns = match child {
+                                serde_json::Value::Array(items) => items.clone(),
+                                other => vec![other.clone()],
+                            };
+                            for pattern in patterns {
+                                match pattern {
+                                    serde_json::Value::String(text) => strings.push(text),
+                                    serde_json::Value::Object(components) => {
+                                        assert!(
+                                            !components.contains_key("search")
+                                                || components.contains_key("pathname"),
+                                            "a component pattern naming `search` must also name \
+                                             `pathname`, or the pathname is inherited from the \
+                                             document URL and the pattern matches nothing"
+                                        );
+                                        *objects += 1;
+                                    }
+                                    other => panic!(
+                                        "href_matches takes a string or an object, not {other}"
+                                    ),
+                                }
+                            }
+                        }
+                        walk(child, strings, objects);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        walk(item, strings, objects);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut strings = Vec::new();
+        let mut objects = 0;
+        walk(&rules, &mut strings, &mut objects);
+
+        assert!(
+            !strings.is_empty(),
+            "the rules matched no href_matches at all"
+        );
+        for pattern in &strings {
+            assert!(
+                !pattern.contains('?'),
+                "`{pattern}` reaches for the query from a pattern string; use the object form"
+            );
+        }
+        assert!(
+            objects > 0,
+            "no component pattern is left to exclude query URLs"
+        );
+    }
+
     /// A response that names no policy of its own must not be cacheable: a CDN
     /// cache-everything rule would otherwise give it the CDN's default TTL.
     #[tokio::test]
