@@ -61,6 +61,13 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = { version = "2.5.8", features = ["serde"] }
 zip = { version = "6", default-features = false, features = ["deflate"] }
 
+[profile.release]
+# Per-request cost in the web server is JSON decode and template render, both
+# CPU-bound and spread across crates; whole-program LTO and one codegen unit
+# buy a slice of that for a longer release build (tests use the dev profile).
+lto = "fat"
+codegen-units = 1
+
 [dev-dependencies]
 figment = { version = "0.10.19", features = ["test", "toml", "env"] }
 roxmltree = "0.21.1"

@@ -191,7 +191,7 @@ impl WebState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Flash {
     pub kind: String,
     pub text: String,
@@ -329,11 +329,104 @@ impl Page {
     }
 }
 
+/// Consume the one-shot flash message for this page, if there is one.
+///
+/// Reads before removing: `Session::remove` marks the session modified even
+/// when the key is absent, and a modified session is written back to SQLite
+/// at the end of the request, so the naive version cost every signed-in page
+/// a write. Because a session is only saved when modified, its inactivity
+/// expiry only slides when something changes it; [`touch_session`] keeps the
+/// `server.session_days` window sliding by writing at most once a day.
 pub async fn take_flash(session: &Session) -> Result<Option<Flash>, WebError> {
-    session
-        .remove("flash")
+    let flash = session
+        .get::<Flash>(FLASH_KEY)
         .await
-        .map_err(|error| WebError::Internal(error.into()))
+        .map_err(session_error)?;
+    if flash.is_some() {
+        session
+            .remove_value(FLASH_KEY)
+            .await
+            .map_err(session_error)?;
+        return Ok(flash);
+    }
+    touch_session(session).await?;
+    Ok(None)
+}
+
+const FLASH_KEY: &str = "flash";
+/// Session key holding the unix time of the last expiry-extending write.
+const TOUCHED_KEY: &str = "touched_at";
+/// How often a signed-in session is written just to slide its expiry.
+const TOUCH_INTERVAL_SECS: i64 = 24 * 60 * 60;
+
+/// Slide a signed-in session's inactivity expiry, at most once a day.
+///
+/// Only a session that already carries a login is touched. An anonymous
+/// request must never create a session: the cookie would follow that reader
+/// to every public page and take them out of the shared cache.
+async fn touch_session(session: &Session) -> Result<(), WebError> {
+    let signed_in = session
+        .get_value(session::AUTH_DATA_KEY)
+        .await
+        .map_err(session_error)?
+        .is_some();
+    if !signed_in {
+        return Ok(());
+    }
+    let now = Timestamp::now().as_second();
+    let last = session
+        .get::<i64>(TOUCHED_KEY)
+        .await
+        .map_err(session_error)?;
+    if last.is_none_or(|last| now - last >= TOUCH_INTERVAL_SECS) {
+        session
+            .insert(TOUCHED_KEY, now)
+            .await
+            .map_err(session_error)?;
+    }
+    Ok(())
+}
+
+fn session_error(error: axum_login::tower_sessions::session::Error) -> WebError {
+    WebError::Internal(error.into())
+}
+
+/// `Server-Timing: app;dur=<ms>` on every response: the time this process
+/// spent on the request, so the browser's DevTools (or `curl -sI`) can split
+/// origin work from the network. Outermost layer, so it covers the session
+/// load, auth and rendering.
+pub async fn server_timing(request: Request, next: Next) -> Response {
+    let started = std::time::Instant::now();
+    let mut response = next.run(request).await;
+    let millis = started.elapsed().as_secs_f64() * 1000.0;
+    if let Ok(value) = HeaderValue::from_str(&format!("app;dur={millis:.2}")) {
+        response
+            .headers_mut()
+            .insert(header::HeaderName::from_static("server-timing"), value);
+    }
+    response
+}
+
+/// Refuse TLS 1.3 0-RTT data for anything but a safe method (RFC 8470 §5.2).
+///
+/// With `ssl_early_data on`, nginx forwards `Early-Data: 1` for a request the
+/// browser sent inside the handshake. A replayed early-data `GET` is
+/// harmless; a replayed `POST` (a rating, a login attempt, a job start) is
+/// not, so those get 425 and the browser resends after the handshake.
+pub async fn reject_early_data(request: Request, next: Next) -> Response {
+    let early = request
+        .headers()
+        .get("early-data")
+        .is_some_and(|value| value == "1");
+    if early && !request.method().is_safe() {
+        return (
+            StatusCode::TOO_EARLY,
+            [(header::CACHE_CONTROL, "no-store")],
+            "retry after the TLS handshake completes",
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 pub struct Html<T: Template>(pub T);
@@ -751,6 +844,111 @@ mod tests {
                 .to_vec(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn take_flash_reads_without_dirtying_an_empty_session() {
+        let (_dir, state) = test_state(Config::default()).await;
+        let store = std::sync::Arc::new(session::SqliteSessionStore::new(state.db.pool().clone()));
+        let session = Session::new(None, store, None);
+        assert_eq!(take_flash(&session).await.unwrap(), None);
+        assert!(!session.is_modified());
+        assert!(session.is_empty().await);
+
+        let flash = Flash {
+            kind: "ok".into(),
+            text: "saved".into(),
+        };
+        session.insert(FLASH_KEY, &flash).await.unwrap();
+        assert_eq!(take_flash(&session).await.unwrap(), Some(flash));
+        assert_eq!(take_flash(&session).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn signed_in_pages_touch_the_session_once_a_day_not_every_request() {
+        let mut config = Config::default();
+        config.server.public_url = "https://daily.example".into();
+        let (_dir, state) = test_state(config).await;
+        // Only the dashboard and the signed-in issue pages consume flashes, so
+        // an admin exercises the path without an issue in the database.
+        users::add(&state.db, "admin", "correct horse battery", true)
+            .await
+            .unwrap();
+        let app = router(state.clone());
+        let cookie = login_cookie(&app, "admin", "correct horse battery").await;
+        let stamp = || async {
+            sqlx::query_scalar::<_, String>("SELECT updated_at || ' ' || data FROM sessions")
+                .fetch_one(state.db.pool())
+                .await
+                .unwrap()
+        };
+        let get = |uri: &str| {
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .unwrap()
+        };
+        // The first page after login writes the daily touch stamp…
+        let response = app.clone().oneshot(get("/dashboard/articles")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let first = stamp().await;
+        assert!(first.contains(TOUCHED_KEY), "{first}");
+        // …and the pages after it leave the row alone.
+        for uri in [
+            "/dashboard/articles",
+            "/dashboard/ratings",
+            "/dashboard/stats",
+            "/",
+            "/account",
+        ] {
+            let response = app.clone().oneshot(get(uri)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+        assert_eq!(stamp().await, first);
+    }
+
+    #[tokio::test]
+    async fn server_timing_header_and_early_data_guard() {
+        let (_dir, state) = test_state(Config::default()).await;
+        let app = router(state);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let timing = response
+            .headers()
+            .get("server-timing")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(timing.starts_with("app;dur="), "{timing}");
+
+        // A safe method may arrive as 0-RTT data; a POST may not.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header("early-data", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut request = post("/login", "username=a&password=b", "192.0.2.1");
+        request
+            .headers_mut()
+            .insert("early-data", HeaderValue::from_static("1"));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_EARLY);
     }
 
     #[tokio::test]

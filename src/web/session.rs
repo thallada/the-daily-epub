@@ -20,6 +20,11 @@ use crate::server::AppState;
 use crate::web::users::{self, Role, User};
 use crate::web::{Html, Page, WebError};
 
+/// The session key axum-login keeps the signed-in user under (its default
+/// `data_key`); the presence of this key is what "signed in" means to
+/// [`crate::web::take_flash`]'s once-a-day session touch.
+pub const AUTH_DATA_KEY: &str = "axum-login.data";
+
 const DUMMY_HASH: &str = "$argon2i$v=19$m=65536,t=1,p=1$c29tZXNhbHQAAAAAAAAAAA$+r0d29hqEB0yasKr55ZgICsQGSkl0v0kgwhd+U3wyRo";
 
 #[derive(Clone, Debug)]

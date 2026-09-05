@@ -182,7 +182,9 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             crate::web::session::require_same_origin,
         ))
+        .layer(from_fn(crate::web::reject_early_data))
         .layer(from_fn(crate::web::security_headers))
+        .layer(from_fn(crate::web::server_timing))
         .with_state(state)
 }
 

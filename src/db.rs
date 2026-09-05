@@ -5,7 +5,7 @@
 //! (implementation notes §2). Pipeline writes are idempotent upserts so that
 //! `generate --date X` can be re-run safely; feedback events are append-only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
@@ -331,6 +331,46 @@ impl Db {
         let mut article = article_from_row(&row)?;
         article.social = self.social_for_article(article.id).await?;
         Ok(Some(article))
+    }
+
+    /// Every article in `ids`, keyed by id, with its social refs attached:
+    /// one statement for the articles and one for the social rows, however
+    /// many ids there are. Ids without a row are simply absent. This is what
+    /// a page that shows a whole issue should call; `get_article` in a loop
+    /// costs two statements per pick, and the per-statement overhead, not the
+    /// SQLite work, was most of that page's origin time.
+    pub async fn get_articles(&self, ids: &[ArticleId]) -> Result<HashMap<ArticleId, Article>> {
+        let mut articles = HashMap::with_capacity(ids.len());
+        // SQLite's default bound-parameter ceiling is 32 766; stay well under.
+        for chunk in ids.chunks(500) {
+            // Only the placeholder count is interpolated; every value is bound,
+            // which is what `AssertSqlSafe` asserts.
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "{ARTICLE_SELECT_BY_IDS} ({placeholders})"
+            )));
+            for id in chunk {
+                query = query.bind(*id);
+            }
+            for row in query.fetch_all(&self.pool).await? {
+                let article = article_from_row(&row)?;
+                articles.insert(article.id, article);
+            }
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT article_id, source, item_id, score, num_comments, item_url, fetched_at
+                 FROM social WHERE article_id IN ({placeholders}) ORDER BY article_id, source"
+            )));
+            for id in chunk {
+                query = query.bind(*id);
+            }
+            for row in query.fetch_all(&self.pool).await? {
+                let social = social_from_row(&row)?;
+                if let Some(article) = articles.get_mut(&social.article_id) {
+                    article.social.push(social);
+                }
+            }
+        }
+        Ok(articles)
     }
 
     pub async fn article_id_for_url(&self, canonical_url: &str) -> Result<Option<ArticleId>> {
@@ -785,8 +825,13 @@ impl Db {
 }
 
 /// Joined projection used by [`Db::get_article`]; keep in sync with [`article_from_row`].
-const ARTICLE_SELECT_BY_ID: &str = "\
-SELECT a.id AS id, a.canonical_url AS canonical_url, a.title AS title,
+/// The article projection `article_from_row` reads, with the `WHERE` clause
+/// supplied by the caller so the single-id and the `IN (...)` lookups cannot
+/// drift apart.
+macro_rules! article_select {
+    ($where:literal) => {
+        concat!(
+            "SELECT a.id AS id, a.canonical_url AS canonical_url, a.title AS title,
        a.best_entry_id AS best_entry_id, a.content_html AS content_html,
        a.word_count AS word_count, a.excerpt_only AS excerpt_only,
        a.image_count AS image_count, a.sources_json AS sources_json,
@@ -795,7 +840,15 @@ SELECT a.id AS id, a.canonical_url AS canonical_url, a.title AS title,
        e.feed_title AS feed_title, e.category AS category,
        e.published_at AS published_at, e.comments_url AS comments_url
   FROM articles a LEFT JOIN entries e ON e.id = a.best_entry_id
- WHERE a.id = ?";
+ ",
+            $where
+        )
+    };
+}
+
+const ARTICLE_SELECT_BY_ID: &str = article_select!("WHERE a.id = ?");
+/// Followed at runtime by a parenthesised placeholder list.
+const ARTICLE_SELECT_BY_IDS: &str = article_select!("WHERE a.id IN");
 
 // ---------------------------------------------------------------------------
 // Row mapping helpers (implementation notes §1: manual mapping, no macros)
@@ -1112,6 +1165,11 @@ mod tests {
         assert_eq!(loaded.social.len(), 1);
         assert_eq!(loaded.social[0].score, 342);
         assert_eq!(loaded.feed_title, "Hacker News");
+        // The batched lookup agrees with the single one and skips unknown ids.
+        let batch = db.get_articles(&[id, 9_999]).await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[&id], loaded);
+        assert!(db.get_articles(&[]).await.unwrap().is_empty());
         assert_eq!(
             db.article_id_for_url("https://example.com/1")
                 .await

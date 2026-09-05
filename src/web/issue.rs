@@ -89,8 +89,17 @@ pub async fn load(
     };
     let (mut issue, from_json) = if let Some(raw) = row.issue_json.as_deref() {
         let mut issue: Issue = serde_json::from_str(raw).context("decoding issues.issue_json")?;
+        // The snapshot's articles are refreshed from the live rows (social
+        // scores move after publish) in one batched lookup.
+        let ids: Vec<ArticleId> = issue
+            .lineup
+            .picks
+            .iter()
+            .map(|pick| pick.article.id)
+            .collect();
+        let mut articles = db.get_articles(&ids).await?;
         for pick in &mut issue.lineup.picks {
-            if let Some(article) = db.get_article(pick.article.id).await? {
+            if let Some(article) = articles.remove(&pick.article.id) {
                 pick.article = article;
             }
         }
@@ -103,12 +112,14 @@ pub async fn load(
         .bind(date.to_string())
         .fetch_all(db.pool())
         .await?;
+        let ids: Vec<ArticleId> = rows.iter().map(|row| row.get("article_id")).collect();
+        let mut articles = db.get_articles(&ids).await?;
         let mut picks = Vec::with_capacity(rows.len());
         let mut seen_sections = Vec::new();
         let mut summaries = BTreeMap::new();
         for pick_row in rows {
             let article_id: i64 = pick_row.get("article_id");
-            let Some(article) = db.get_article(article_id).await? else {
+            let Some(article) = articles.remove(&article_id) else {
                 continue;
             };
             let section: String = pick_row.get("section");

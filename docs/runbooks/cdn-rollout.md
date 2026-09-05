@@ -1,5 +1,19 @@
 # Runbook — putting daily.hallada.net behind Cloudflare
 
+> **Status (2026-09-05): retired.** The `daily` record is **DNS only** again, one
+> day after this rollout. Measured from Boston with a session cookie (so the edge
+> bypassed its cache, as it does for every signed-in request): 70 ms after the
+> TLS handshake through the proxy against 27 ms straight to the origin. The edge
+> adds a proxy hop and its own overhead on every uncached request, and at this
+> traffic the cache is cold for anonymous readers too, so the proxy cost the one
+> signed-in reader more than it gave anyone. The zone stays on Cloudflare's
+> nameservers; flipping the record back to Proxied re-enables everything below.
+> When you do, also put the `cloudflare-real-ip.conf` include back into the nginx
+> server block (README, *Reverse proxy*) — it was removed with the proxy because
+> a direct connection from a Cloudflare address could otherwise name its own
+> client IP. The origin's `Cache-Control` matrix (§0) is still in force and is
+> what makes the toggle safe in either direction.
+
 **Written:** 2026-09-04 for the production host. Steps 1–3 happen in the Cloudflare
 and registrar dashboards; steps 4–5 are on the server as an operator with `sudo`.
 The origin-side changes (the `Cache-Control` matrix below) ship in the same

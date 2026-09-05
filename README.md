@@ -468,17 +468,27 @@ internet (e-readers tap these links). The OPDS catalog rides on the same host.
 The login throttle's `SmartIpKeyExtractor` keys on the first entry of
 `X-Forwarded-For`, so nginx must *set* that header from the connection's peer
 address rather than appending to whatever the client sent — otherwise anyone
-can mint a fresh throttle bucket per attempt by sending their own header. With
-Cloudflare in front, the connection's peer is Cloudflare, so `real_ip` has to
-rewrite `$remote_addr` from `CF-Connecting-IP` first (see the snippet below).
-The whole arrangement is only safe because the configured bind address is
-loopback and nginx is the only process that can reach it.
+can mint a fresh throttle bucket per attempt by sending their own header. (The
+original config appended with `$proxy_add_x_forwarded_for`; that was the
+spoofable version.) The whole arrangement is only safe because the configured
+bind address is loopback and nginx is the only process that can reach it.
 
-The site is served through Cloudflare; `docs/runbooks/cdn-rollout.md` covers the
-zone setup and cache rules. The nginx side of it is the `set_real_ip_from`
-snippet and the `X-Forwarded-For` line below.
+Nothing sits in front of nginx. The site ran behind the Cloudflare proxy for one
+day (2026-09-04 to 2026-09-05) and was taken back out: measured from Boston, the
+proxied signed-in page took 70 ms after the TLS handshake against 27 ms direct,
+and at this traffic the edge cache is cold for anonymous readers anyway. The zone
+still lives on Cloudflare's nameservers, so re-proxying is a one-click toggle;
+`docs/runbooks/cdn-rollout.md` keeps the zone settings, cache rules and the
+nginx additions (the `set_real_ip_from` snippet) that the proxied setup needs.
 
 ```nginx
+# One pool of idle connections to the app, so a request does not pay a fresh
+# loopback TCP connect (and leave a TIME-WAIT socket) every time.
+upstream daily_epub {
+    server 127.0.0.1:3499;
+    keepalive 8;
+}
+
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
@@ -488,11 +498,12 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/daily.hallada.net/privkey.pem;
     ssl_trusted_certificate /etc/letsencrypt/live/daily.hallada.net/fullchain.pem;
 
-    include /etc/nginx/snippets/security-headers.conf;
+    # TLS 1.3 0-RTT: a returning browser sends its first request inside the
+    # handshake and saves a round trip. Safe only because the app answers 425
+    # to any non-GET that arrives as early data (the Early-Data header below).
+    ssl_early_data on;
 
-    # Trust Cloudflare's edge for the client address: $remote_addr becomes the
-    # visitor, not the proxy. Must come before the X-Forwarded-For line below.
-    include /etc/nginx/snippets/cloudflare-real-ip.conf;
+    include /etc/nginx/snippets/security-headers.conf;
 
     # The global `gzip on` only covers text/html. The stylesheet is ~12 KB of
     # plain CSS again — the Newsreader faces are separate .woff2 URLs, not
@@ -514,14 +525,21 @@ server {
     proxy_max_temp_file_size 0;
 
     location / {
-        proxy_pass http://127.0.0.1:3499;
+        proxy_pass http://daily_epub;
+        # Keep-alive to the upstream needs HTTP/1.1 and an empty Connection
+        # header (the default would forward "close").
         proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header Host $host;
         # SET, not append. The login throttle keys on the first X-Forwarded-For
         # entry, so a client-supplied header must never survive into the app.
-        # $remote_addr is the real visitor because of the real_ip snippet above.
+        # $remote_addr is the connection's peer, which is the visitor itself
+        # now that no proxy sits in front of nginx.
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # "1" while the request arrived as 0-RTT data (RFC 8470); the app
+        # rejects non-safe methods sent that way.
+        proxy_set_header Early-Data $ssl_early_data;
     }
 }
 
@@ -533,6 +551,13 @@ server {
 }
 ```
 
+**Only while the record is proxied through Cloudflare:** the connection's peer
+is then Cloudflare, so `real_ip` has to rewrite `$remote_addr` from
+`CF-Connecting-IP` before the `X-Forwarded-For` line runs. Add
+`include /etc/nginx/snippets/cloudflare-real-ip.conf;` to the server block,
+above `location /`. Leave it out when the record is DNS-only: it would be inert
+for ordinary visitors, but anything connecting *from* a Cloudflare address (a
+Worker, say) could then name its own address and dodge the login throttle.
 `/etc/nginx/snippets/cloudflare-real-ip.conf` is one `set_real_ip_from` line per
 published Cloudflare range plus the header to read. Cloudflare adds ranges from
 time to time, so **regenerate it from the source rather than copying this list**
@@ -574,15 +599,21 @@ real_ip_header CF-Connecting-IP;
 ```
 
 Enable the site (`ln -s` into `sites-enabled`, `nginx -t`, `systemctl reload
-nginx`), then `curl https://daily.hallada.net/healthz` should return `ok`. No
+nginx`), then `curl https://daily.hallada.net/healthz` should return `ok`.
+Every response carries `Server-Timing: app;dur=<ms>`, the time the app spent
+on the request; the browser's DevTools network panel shows it next to the
+network timings, and `curl -sI` prints it, so origin work and the network can
+be told apart without touching the logs. No
 auth is needed at the proxy layer: rating links are self-authenticating (HMAC
 tokens) and the OPDS/file routes use the app-level Basic auth from
 `server.basic_auth_user`/`_pass` if you set them.
 
 #### HTTP caching
 
-The origin says what may be cached and for how long; the CDN is configured to
-respect it (runbook §2). The whole matrix:
+The origin says what may be cached and for how long. No shared cache sits in
+front of it today (the Cloudflare proxy was retired on 2026-09-05), but every
+response still carries an explicit policy so the proxy can come back with a DNS
+toggle and nothing else. The whole matrix:
 
 | route | `Cache-Control` |
 |---|---|
