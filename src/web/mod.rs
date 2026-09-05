@@ -890,7 +890,11 @@ mod tests {
                 .unwrap()
         };
         // The first page after login writes the daily touch stamp…
-        let response = app.clone().oneshot(get("/dashboard/articles")).await.unwrap();
+        let response = app
+            .clone()
+            .oneshot(get("/dashboard/articles"))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let first = stamp().await;
         assert!(first.contains(TOUCHED_KEY), "{first}");
