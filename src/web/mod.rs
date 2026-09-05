@@ -456,6 +456,12 @@ pub enum WebError {
     Unauthenticated { next: String },
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// BookOrbit has not indexed the requested issue yet.
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+    /// A BookOrbit OPDS request failed.
+    #[error("bad gateway: {0}")]
+    BadGateway(String),
     #[error("request origin did not match this site")]
     Csrf,
     #[error(transparent)]
@@ -510,6 +516,14 @@ impl IntoResponse for WebError {
             ),
             Self::BadRequest(ref message) => {
                 (StatusCode::BAD_REQUEST, "Bad request", message.as_str())
+            }
+            Self::ServiceUnavailable(ref message) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Not indexed yet",
+                message.as_str(),
+            ),
+            Self::BadGateway(ref message) => {
+                (StatusCode::BAD_GATEWAY, "BookOrbit error", message.as_str())
             }
             Self::Db(ref error) => {
                 tracing::error!(%error, "web database request failed");
@@ -660,6 +674,7 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
         .route("/issues/{date}/articles/{article_id}", get(issue::article))
         .route("/issues/{date}/world", get(issue::world))
         .route("/issues/{date}/behind", get(issue::behind))
+        .route("/issues/{date}/read", get(issue::read))
         .route_layer(login_required!(
             session::Backend,
             login_url = "/login",

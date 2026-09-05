@@ -233,6 +233,7 @@ these writes.
 |---|---|---|
 | `GET /`, `/issues`, `/issues/{date}`, `/feed.xml` | Public | Latest issue, archive, stripped issue index, and equivalent Atom feed. Signed-in issue views expand to the complete issue. |
 | `GET /issues/{date}/articles/{id}`, `/world`, `/behind` | User or admin | Private article, World Briefing, and Behind the paper chapters. |
+| `GET /issues/{date}/read` | User or admin | Open the Standard edition in BookOrbit's web reader when the integration is enabled. |
 | `GET /robots.txt`, `/static/{file}` | Public | Crawler policy and embedded CSS, JavaScript, and favicon. |
 | `GET/POST /login`, `POST /logout` | Public/session | Sign in and out; login attempts are throttled per client IP. |
 | `GET /account`, `POST /account/password`, `/account/logout-all` | User or admin | Change the current password or revoke sessions. |
@@ -355,6 +356,11 @@ prints what resolved.
 | `editorial.summary_input_tokens` | `3000` | Article text offered to the summary prompt. |
 | `publish.epub_dir` | `/srv/bookorbit/libraries/daily-epub` | Both EPUB editions land here by atomic copy, and this is the directory the OPDS feed lists. The editions are distinguished by a `(X4)` tag in **both** the filename and `dc:title` — libraries and OPDS clients list books by title, so the filename alone would make them look identical. Point a BookOrbit watched folder at it if you want its UI too. **Renamed from `bookorbit_dir`**; the old key is a hard config error. |
 | `publish.xtc_dir` | `/var/lib/daily-epub/xtc` | XTC artifacts. **Not** listed in the OPDS feed — CrossPoint cannot acquire them — but downloadable at `/files/xtc/<name>` for sideloading. |
+| `bookorbit.enabled` | `false` | Enable the signed-in **Read in BookOrbit** integration when both OPDS credentials are set. |
+| `bookorbit.public_url` | `https://bookorbit.hallada.net` | Browser-facing BookOrbit base URL. |
+| `bookorbit.api_url` | `http://127.0.0.1:3498` | Server-facing BookOrbit base URL used for OPDS lookups. |
+| `bookorbit.opds_user` | unset | Dedicated OPDS user created in BookOrbit's Settings → OPDS. |
+| `bookorbit.opds_pass` | — | **`DAILY_EPUB_BOOKORBIT__OPDS_PASS`**, environment only. |
 | `xtc.enabled` | `true` | Set `false` to skip the converter entirely. |
 | `xtc.command` | `node` | Converter executable. |
 | `xtc.args` | `["/opt/epub-to-xtc-converter/cli/index.js", "convert"]` | Prefix; the code appends `<input.epub> -o <output> -f <format>` (plus `-c <settings>`). |
@@ -698,6 +704,16 @@ the two editions of one issue are distinguishable in the list.
 This is deliberately independent of BookOrbit: it needs only the directory, so
 BookOrbit is optional, and it puts the day's issue one screen from the X4's home
 instead of several clicks down a library tree.
+
+For desktop reading, the signed-in issue page can show a **Read in BookOrbit**
+button that opens the Standard edition in BookOrbit's web reader. Create an OPDS
+user in BookOrbit under Settings → OPDS, put its name in `config.toml`, put
+`DAILY_EPUB_BOOKORBIT__OPDS_PASS` in `/etc/daily-epub/env`, set
+`bookorbit.enabled = true`, and restart `daily-epub.service`; no systemd change
+is needed because the unit already allows loopback HTTP. Book and file ids are
+looked up lazily on the first click and cached on the `issues` row; if BookOrbit
+re-indexes a book, `/issues/<date>/read?refresh=1` clears the cache and resolves
+the ids again.
 
 ### Why XTC is not in the feed
 

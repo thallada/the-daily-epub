@@ -13,6 +13,7 @@
 //! ```
 
 pub mod auth;
+pub mod bookorbit;
 pub mod comments;
 pub mod config;
 pub mod curate;
