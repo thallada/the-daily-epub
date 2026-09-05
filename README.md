@@ -490,9 +490,20 @@ upstream daily_epub {
 }
 
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    # HTTP/3 (nginx ≥ 1.25 built --with-http_v3_module; nginx.org packages
+    # are). QUIC folds the TCP and TLS handshakes into one round trip. UDP 443
+    # must be open in the firewall. `reuseport` goes on exactly one quic
+    # listener per address; other server blocks on this host share it.
+    listen 443 quic reuseport;
+    listen [::]:443 quic reuseport;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    http3 on;
     server_name daily.hallada.net;
+    # Tell an HTTP/2 client that HTTP/3 is available on the same port; the
+    # browser switches on its next connection and remembers for a day.
+    add_header Alt-Svc 'h3=":443"; ma=86400' always;
 
     ssl_certificate     /etc/letsencrypt/live/daily.hallada.net/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/daily.hallada.net/privkey.pem;
@@ -501,6 +512,8 @@ server {
     # TLS 1.3 0-RTT: a returning browser sends its first request inside the
     # handshake and saves a round trip. Safe only because the app answers 425
     # to any non-GET that arrives as early data (the Early-Data header below).
+    # Applies to the TCP listener; over QUIC, nginx needs OpenSSL ≥ 3.5.1 for
+    # early data, and the nginx.org build links the distro's OpenSSL.
     ssl_early_data on;
 
     include /etc/nginx/snippets/security-headers.conf;
