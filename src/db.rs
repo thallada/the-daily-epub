@@ -71,6 +71,8 @@ pub struct IssueRow {
     pub front_page_html: Option<String>,
     pub report_json: Option<String>,
     pub issue_json: Option<String>,
+    pub bookorbit_book_id: Option<i64>,
+    pub bookorbit_file_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -537,13 +539,33 @@ impl Db {
     pub async fn issue_by_date(&self, date: Date) -> Result<Option<IssueRow>> {
         let row = sqlx::query(
             "SELECT date, issue_number, generated_at, epub_path, x4_path, xtc_path,
-                    front_page_html, report_json, issue_json
+                    front_page_html, report_json, issue_json,
+                    bookorbit_book_id, bookorbit_file_id
              FROM issues WHERE date = ?",
         )
         .bind(date.to_string())
         .fetch_optional(&self.pool)
         .await?;
         row.as_ref().map(issue_from_row).transpose()
+    }
+
+    /// Store or clear the BookOrbit reader ids cached for an issue date.
+    pub async fn set_bookorbit_ids(&self, date: Date, ids: Option<(i64, i64)>) -> Result<()> {
+        let (book_id, file_id) = match ids {
+            Some((book_id, file_id)) => (Some(book_id), Some(file_id)),
+            None => (None, None),
+        };
+        sqlx::query(
+            "UPDATE issues
+             SET bookorbit_book_id = ?, bookorbit_file_id = ?
+             WHERE date = ?",
+        )
+        .bind(book_id)
+        .bind(file_id)
+        .bind(date.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Issue archive rows, newest first. A non-positive limit means all rows.
@@ -969,6 +991,8 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<IssueRow> {
         front_page_html: row.get("front_page_html"),
         report_json: row.get("report_json"),
         issue_json: row.get("issue_json"),
+        bookorbit_book_id: row.get("bookorbit_book_id"),
+        bookorbit_file_id: row.get("bookorbit_file_id"),
     })
 }
 
@@ -1224,6 +1248,48 @@ mod tests {
             .await
             .unwrap();
         assert!(spend.values().all(|usd| *usd == 0.0));
+    }
+
+    #[tokio::test]
+    async fn bookorbit_ids_round_trip_and_clear() {
+        let (_dir, db) = temp_db().await;
+        let date: Date = "2026-08-15".parse().unwrap();
+        db.upsert_issue(
+            date,
+            1,
+            ts("2026-08-15T05:36:00Z"),
+            Some("The Daily EPUB - 2026-08-15.epub"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        db.set_bookorbit_ids(date, Some((42, 84))).await.unwrap();
+        db.upsert_issue(
+            date,
+            1,
+            ts("2026-08-15T05:37:00Z"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let issue = db.issue_by_date(date).await.unwrap().unwrap();
+        assert_eq!(issue.bookorbit_book_id, Some(42));
+        assert_eq!(issue.bookorbit_file_id, Some(84));
+
+        db.set_bookorbit_ids(date, None).await.unwrap();
+        let issue = db.issue_by_date(date).await.unwrap().unwrap();
+        assert_eq!(issue.bookorbit_book_id, None);
+        assert_eq!(issue.bookorbit_file_id, None);
     }
 
     async fn record_run(db: &Db, date: Date, started: &str, deepseek: f64, anthropic: f64) {

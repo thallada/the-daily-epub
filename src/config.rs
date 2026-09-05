@@ -82,6 +82,7 @@ pub struct Config {
     pub publish: PublishConfig,
     pub xtc: XtcConfig,
     pub server: ServerConfig,
+    pub bookorbit: BookorbitConfig,
 }
 
 impl Default for Config {
@@ -106,6 +107,7 @@ impl Default for Config {
             publish: PublishConfig::default(),
             xtc: XtcConfig::default(),
             server: ServerConfig::default(),
+            bookorbit: BookorbitConfig::default(),
         }
     }
 }
@@ -728,6 +730,60 @@ impl Default for ServerConfig {
     }
 }
 
+/// `[bookorbit]` — optional web-reader integration via BookOrbit's OPDS API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BookorbitConfig {
+    /// Whether the signed-in BookOrbit reader integration is enabled.
+    pub enabled: bool,
+    /// Base URL opened in the reader's browser.
+    pub public_url: String,
+    /// Base URL used for server-side OPDS requests.
+    pub api_url: String,
+    /// Dedicated BookOrbit OPDS username.
+    pub opds_user: Option<String>,
+    /// Dedicated BookOrbit OPDS password; supply via
+    /// `DAILY_EPUB_BOOKORBIT__OPDS_PASS`.
+    pub opds_pass: Option<String>,
+}
+
+impl Default for BookorbitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            public_url: "https://bookorbit.hallada.net".into(),
+            api_url: "http://127.0.0.1:3498".into(),
+            opds_user: None,
+            opds_pass: None,
+        }
+    }
+}
+
+impl BookorbitConfig {
+    /// Whether the integration is enabled and has non-empty OPDS credentials.
+    pub fn is_active(&self) -> bool {
+        self.enabled
+            && self
+                .opds_user
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self
+                .opds_pass
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+    }
+
+    /// Browser-facing base URL without trailing slashes.
+    pub fn public_url(&self) -> &str {
+        self.public_url.trim_end_matches('/')
+    }
+
+    /// Server-facing API base URL without trailing slashes.
+    pub fn api_url(&self) -> &str {
+        self.api_url.trim_end_matches('/')
+    }
+}
+
 /// Config keys that moved from `[deepseek]` to `[llm]`; anywhere else they are
 /// a stale-configuration error.
 const LLM_ROLE_KEYS: &[&str] = &[
@@ -1267,6 +1323,11 @@ mod tests {
         assert_eq!(c.curation.feedback.verdicts_in_prompt, 60);
         assert_eq!(c.xtc.format, XtcFormat::Xtch);
         assert_eq!(c.curation.sections.len(), 8);
+        assert!(!c.bookorbit.enabled);
+        assert_eq!(c.bookorbit.public_url, "https://bookorbit.hallada.net");
+        assert_eq!(c.bookorbit.api_url, "http://127.0.0.1:3498");
+        assert!(c.bookorbit.opds_user.is_none());
+        assert!(c.bookorbit.opds_pass.is_none());
         c.validate().unwrap();
     }
 
@@ -1296,6 +1357,7 @@ mod tests {
             jail.set_env("DAILY_EPUB_MINIFLUX__API_KEY", "secret-token");
             jail.set_env("DAILY_EPUB_TARGET_ARTICLE_COUNT", "12");
             jail.set_env("DAILY_EPUB_SERVER__HMAC_SECRET", "hunter2");
+            jail.set_env("DAILY_EPUB_BOOKORBIT__OPDS_PASS", "orbit-secret");
             jail.set_env("DAILY_EPUB_VOYAGE__API_KEY", "voyage-key");
             jail.set_env("DAILY_EPUB_VOYAGE__ENABLED", "false");
             jail.set_env("DAILY_EPUB_PROVIDERS__GEMINI__API_KEY", "gemini-key");
@@ -1324,11 +1386,29 @@ mod tests {
             assert_eq!(c.miniflux.api_key.as_deref(), Some("secret-token"));
             assert_eq!(c.target_article_count, 12);
             assert_eq!(c.server.hmac_secret.as_deref(), Some("hunter2"));
+            assert_eq!(c.bookorbit.opds_pass.as_deref(), Some("orbit-secret"));
             // untouched default
             assert_eq!(c.retention_days, 21);
             assert_eq!(c.timezone, "America/New_York");
             Ok(())
         });
+    }
+
+    #[test]
+    fn bookorbit_activation_and_url_accessors() {
+        let mut bookorbit = BookorbitConfig {
+            enabled: true,
+            public_url: "https://books.example///".into(),
+            api_url: "http://127.0.0.1:3498/".into(),
+            opds_user: Some("reader".into()),
+            opds_pass: Some("secret".into()),
+        };
+        assert!(bookorbit.is_active());
+        assert_eq!(bookorbit.public_url(), "https://books.example");
+        assert_eq!(bookorbit.api_url(), "http://127.0.0.1:3498");
+
+        bookorbit.opds_pass = Some("  ".into());
+        assert!(!bookorbit.is_active());
     }
 
     #[test]
