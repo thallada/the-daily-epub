@@ -346,6 +346,11 @@ struct StageContext<'a> {
     rescore: bool,
 }
 
+/// Share of the day's articles that must fall back to a feed excerpt before the
+/// run is degraded over it. Single-digit percentages are routine; the exact count
+/// is always in `counts.excerpt_only`.
+const EXCERPT_FALLBACK_WARN_SHARE: f64 = 0.30;
+
 async fn run_stages(
     ctx: &StageContext<'_>,
     window_start: Timestamp,
@@ -412,11 +417,24 @@ async fn run_stages(
     let extract_stats = extractor.extract_all(&mut articles).await;
     report.counts.extracted = (extract_stats.from_miniflux + extract_stats.from_readability) as i64;
     report.counts.excerpt_only = extract_stats.excerpt_only as i64;
+    // A handful of fetch failures is the normal state of the open web, so only a
+    // day well past the usual rate is worth degrading the run over.
     if extract_stats.fetch_failures > 0 {
-        report.warn(format!(
-            "{} articles fell back to a feed excerpt",
-            extract_stats.fetch_failures
-        ));
+        let share = extract_stats.fetch_failures as f64 / articles.len().max(1) as f64;
+        if share >= EXCERPT_FALLBACK_WARN_SHARE {
+            report.warn(format!(
+                "{} of {} articles ({:.0}%) fell back to a feed excerpt",
+                extract_stats.fetch_failures,
+                articles.len(),
+                share * 100.0
+            ));
+        } else {
+            tracing::info!(
+                failures = extract_stats.fetch_failures,
+                articles = articles.len(),
+                "articles fell back to a feed excerpt"
+            );
+        }
     }
     report.timings.record("extract", elapsed_ms(stage));
 

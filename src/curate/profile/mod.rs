@@ -432,6 +432,11 @@ pub async fn rebuild(
     profile_path: &Path,
     verdict_limit: usize,
 ) -> anyhow::Result<TasteProfile> {
+    // Read the prompt inputs first: a rebuild that dies on a missing OPML must
+    // stay due and must not have spent a model call getting there.
+    let opml = parse_interests(opml_path)?;
+    let profile_file = load_profile(profile_path)?;
+    let interests = union_interests(opml, profile_file.interests.clone());
     let ratings = db.current_ratings(RATINGS_LOOKBACK_DAYS).await?;
     let previous = db.kv_get(KV_LEARNED_ADJUSTMENTS).await?.unwrap_or_default();
     let learned = if ratings.is_empty() {
@@ -464,21 +469,17 @@ pub async fn rebuild(
     let built_at = Timestamp::now();
     store_version(db, next_version, built_at).await?;
 
-    let opml = parse_interests(opml_path)?;
-    let profile_file = load_profile(profile_path)?;
-    let interests = union_interests(opml, profile_file.interests.clone());
-    let current = db.current_ratings(RATINGS_LOOKBACK_DAYS).await?;
     let profile = TasteProfile {
         text: build(
             &profile_file.body,
             &interests,
             &learned,
-            &current,
+            &ratings,
             verdict_limit,
         ),
         version: next_version,
         built_at,
-        verdicts: current.len().min(verdict_limit),
+        verdicts: ratings.len().min(verdict_limit),
     };
     db.kv_set(KV_TASTE_PROFILE, &profile.text).await?;
     tracing::info!(
@@ -685,5 +686,44 @@ mod tests {
         );
         assert_eq!(backend.calls(), 1);
         assert!(backend.prompts()[0].user.contains("LOVED | A deep report"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_rebuild_leaves_the_version_alone_and_spends_nothing() {
+        use std::sync::Arc;
+
+        use super::super::llm::{MockBackend, UsageMeter};
+        use crate::config::ProviderConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("profile.db"))
+            .await
+            .unwrap();
+        let opml = dir.path().join("interests.opml");
+        let profile_path = dir.path().join("profile.md");
+        std::fs::write(&opml, r#"<outline text="Rust"/>"#).unwrap();
+        std::fs::write(&profile_path, "# Reader profile\n\nLikes depth.\n").unwrap();
+        let initial = load_or_build(&db, &opml, &profile_path, 60).await.unwrap();
+        assert_eq!(initial.version, 1);
+
+        // The OPML goes missing the way a relative path does under a service
+        // whose working directory is not the checkout.
+        std::fs::remove_file(&opml).unwrap();
+
+        let backend = Arc::new(MockBackend::new());
+        let llm = LlmClient::with_backend(
+            "deepseek-v4-flash",
+            initial.text,
+            UsageMeter::for_provider(&ProviderConfig::deepseek()),
+            backend.clone(),
+        );
+        let error = rebuild(&db, &llm, &opml, &profile_path, 60)
+            .await
+            .expect_err("a missing OPML fails the rebuild");
+        assert!(format!("{error:#}").contains("reading the interests OPML"));
+
+        // Still version 1, so the profile stays stale and the rebuild is retried.
+        assert_eq!(stored_version(&db).await.unwrap().unwrap().0, 1);
+        assert_eq!(backend.calls(), 0);
     }
 }
