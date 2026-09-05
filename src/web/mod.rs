@@ -3,6 +3,7 @@ pub mod issue;
 pub mod public;
 pub mod rate;
 pub mod session;
+pub mod timing;
 pub mod users;
 
 use std::fmt;
@@ -391,21 +392,11 @@ fn session_error(error: axum_login::tower_sessions::session::Error) -> WebError 
     WebError::Internal(error.into())
 }
 
-/// `Server-Timing: app;dur=<ms>` on every response: the time this process
-/// spent on the request, so the browser's DevTools (or `curl -sI`) can split
-/// origin work from the network. Outermost layer, so it covers the session
-/// load, auth and rendering.
-pub async fn server_timing(request: Request, next: Next) -> Response {
-    let started = std::time::Instant::now();
-    let mut response = next.run(request).await;
-    let millis = started.elapsed().as_secs_f64() * 1000.0;
-    if let Ok(value) = HeaderValue::from_str(&format!("app;dur={millis:.2}")) {
-        response
-            .headers_mut()
-            .insert(header::HeaderName::from_static("server-timing"), value);
-    }
-    response
-}
+/// `Server-Timing` on every response, so the browser's DevTools (or
+/// `curl -sI`) can split origin work from the network and then split the
+/// origin work up again. See [`timing`] for the metrics and how they are
+/// collected.
+pub use self::timing::{route_boundary, server_timing};
 
 /// Refuse TLS 1.3 0-RTT data for anything but a safe method (RFC 8470 §5.2).
 ///
@@ -433,7 +424,10 @@ pub struct Html<T: Template>(pub T);
 
 impl<T: Template> IntoResponse for Html<T> {
     fn into_response(self) -> Response {
-        match self.0.render() {
+        let started = std::time::Instant::now();
+        let rendered = self.0.render();
+        timing::record_render(started.elapsed());
+        match rendered {
             Ok(body) => (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -794,6 +788,20 @@ mod tests {
     use crate::db::Db;
     use crate::server::{AppState, router};
 
+    /// The `db` metric only fills in when [`timing::sqlx_timing_layer`] is
+    /// installed, and it has to be installed *globally*: sqlx times statements
+    /// on a worker thread, which sees no thread-local default. Global means
+    /// once per test binary, hence the `Once`; nothing is written anywhere, so
+    /// the tests that do not care never notice it.
+    fn install_timing_layer() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            let subscriber = tracing_subscriber::registry().with(timing::sqlx_timing_layer());
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
     async fn test_state(config: Config) -> (tempfile::TempDir, AppState) {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_and_migrate(&dir.path().join("db.sqlite"))
@@ -933,6 +941,10 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(timing.starts_with("app;dur="), "{timing}");
+        // `/healthz` is routed but touches neither SQLite nor a template.
+        assert!(timing.contains("sess;dur="), "{timing}");
+        assert!(!timing.contains("db;dur="), "{timing}");
+        assert!(!timing.contains("tpl;dur="), "{timing}");
 
         // A safe method may arrive as 0-RTT data; a POST may not.
         let response = app
@@ -953,6 +965,79 @@ mod tests {
             .insert("early-data", HeaderValue::from_static("1"));
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::TOO_EARLY);
+    }
+
+    /// The `db` metric crosses a thread boundary to get here: sqlx runs the
+    /// statement on the connection's worker thread and only reports the
+    /// elapsed time there, inside the span this request handed it. This is the
+    /// test that the hand-off actually holds together.
+    #[tokio::test]
+    async fn server_timing_breaks_the_request_into_session_db_and_template() {
+        install_timing_layer();
+        let (_dir, state) = test_state(Config::default()).await;
+        users::add(&state.db, "admin", "correct horse battery", true)
+            .await
+            .unwrap();
+        let app = router(state);
+        let cookie = login_cookie(&app, "admin", "correct horse battery").await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/articles")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let timing = response
+            .headers()
+            .get("server-timing")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Every metric is present, and each is a number the spec allows.
+        assert!(timing.starts_with("app;dur="), "{timing}");
+        let mut durations = std::collections::HashMap::new();
+        for metric in timing.split(", ") {
+            let (name, rest) = metric.split_once(";dur=").expect(&timing);
+            let number = rest.split(';').next().unwrap();
+            durations.insert(name, number.parse::<f64>().expect(&timing));
+        }
+        for name in ["app", "sess", "db", "tpl"] {
+            assert!(durations.contains_key(name), "{name} missing from {timing}");
+        }
+
+        // A dashboard page loads the session and renders, so each of those is
+        // inside the whole rather than beside it. `db` is left out: it is a
+        // sum of statement times, which a handler running queries concurrently
+        // could legitimately push past the wall clock.
+        let app_dur = durations["app"];
+        for name in ["sess", "tpl"] {
+            assert!(durations[name] <= app_dur, "{name} exceeds app in {timing}");
+        }
+        // `sess` is the session load and save; `db` includes those statements
+        // and the page's own, so neither is a subset of the other, but both
+        // had to have measured something.
+        assert!(durations["db"] > 0.0, "{timing}");
+
+        // The statement count rides along in `desc`, which is where DevTools
+        // shows it. A dashboard page runs several: session, user, articles.
+        let db = timing
+            .split(", ")
+            .find(|metric| metric.starts_with("db;"))
+            .expect(&timing);
+        let count: u32 = db
+            .split("desc=\"")
+            .nth(1)
+            .and_then(|desc| desc.split_whitespace().next())
+            .and_then(|count| count.parse().ok())
+            .unwrap_or_else(|| panic!("no statement count in {db}"));
+        assert!(count > 1, "{db}");
+        assert!(db.ends_with(" queries\""), "{db}");
     }
 
     #[tokio::test]

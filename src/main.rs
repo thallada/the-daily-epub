@@ -511,13 +511,27 @@ fn read_password_hidden(prompt: &str) -> Result<String> {
 }
 
 /// `RUST_LOG`-driven tracing, defaulting to `info` (crate table "logging").
+///
+/// Two layers over one registry rather than a bare `fmt()`: the statement
+/// timings behind the `db` metric of `Server-Timing` ride in on sqlx's own
+/// `DEBUG` events, and [`daily_epub::web::timing`] needs those enabled without
+/// any of them reaching the log. Each layer carries its own filter, so the
+/// `RUST_LOG` above still says exactly what gets printed.
 fn init_tracing() {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,hyper=warn,reqwest=warn"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_writer(std::io::stderr)
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(std::io::stderr)
+                .with_filter(filter),
+        )
+        .with(daily_epub::web::timing::sqlx_timing_layer())
         .init();
 }
 

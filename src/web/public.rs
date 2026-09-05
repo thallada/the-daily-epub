@@ -308,9 +308,12 @@ pub async fn feed(State(state): State<AppState>) -> Result<Response, WebError> {
         };
         updated = updated.max(view.issue.meta.generated_at);
         let issue = PublicIssue::from(&view.issue);
-        let content = FeedEntryTemplate { issue: &issue }
-            .render()
-            .map_err(|error| WebError::Internal(error.into()))?;
+        // Counted towards `tpl` by hand: the feed renders per entry rather
+        // than through `Html`, which is where every HTML page is measured.
+        let started = std::time::Instant::now();
+        let content = FeedEntryTemplate { issue: &issue }.render();
+        crate::web::timing::record_render(started.elapsed());
+        let content = content.map_err(|error| WebError::Internal(error.into()))?;
         let href = format!(
             "{}/issues/{}",
             config.server.public_url.trim_end_matches('/'),

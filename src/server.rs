@@ -177,6 +177,9 @@ pub fn router(state: AppState) -> Router {
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        // Immediately inside the auth layer, so what is left outside it is the
+        // session load and save that `server_timing` reports as `sess`.
+        .layer(from_fn(crate::web::route_boundary))
         .layer(auth_layer)
         .layer(from_fn_with_state(
             state.clone(),
