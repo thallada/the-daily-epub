@@ -217,10 +217,12 @@ const OPTIONAL_KEYS: &[(&str, FieldKind)] = &[
     ("server.hmac_secret", FieldKind::Secret),
     ("server.basic_auth_user", FieldKind::Text),
     ("server.basic_auth_pass", FieldKind::Secret),
+    ("bookorbit.opds_user", FieldKind::Text),
+    ("bookorbit.opds_pass", FieldKind::Secret),
     ("xtc.settings", FieldKind::Path),
 ];
 
-const SECRET_SUFFIXES: &[&str] = &["api_key", "hmac_secret", "basic_auth_pass"];
+const SECRET_SUFFIXES: &[&str] = &["api_key", "hmac_secret", "basic_auth_pass", "opds_pass"];
 
 const PATH_KEYS: &[&str] = &[
     "database_path",
@@ -256,6 +258,7 @@ const GROUP_ORDER: &[&str] = &[
     "xtc",
     "server",
     "miniflux",
+    "bookorbit",
 ];
 
 /// Help text per key, seeded from the README configuration table and the
@@ -367,6 +370,11 @@ pub const SETTINGS_HELP: &[(&str, &str)] = &[
     ("server.login_window_minutes", "Length of the login throttle window."),
     ("server.jobs_enabled", "Allow the dashboard to start the fixed systemd job catalogue."),
     ("server.journal_lines", "Journal lines shown on a dashboard job page (10-5000)."),
+    ("bookorbit.enabled", "Enable the signed-in Read in BookOrbit integration when OPDS credentials are also set."),
+    ("bookorbit.public_url", "Base URL opened in the browser for BookOrbit's web reader."),
+    ("bookorbit.api_url", "Base URL used by the server for BookOrbit OPDS requests; usually the loopback address."),
+    ("bookorbit.opds_user", "Dedicated OPDS user created in BookOrbit Settings → OPDS."),
+    ("bookorbit.opds_pass", "Password for bookorbit.opds_user. Environment only."),
 ];
 
 /// `DAILY_EPUB_` + the path upper-cased with `.` → `__` (§13.1 item 2).
@@ -1654,6 +1662,8 @@ mod tests {
             "server.hmac_secret",
             "xtc.settings",
             "server.basic_auth_user",
+            "bookorbit.opds_user",
+            "bookorbit.opds_pass",
         ] {
             field(&groups, path);
         }
@@ -1684,6 +1694,7 @@ mod tests {
                 "xtc",
                 "server",
                 "miniflux",
+                "bookorbit",
             ]
         );
         let anthropic = groups
@@ -1799,6 +1810,7 @@ mod tests {
         config.voyage.api_key = Some("hunter2-voyage".into());
         config.server.hmac_secret = Some("hunter2-hmac".into());
         config.server.basic_auth_pass = Some("hunter2-basic".into());
+        config.bookorbit.opds_pass = Some("hunter2-bookorbit".into());
         if let Some(provider) = config.providers.get_mut("deepseek") {
             provider.api_key = Some("hunter2-deepseek".into());
         }
@@ -1808,6 +1820,7 @@ mod tests {
             "voyage.api_key",
             "server.hmac_secret",
             "server.basic_auth_pass",
+            "bookorbit.opds_pass",
             "providers.deepseek.api_key",
             "providers.anthropic.api_key",
         ] {
@@ -2405,6 +2418,11 @@ mod tests {
     async fn settings_pages_render_save_and_show_hand_edits() {
         let dir = tempfile::tempdir().unwrap();
         let path = copy_example(dir.path());
+        let with_secret = std::fs::read_to_string(&path).unwrap().replace(
+            "# opds_pass: environment only (DAILY_EPUB_BOOKORBIT__OPDS_PASS)",
+            "opds_pass = \"hunter2-bookorbit\"",
+        );
+        std::fs::write(&path, with_secret).unwrap();
         let (_db_dir, state, _) = test_state(Some(&path)).await;
         let app = router(state.clone());
         let cookie = login(&app).await;
@@ -2421,12 +2439,15 @@ mod tests {
             "id=\"curation.ranking\"",
             "id=\"curation.ranking.weights.preliminary\"",
             "id=\"providers.gemini\"",
+            "id=\"bookorbit\"",
         ] {
             assert!(html.contains(anchor), "{anchor}");
         }
         assert!(html.contains("name=\"curation.ranking.deep_keep\""));
         assert!(html.contains("renormalized"));
         assert!(html.contains("not set"));
+        assert!(html.contains("in the config file — move it to the env file"));
+        assert!(!html.contains("hunter2-bookorbit"));
         assert!(html.contains("/dashboard/settings/history"));
 
         let saved = app
