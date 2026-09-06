@@ -421,6 +421,7 @@ struct OverviewTemplate {
     budget: Vec<BudgetLine>,
     ratings: Vec<LabelCount>,
     ratings_total: i64,
+    access_requests: i64,
     unrated: Vec<UnratedPick>,
     active_jobs: Vec<JobLine>,
     finished_jobs: Vec<JobLine>,
@@ -442,6 +443,11 @@ async fn overview(
     let last_run = last_run_card(db, &config).await?;
     let budget = budget_lines(db, &config, now).await?;
     let (ratings, ratings_total) = ratings_this_week(db, now).await?;
+    let access_requests: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM account_requests WHERE status = 'open'")
+            .fetch_one(db.pool())
+            .await
+            .map_err(db_err)?;
     let unrated = unrated_picks(db).await?;
     let (active_jobs, finished_jobs) = jobs_summary(db, &config).await?;
     let sparklines = overview_sparklines(db).await?;
@@ -459,6 +465,7 @@ async fn overview(
         budget,
         ratings,
         ratings_total,
+        access_requests,
         unrated,
         active_jobs,
         finished_jobs,
