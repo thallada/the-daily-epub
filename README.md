@@ -227,6 +227,14 @@ unreferenced or edit it. Custom providers can be removed after no `[llm]` role
 references them. The service needs `/etc/daily-epub` in `ReadWritePaths` for
 these writes.
 
+An article detail page shows the ten closest articles across all stored,
+compatible embeddings, independent of runs or ratings, alongside the rated
+neighbours captured by the latest run. Its triage kind and deep-assessment
+format also distinguish repositories, documentation, product pages,
+discussions, papers, interviews, media, and fiction instead of forcing those
+pages into essay or report labels. Run `features backfill --all` when recent
+articles do not yet have embeddings to compare.
+
 ### Web routes
 
 | Route | Access | Purpose |
