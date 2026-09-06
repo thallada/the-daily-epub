@@ -199,9 +199,11 @@ The server is both the public newspaper index and the private operator UI. An
 anonymous visitor sees titles, authors, sources, metadata, AI summaries, why
 lines and outbound comment links; article bodies, the Brief, the World Briefing
 and comments stay private. A signed-in `user`
-sees complete issues and article chapters and can download artifacts. An
-`admin` can additionally rate articles and use every `/dashboard/*` page,
-including settings and jobs. Personalization is shared across accounts for now.
+sees complete issues and article chapters and can download available formats
+from a single download menu. An
+`admin` can additionally follow direct dashboard links from issue entries and
+article chapters, rate articles, and use every `/dashboard/*` page, including
+settings and jobs. Personalization is shared across accounts for now.
 
 Accounts are deliberately managed on the host, not in the browser. Usernames
 are case-insensitive and passwords must be 12–1024 characters. Bootstrap with
