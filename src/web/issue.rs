@@ -31,12 +31,19 @@ pub struct Download {
     pub size: String,
 }
 
+/// Available issue downloads, with the Standard EPUB first when it exists.
+#[derive(Debug, Clone)]
+pub struct Downloads {
+    primary: Download,
+    others: Vec<Download>,
+}
+
 #[derive(Debug, Clone)]
 pub struct IssueView {
     pub issue: Issue,
     /// Signed-in BookOrbit redirect route when the Standard EPUB can be downloaded.
     pub read_href: Option<String>,
-    pub downloads: Vec<Download>,
+    pub downloads: Option<Downloads>,
     pub from_json: bool,
     pub world_html: Option<String>,
     pub is_latest: bool,
@@ -271,7 +278,7 @@ pub async fn load(
     );
     let read_href = (config.bookorbit.is_active() && standard_download.is_some())
         .then(|| format!("/issues/{date}/read"));
-    let downloads = [
+    let mut available_downloads = [
         standard_download,
         download(
             "X4 EPUB",
@@ -286,8 +293,11 @@ pub async fn load(
         download("XTC", row.xtc_path.as_deref(), None, "xtc"),
     ]
     .into_iter()
-    .flatten()
-    .collect();
+    .flatten();
+    let downloads = available_downloads.next().map(|primary| Downloads {
+        primary,
+        others: available_downloads.collect(),
+    });
     Ok(Some(IssueView {
         issue,
         read_href,
@@ -842,6 +852,7 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
 struct FullEntry {
     title: String,
     href: String,
+    dashboard_href: String,
     source: String,
     reading_minutes: i64,
     is_lead: bool,
@@ -890,7 +901,7 @@ struct IssueFullTemplate {
     stats_line: String,
     front_page_html: String,
     read_href: Option<String>,
-    downloads: Vec<Download>,
+    downloads: Option<Downloads>,
     sections: Vec<FullSection>,
     has_world: bool,
     has_behind: bool,
@@ -920,6 +931,7 @@ struct ArticleTemplate {
     body_html: String,
     discussion_html: Option<String>,
     read_online_url: String,
+    dashboard_href: String,
     rating: Option<RatingWidget>,
     previous: Option<ArticleLink>,
     next: Option<ArticleLink>,
@@ -981,6 +993,7 @@ pub async fn render_full(
                 .map(|pick| FullEntry {
                     title: pick.article.title.clone(),
                     href: article_href(date, pick.article.id),
+                    dashboard_href: format!("/dashboard/articles/{}", pick.article.id),
                     source: pick.article.feed_title.clone(),
                     reading_minutes: pick.article.reading_minutes(),
                     is_lead: pick.is_lead,
@@ -1097,6 +1110,7 @@ pub async fn article(
             .as_ref()
             .map(|discussion| crate::comments::render_xhtml(discussion, &article.title)),
         read_online_url: article.url.clone(),
+        dashboard_href: format!("/dashboard/articles/{}", article.id),
         rating: (viewer.role == crate::web::users::Role::Admin).then(|| {
             RatingWidget::for_issue(
                 article.id,
@@ -1949,6 +1963,8 @@ mod tests {
         assert!(!issue.contains("Was this a good pick?"));
 
         let article_id = source.lineup.picks[0].article.id;
+        let dashboard_href = format!("/dashboard/articles/{article_id}");
+        assert!(!issue.contains(&dashboard_href));
         let article = app
             .clone()
             .oneshot(
@@ -1971,6 +1987,7 @@ mod tests {
         assert!(article.contains("referrerpolicy=\"no-referrer\""));
         assert!(article.contains("A Niche Delight"));
         assert!(article.contains("rel=\"next\""));
+        assert!(!article.contains(&dashboard_href));
 
         let world = app
             .clone()
@@ -2156,19 +2173,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn downloads_are_listed_only_while_the_files_exist() {
+    async fn single_nonstandard_download_renders_as_the_primary_without_a_menu() {
         let (dir, db, source) = seeded_issue(true).await;
         crate::web::users::add(&db, "reader", "correct horse battery", false)
             .await
             .unwrap();
         let epub_dir = dir.path().join("epubs");
         std::fs::create_dir(&epub_dir).unwrap();
-        let standard = epub_dir.join(crate::publish::issue_filename(
+        let x4 = epub_dir.join(crate::publish::issue_filename(
             source.meta.date,
-            Edition::Standard,
+            Edition::X4,
             "epub",
         ));
-        std::fs::write(&standard, vec![0; 2 * 1024]).unwrap();
+        std::fs::write(&x4, vec![0; 2 * 1024]).unwrap();
         let mut config = crate::config::Config::default();
         config.publish.epub_dir = epub_dir;
         let app = crate::server::router(crate::server::AppState::new(db, config, None));
@@ -2184,11 +2201,79 @@ mod tests {
             .await
             .unwrap();
         let issue = response_text(issue).await;
-        assert!(issue.contains("Download EPUB"));
-        assert!(issue.contains("2.0 KB"));
+        assert!(issue.contains(">Download X4 EPUB</a>"));
         assert!(!issue.contains("2048 bytes"));
-        assert!(!issue.contains("Download X4 EPUB"));
+        assert!(!issue.contains(">Download EPUB</a>"));
         assert!(!issue.contains("Download XTC"));
+        assert!(!issue.contains("Choose download format"));
+    }
+
+    #[tokio::test]
+    async fn download_menu_lists_all_formats_with_standard_first() {
+        let (dir, db, source) = seeded_issue(true).await;
+        crate::web::users::add(&db, "reader", "correct horse battery", false)
+            .await
+            .unwrap();
+        let epub_dir = dir.path().join("epubs");
+        let xtc_dir = dir.path().join("xtc");
+        std::fs::create_dir(&epub_dir).unwrap();
+        std::fs::create_dir(&xtc_dir).unwrap();
+        let standard = epub_dir.join(crate::publish::issue_filename(
+            source.meta.date,
+            Edition::Standard,
+            "epub",
+        ));
+        let x4 = epub_dir.join(crate::publish::issue_filename(
+            source.meta.date,
+            Edition::X4,
+            "epub",
+        ));
+        let xtc = xtc_dir.join("issue.xtc");
+        std::fs::write(&standard, vec![0; 2 * 1024]).unwrap();
+        std::fs::write(&x4, vec![0; 3 * 1024]).unwrap();
+        std::fs::write(&xtc, vec![0; 4 * 1024]).unwrap();
+        sqlx::query("UPDATE issues SET xtc_path = ? WHERE date = ?")
+            .bind(xtc.to_string_lossy().as_ref())
+            .bind(source.meta.date.to_string())
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let mut config = crate::config::Config::default();
+        config.publish.epub_dir = epub_dir;
+        let loaded = load(&db, &config, source.meta.date).await.unwrap().unwrap();
+        let downloads = loaded.downloads.as_ref().unwrap();
+        assert_eq!(downloads.primary.label, "EPUB");
+        assert_eq!(
+            downloads
+                .others
+                .iter()
+                .map(|download| download.label.as_str())
+                .collect::<Vec<_>>(),
+            ["X4 EPUB", "XTC"]
+        );
+
+        let app = crate::server::router(crate::server::AppState::new(db, config, None));
+        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+        let issue = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}", source.meta.date))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let issue = response_text(issue).await;
+        assert!(issue.contains(">Download EPUB</a>"));
+        assert!(issue.contains("Choose download format"));
+        assert!(issue.contains("Standard EPUB"));
+        assert!(issue.contains("X4 EPUB"));
+        assert!(issue.contains("XTC"));
+        assert!(issue.contains("2.0 KB"));
+        assert!(issue.contains("3.0 KB"));
+        assert!(issue.contains("4.0 KB"));
     }
 
     #[tokio::test]
@@ -2423,6 +2508,7 @@ mod tests {
         let admin_cookie = login_cookie(&app, "admin", "correct horse battery").await;
         let reader_cookie = login_cookie(&app, "reader", "correct horse battery").await;
         let article_id = source.lineup.picks[0].article.id;
+        let dashboard_href = format!("/dashboard/articles/{article_id}");
 
         let json_response = app
             .clone()
@@ -2474,6 +2560,24 @@ mod tests {
         let admin_issue = response_text(admin_issue).await;
         assert!(admin_issue.contains("Was this a good pick?"));
         assert!(admin_issue.contains("value=\"loved\" data-label=\"loved\" class=\"active\""));
+        assert!(admin_issue.contains(&dashboard_href));
+
+        let admin_article = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/issues/{}/articles/{article_id}",
+                        source.meta.date
+                    ))
+                    .header(header::COOKIE, &admin_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin_article.status(), StatusCode::OK);
+        assert!(response_text(admin_article).await.contains(&dashboard_href));
 
         let admin_behind = app
             .clone()
