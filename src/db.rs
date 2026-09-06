@@ -311,7 +311,7 @@ impl Db {
         )
         .bind(&article.canonical_url)
         .bind(&article.title)
-        .bind(article.best_entry_id)
+        .bind((article.best_entry_id != 0).then_some(article.best_entry_id))
         .bind(&article.content_html)
         .bind(article.word_count)
         .bind(article.excerpt_only)
@@ -737,7 +737,9 @@ impl Db {
              )
              SELECT r.article_id, r.user_id, r.issue_date, r.label, r.value, r.note, r.event_at,
                     COALESCE(a.title, '') AS title,
-                    COALESCE(e.feed_title, '') AS feed_title,
+                    COALESCE(e.feed_title,
+                             CASE WHEN a.best_entry_id IS NULL THEN 'Imported' ELSE '' END)
+                        AS feed_title,
                     (SELECT ia.summary FROM issue_articles ia
                      WHERE ia.article_id = r.article_id
                      ORDER BY ia.issue_date DESC LIMIT 1) AS summary,
@@ -918,11 +920,12 @@ fn entry_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Entry> {
 fn article_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Article> {
     let sources: Vec<SourceRef> =
         serde_json::from_str(&row.get::<String, _>("sources_json")).unwrap_or_default();
+    let best_entry_id = row.get::<Option<i64>, _>("best_entry_id").unwrap_or(0);
     Ok(Article {
         id: row.get("id"),
         canonical_url: row.get("canonical_url"),
         title: row.get::<Option<String>, _>("title").unwrap_or_default(),
-        best_entry_id: row.get::<Option<i64>, _>("best_entry_id").unwrap_or(0),
+        best_entry_id,
         content_html: row
             .get::<Option<String>, _>("content_html")
             .unwrap_or_default(),
@@ -938,6 +941,7 @@ fn article_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Article> {
         feed_id: row.get::<Option<i64>, _>("feed_id").unwrap_or(0),
         feed_title: row
             .get::<Option<String>, _>("feed_title")
+            .or_else(|| (best_entry_id == 0).then(|| "Imported".into()))
             .unwrap_or_default(),
         category: row.get("category"),
         published_at: row
@@ -1079,6 +1083,7 @@ mod tests {
             "config_changes",
             "profile_versions",
             "jobs",
+            "rating_imports",
         ] {
             let exists: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -1200,6 +1205,63 @@ mod tests {
                 .unwrap(),
             Some(id)
         );
+    }
+
+    #[tokio::test]
+    async fn article_without_an_entry_writes_null_and_loads() {
+        let (_dir, db) = temp_db().await;
+        let article = Article {
+            id: 0,
+            canonical_url: "https://example.com/imported".into(),
+            title: "Imported article".into(),
+            best_entry_id: 0,
+            content_html: "<p>Imported body</p>".into(),
+            word_count: 2,
+            excerpt_only: false,
+            image_count: 0,
+            sources: Vec::new(),
+            first_seen: ts("2026-09-06T00:00:00Z"),
+            url: "https://example.com/imported".into(),
+            author: None,
+            feed_id: 0,
+            feed_title: "Imported".into(),
+            category: None,
+            published_at: None,
+            comments_url: None,
+            image_urls: Vec::new(),
+            social: Vec::new(),
+            extract_method: ExtractMethod::Readability,
+        };
+        let id = db.upsert_article(&article).await.unwrap();
+        let stored_entry: Option<i64> =
+            sqlx::query_scalar("SELECT best_entry_id FROM articles WHERE id = ?")
+                .bind(id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(stored_entry, None);
+        let loaded = db.get_article(id).await.unwrap().unwrap();
+        assert_eq!(loaded.best_entry_id, 0);
+        assert_eq!(loaded.feed_id, 0);
+        assert_eq!(loaded.feed_title, "Imported");
+        assert!(loaded.sources.is_empty());
+        assert!(crate::curate::signals::direct_feeds(&loaded).is_empty());
+        db.append_rating_event(&RatingEvent {
+            id: 0,
+            user_id: None,
+            article_id: id,
+            issue_date: None,
+            kind: "explicit".into(),
+            source: "import".into(),
+            label: "loved".into(),
+            value: 1.0,
+            note: None,
+            event_at: ts("2026-09-06T00:00:00Z"),
+        })
+        .await
+        .unwrap();
+        let ratings = db.current_ratings(36_500).await.unwrap();
+        assert_eq!(ratings[0].feed_title, "Imported");
     }
 
     #[tokio::test]

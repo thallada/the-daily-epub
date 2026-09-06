@@ -16,8 +16,8 @@ use daily_epub::curate::telemetry;
 use daily_epub::db::Db;
 use daily_epub::pipeline::{self, GenerateOptions, GenerateOutcome};
 use daily_epub::report::{RunReport, VOYAGE_PROVIDER};
-use daily_epub::types::{ArticleId, RatingEvent, Vote};
-use daily_epub::{curate, http, jobs, lock, server, social};
+use daily_epub::types::{ArticleId, Vote};
+use daily_epub::{curate, http, imports, jobs, lock, rate, server, social};
 
 /// A personalized daily newspaper, delivered as an EPUB.
 #[derive(Debug, Parser)]
@@ -71,7 +71,7 @@ enum JobCommand {
     /// Run one catalogue job in-process and record it in the `jobs` table.
     Run {
         /// `generate`, `generate-YYYY-MM-DD`, `dry-run`, `profile-rebuild`,
-        /// `features-backfill`, `backfill-social` or `features-prune`.
+        /// `features-backfill`, `backfill-social`, `features-prune` or `import-ratings`.
         name: String,
     },
 }
@@ -726,28 +726,7 @@ async fn append_cli_event(
     vote: Option<Vote>,
     note: Option<String>,
 ) -> Result<i64> {
-    let (label, value) = match vote {
-        Some(Vote::Loved) => ("loved", Vote::Loved.value(&config.curation.feedback)),
-        Some(Vote::Good) => ("good", Vote::Good.value(&config.curation.feedback)),
-        Some(Vote::NotForMe) => (
-            "not_for_me",
-            Vote::NotForMe.value(&config.curation.feedback),
-        ),
-        None => ("cleared", 0.0),
-    };
-    let event = RatingEvent {
-        id: 0,
-        user_id: None,
-        article_id,
-        issue_date: db.latest_issue_date_for_article(article_id).await?,
-        kind: "explicit".into(),
-        source: "cli".into(),
-        label: label.into(),
-        value,
-        note,
-        event_at: jiff::Timestamp::now(),
-    };
-    Ok(db.append_rating_event(&event).await?)
+    Ok(rate::record_explicit(config, db, article_id, vote, "cli", None, note).await?)
 }
 
 async fn cmd_ratings(config: &Config, db: &Db, command: RatingsCommand) -> Result<()> {
@@ -964,6 +943,7 @@ async fn run_job(config: &Config, db: &Db, job: &jobs::Job) -> Result<(String, O
             cmd_features(config, db, FeaturesCommand::Prune).await?,
             None,
         )),
+        jobs::Job::ImportRatings => Ok((imports::run(config, db).await?, None)),
     }
 }
 
@@ -1156,6 +1136,13 @@ mod tests {
             Command::Job(JobCommand::Run { name }) => assert_eq!(name, "features-prune"),
             other => panic!("expected job run, got {other:?}"),
         }
+        match Cli::try_parse_from(["daily-epub", "job", "run", "import-ratings"])
+            .unwrap()
+            .command
+        {
+            Command::Job(JobCommand::Run { name }) => assert_eq!(name, "import-ratings"),
+            other => panic!("expected job run, got {other:?}"),
+        }
         assert!(Cli::try_parse_from(["daily-epub", "job", "run"]).is_err());
         assert!(Cli::try_parse_from(["daily-epub", "job"]).is_err());
     }
@@ -1218,6 +1205,16 @@ mod tests {
                 .unwrap_or_default()
                 .contains("voyage.enabled is false"),
             "{failed:?}"
+        );
+
+        let import = jobs::Job::ImportRatings;
+        cmd_job_run(&config, &db, &import).await.unwrap();
+        let imported = jobs::list(&db, 1).await.unwrap().remove(0);
+        assert_eq!(imported.name, "import-ratings");
+        assert_eq!(imported.status, "ok");
+        assert_eq!(
+            imported.message.as_deref(),
+            Some("no pending rating imports")
         );
     }
 
