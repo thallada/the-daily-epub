@@ -441,6 +441,66 @@ pub fn dot(left: &[f32], right: &[f32]) -> Result<f64, EmbeddingError> {
         .sum())
 }
 
+/// The `limit` closest compatible cached article vectors, highest cosine first.
+///
+/// A brute-force scan: the cache holds at most a few thousand rows after
+/// pruning, so one statement plus a sort is cheap. The caller supplies the
+/// target row's model, dimension and decoded vector so pages that already
+/// load that row do not query it a second time. Malformed candidate blobs are
+/// ignored like malformed entries in the normal cache loader.
+pub async fn nearest_articles(
+    db: &Db,
+    article_id: ArticleId,
+    model: &str,
+    dimension: usize,
+    target: &[f32],
+    limit: usize,
+) -> Result<Vec<(ArticleId, f64)>, EmbeddingError> {
+    if target.len() != dimension {
+        return Err(EmbeddingError::Dimension {
+            expected: dimension,
+            actual: target.len(),
+        });
+    }
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        "SELECT article_id, embedding FROM article_embeddings
+         WHERE model = ? AND dimension = ? AND article_id != ?",
+    )
+    .bind(model)
+    .bind(dimension as i64)
+    .bind(article_id)
+    .fetch_all(db.pool())
+    .await?;
+    let mut scored = Vec::with_capacity(rows.len());
+    for row in rows {
+        let candidate_id: ArticleId = row.get("article_id");
+        let candidate = match decode_blob(&row.get::<Vec<u8>, _>("embedding"), dimension) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                tracing::warn!(article_id = candidate_id, %error, "ignoring a malformed embedding");
+                continue;
+            }
+        };
+        let cosine = dot(target, &candidate)?;
+        if cosine.is_finite() {
+            scored.push((candidate_id, cosine));
+        }
+    }
+    // Highest cosine first; ties by id so the order is stable.
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    scored.truncate(limit);
+    Ok(scored)
+}
+
 fn validate_vector(vector: &[f32], dimension: usize) -> Result<(), EmbeddingError> {
     if vector.len() != dimension {
         return Err(EmbeddingError::Dimension {

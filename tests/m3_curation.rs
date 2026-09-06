@@ -76,7 +76,7 @@ fn deep_messy_fixture_is_salvaged_not_rejected() {
     assert!(raw.contains("\"id\": \""), "needs a string id");
     assert!(raw.contains("\"quality\": \""), "needs a string score");
     assert!(
-        raw.contains("discussion_thread"),
+        raw.contains("interactive_experience"),
         "needs an unknown facet token"
     );
 

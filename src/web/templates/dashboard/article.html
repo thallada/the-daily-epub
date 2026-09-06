@@ -62,6 +62,17 @@
 <section class="card"><h3>Nearest rated neighbours</h3>{% if signals.neighbours.is_empty() %}<p class="muted">None.</p>{% else %}<div class="scroll-x"><table><thead><tr><th>label</th><th class="num">cos</th><th>article</th></tr></thead><tbody>{% for neighbour in signals.neighbours %}<tr><td><span class="badge {{ neighbour.label }}">{{ neighbour.label }}</span></td><td class="num">{{ neighbour.cos }}</td><td class="cell-wrap"><a href="/dashboard/articles/{{ neighbour.article_id }}">{{ neighbour.title }}</a></td></tr>{% endfor %}</tbody></table></div>{% endif %}</section>
 </div>{% endif %}{% else %}<p class="muted text-sm">No signals recorded.</p>{% endif %}
 
+<h2>Nearest articles (any)</h2>
+{% if let Some(articles) = nearest_articles %}{% if articles.is_empty() %}<p class="muted text-sm">No other compatible embeddings stored.</p>{% else %}<div class="scroll-x"><table>
+<thead><tr><th class="num">cos</th><th>title</th><th>feed</th><th>first seen</th><th>rating</th></tr></thead>
+<tbody>{% for article in articles %}<tr>
+<td class="num">{{ article.cosine }}</td>
+<td class="cell-wrap"><a href="/dashboard/articles/{{ article.id }}">{{ article.title }}</a></td>
+<td class="cell-tight">{{ article.feed }}</td>
+<td class="cell-tight text-muted">{{ article.first_seen }}</td>
+<td class="cell-tight">{% if let Some(rating) = article.rating %}<span class="badge {{ article.rating_class }}">{{ rating }}</span>{% else %}<span class="muted">unrated</span>{% endif %}</td>
+</tr>{% endfor %}</tbody></table></div>{% endif %}{% else %}<p class="muted text-sm">No embedding stored — run features-backfill.</p>{% endif %}
+
 <h2>Embedding</h2>
 {% if let Some(embedding) = embedding %}<dl class="kv"><dt>Model</dt><dd>{{ embedding.model }}</dd><dt>Dimension</dt><dd class="tabular-nums">{{ embedding.dimension }}</dd><dt>Created</dt><dd>{{ embedding.created_at }}</dd><dt>Input hash</dt><dd><code>{{ embedding.input_hash }}</code></dd></dl>{% else %}<p class="muted text-sm">No embedding stored.</p>{% endif %}
 

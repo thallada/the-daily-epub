@@ -4,7 +4,10 @@
 //! `candidate_runs` row (via `idx_candidate_runs_article_run`), both
 //! assessments, the current explicit rating and the latest publication. The
 //! detail page shows everything the system knows about one article, in the
-//! order of §9.3, and wraps `telemetry::render_explain` verbatim in `<pre>`.
+//! order of §9.3, compares its embedding with every compatible cached article,
+//! and wraps `telemetry::render_explain` verbatim in `<pre>`.
+
+use std::collections::HashMap;
 
 use askama::Template;
 use axum::Router;
@@ -22,6 +25,7 @@ use super::{
     widget_label,
 };
 use crate::config::Config;
+use crate::curate::embedding::{self, decode_blob};
 use crate::curate::telemetry;
 use crate::curate::triage::{PROVIDER_REJECTED, TRIAGE_KINDS};
 use crate::db::Db;
@@ -32,6 +36,8 @@ use crate::web::session::{AuthSession, Viewer};
 use crate::web::{Html, Page, Pagination, WebError, take_flash};
 
 const ARTICLES_PER_PAGE: u32 = 50;
+const NEAREST_ARTICLES: usize = 10;
+const CURRENT_RATING_LOOKBACK_DAYS: i64 = 36_500;
 
 /// Routes contributed by this page group (merged by `dashboard::router`).
 pub fn routes() -> Router<AppState> {
@@ -396,6 +402,23 @@ pub struct EmbeddingView {
 }
 
 #[derive(Debug, Clone)]
+struct StoredEmbedding {
+    view: EmbeddingView,
+    vector: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct NearestArticleView {
+    id: ArticleId,
+    cosine: String,
+    title: String,
+    feed: String,
+    first_seen: String,
+    rating: Option<String>,
+    rating_class: &'static str,
+}
+
+#[derive(Debug, Clone)]
 pub struct RatingEventView {
     pub id: i64,
     pub event_at: String,
@@ -460,6 +483,7 @@ struct ArticleTemplate {
     assessments: Vec<AssessmentView>,
     history: Vec<HistoryRow>,
     latest_signals: Option<SignalsView>,
+    nearest_articles: Option<Vec<NearestArticleView>>,
     embedding: Option<EmbeddingView>,
     events: Vec<RatingEventView>,
 }
@@ -611,20 +635,71 @@ async fn embedding(
     db: &Db,
     article_id: ArticleId,
     config: &Config,
-) -> Result<Option<EmbeddingView>, sqlx::Error> {
+) -> anyhow::Result<Option<StoredEmbedding>> {
     let row = sqlx::query(
-        "SELECT model, dimension, created_at, input_hash FROM article_embeddings
+        "SELECT model, dimension, created_at, input_hash, embedding FROM article_embeddings
          WHERE article_id = ?",
     )
     .bind(article_id)
     .fetch_optional(db.pool())
     .await?;
-    Ok(row.map(|row| EmbeddingView {
-        model: row.get("model"),
-        dimension: row.get("dimension"),
-        created_at: fmt_stored_time(Some(&row.get::<String, _>("created_at")), config),
-        input_hash: row.get("input_hash"),
+    let Some(row) = row else { return Ok(None) };
+    let dimension: i64 = row.get("dimension");
+    let decoded_dimension = usize::try_from(dimension)
+        .map_err(|_| anyhow::anyhow!("invalid embedding dimension {dimension}"))?;
+    let vector = decode_blob(&row.get::<Vec<u8>, _>("embedding"), decoded_dimension)?;
+    Ok(Some(StoredEmbedding {
+        view: EmbeddingView {
+            model: row.get("model"),
+            dimension,
+            created_at: fmt_stored_time(Some(&row.get::<String, _>("created_at")), config),
+            input_hash: row.get("input_hash"),
+        },
+        vector,
     }))
+}
+
+async fn nearest_article_views(
+    db: &Db,
+    article_id: ArticleId,
+    stored: &StoredEmbedding,
+    config: &Config,
+) -> anyhow::Result<Vec<NearestArticleView>> {
+    let dimension = usize::try_from(stored.view.dimension)
+        .map_err(|_| anyhow::anyhow!("invalid embedding dimension {}", stored.view.dimension))?;
+    let scored = embedding::nearest_articles(
+        db,
+        article_id,
+        &stored.view.model,
+        dimension,
+        &stored.vector,
+        NEAREST_ARTICLES,
+    )
+    .await?;
+    let ids = scored.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let articles = db.get_articles(&ids).await?;
+    let ratings = db
+        .current_ratings(CURRENT_RATING_LOOKBACK_DAYS)
+        .await?
+        .into_iter()
+        .map(|rating| (rating.article_id, rating.label))
+        .collect::<HashMap<_, _>>();
+    Ok(scored
+        .into_iter()
+        .filter_map(|(id, cosine)| {
+            let article = articles.get(&id)?;
+            let rating = ratings.get(&id).cloned();
+            Some(NearestArticleView {
+                id,
+                cosine: format!("{cosine:.3}"),
+                title: article.title.clone(),
+                feed: article.feed_title.clone(),
+                first_seen: crate::web::format_time(article.first_seen, config),
+                rating_class: widget_label(rating.as_deref()),
+                rating,
+            })
+        })
+        .collect())
 }
 
 async fn detail(
@@ -693,7 +768,17 @@ async fn detail(
         .map(|latest| latest.signals.clone())
         .filter(|signals| !signals.empty);
     let assessments = assessments(db, id, &config).await.map_err(db_err)?;
-    let embedding = embedding(db, id, &config).await.map_err(db_err)?;
+    let embedding = embedding(db, id, &config)
+        .await
+        .map_err(WebError::Internal)?;
+    let nearest_articles = match embedding.as_ref() {
+        Some(stored) => Some(
+            nearest_article_views(db, id, stored, &config)
+                .await
+                .map_err(WebError::Internal)?,
+        ),
+        None => None,
+    };
 
     let mut page = Page::new(article.title.clone(), viewer, "articles");
     page.flash = take_flash(&session).await?;
@@ -742,7 +827,8 @@ async fn detail(
         assessments,
         history,
         latest_signals,
-        embedding,
+        nearest_articles,
+        embedding: embedding.map(|stored| stored.view),
         events,
     })
     .into_response())
@@ -751,6 +837,7 @@ async fn detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::curate::embedding::encode_blob;
     use crate::web::dashboard::tests::{
         app_with_users, assert_admin_only, get, login_cookie, seed,
     };
@@ -856,6 +943,40 @@ mod tests {
     async fn article_detail_shows_assessments_run_history_and_rating_events() {
         let seed = seed().await;
         let config = Config::default();
+        for (article_id, vector) in [
+            (1, [1.0_f32, 0.0_f32]),
+            (2, [0.8_f32, 0.6_f32]),
+            (3, [0.6_f32, 0.8_f32]),
+        ] {
+            sqlx::query(
+                "INSERT INTO article_embeddings
+                     (article_id, model, dimension, input_hash, embedding, created_at)
+                 VALUES (?, 'voyage-4-lite', 2, ?, ?, '2026-09-02T05:30:30Z')
+                 ON CONFLICT(article_id) DO UPDATE SET
+                     model = excluded.model, dimension = excluded.dimension,
+                     input_hash = excluded.input_hash, embedding = excluded.embedding,
+                     created_at = excluded.created_at",
+            )
+            .bind(article_id)
+            .bind(if article_id == 1 {
+                "abc123"
+            } else {
+                "nearest-hash"
+            })
+            .bind(encode_blob(&vector).unwrap())
+            .execute(seed.db.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO rating_events
+                 (article_id, kind, source, label, value, event_at)
+             VALUES (2, 'explicit', 'cli', 'good', 0.35, '2026-09-02T11:00:00Z')",
+        )
+        .execute(seed.db.pool())
+        .await
+        .unwrap();
+
         let views = assessments(&seed.db, 1, &config).await.unwrap();
         assert_eq!(views.len(), 2);
         assert_eq!(views[0].stage, "triage");
@@ -885,6 +1006,14 @@ mod tests {
         let list = assert_admin_only(&app, "/dashboard/articles").await;
         assert!(list.contains("Article 1 about prose"), "{list}");
         assert!(list.contains("/dashboard/articles/1"), "{list}");
+        assert!(
+            list.contains("<option value=\"repo\">repo</option>"),
+            "{list}"
+        );
+        assert!(
+            list.contains("<option value=\"fiction\">fiction</option>"),
+            "{list}"
+        );
 
         let body = assert_admin_only(&app, "/dashboard/articles/1").await;
         assert!(body.contains("Careful and first-hand"), "{body}");
@@ -910,6 +1039,28 @@ mod tests {
         );
         assert!(body.contains("Top Stories"), "{body}");
         assert!(body.contains("Alpha Blog"), "{body}");
+        let nearest = body
+            .split_once("<h2>Nearest articles (any)</h2>")
+            .expect("nearest heading")
+            .1
+            .split_once("<h2>Embedding</h2>")
+            .expect("embedding heading")
+            .0;
+        let second = nearest
+            .find("href=\"/dashboard/articles/2\">Article 2 about graphs")
+            .expect("nearest article 2");
+        let third = nearest
+            .find("href=\"/dashboard/articles/3\">Article 3 about prose")
+            .expect("nearest article 3");
+        assert!(second < third, "higher cosine must render first: {nearest}");
+        assert!(nearest.contains(">0.800</td>"), "{nearest}");
+        assert!(nearest.contains(">0.600</td>"), "{nearest}");
+        assert!(nearest.contains("badge good\">good"), "{nearest}");
+        assert!(nearest.contains(">unrated</span>"), "{nearest}");
+        assert!(
+            !nearest.contains("href=\"/dashboard/articles/1\""),
+            "the article itself must be excluded: {nearest}"
+        );
 
         let rejected = assert_admin_only(&app, "/dashboard/articles/3").await;
         assert!(rejected.contains("rejected by provider"), "{rejected}");
