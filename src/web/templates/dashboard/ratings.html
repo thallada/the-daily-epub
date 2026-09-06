@@ -4,6 +4,30 @@
 <p class="page-desc">{{ summary_line }}</p>
 </div><div class="page-actions"><a class="btn" href="/dashboard/profile">Profile</a><a class="btn" href="/dashboard/articles?rated=unrated">Unrated articles</a></div></header>
 {% if no_embedding_count > 0 %}<p class="notice">{{ no_embedding_count }} rated articles have no embedding and cannot act as neighbours — run the <code>features-backfill</code> job (<code>features backfill --rated-only</code>).</p>{% endif %}
+<details id="imports" class="disclosure"{% if imports_open %} open{% endif %}{% if imports_pending %} data-refresh="5"{% endif %}>
+<summary>Import ratings</summary>
+<div class="disclosure-body">
+<form method="post" action="/dashboard/ratings/import" class="filters">
+<label class="w-full">URLs <textarea name="urls" rows="5" required class="w-full" placeholder="One URL per line (commas and spaces also work)" spellcheck="false"></textarea></label>
+<label>Verdict <select name="label"><option value="loved" selected>Loved it</option><option value="good">Good</option><option value="not_for_me">Not for me</option></select></label>
+<label>Note <input name="note" type="text" placeholder="Optional note"></label>
+<div class="filter-actions"><button class="btn btn-primary" type="submit">Queue import</button></div>
+</form>
+<p class="meta text-sm">The background job fetches new articles, adds Voyage embeddings when available, and records the verdict. Latest 50 requests:</p>
+<div class="scroll-x"><table>
+<thead><tr><th>When</th><th>URL</th><th>Verdict</th><th>Status</th><th>Message</th><th>Article</th></tr></thead>
+<tbody>{% for row in imports %}<tr>
+<td class="cell-tight text-muted">{{ row.requested }}</td>
+<td class="cell-wrap"><a href="{{ row.url }}" rel="noopener" target="_blank">{{ row.url }}</a></td>
+<td class="cell-tight"><span class="badge {{ row.label }}">{{ row.verdict }}</span></td>
+<td class="cell-tight"><span class="badge {{ row.status }}">{{ row.status }}</span></td>
+<td class="cell-wrap text-muted">{{ row.message }}</td>
+<td class="num">{% if let Some(article_id) = row.article_id %}<a href="/dashboard/articles/{{ article_id }}">{{ article_id }}</a>{% endif %}</td>
+</tr>{% endfor %}
+{% if imports.is_empty() %}<tr><td colspan="6" class="text-muted">No rating imports yet.</td></tr>{% endif %}</tbody>
+</table></div>
+</div>
+</details>
 <details id="ratings-how" class="how disclosure">
 <summary>How ratings enter the algorithm</summary>
 <div class="disclosure-body">

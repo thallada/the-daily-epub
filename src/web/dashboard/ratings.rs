@@ -11,8 +11,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use askama::Template;
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::{Extension, Query, State};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum_login::tower_sessions::Session;
 use jiff::Timestamp;
@@ -24,11 +25,16 @@ use crate::curate::profile::{MAX_RATINGS_IN_REBUILD, REBUILD_INTERVAL_DAYS};
 use crate::curate::signals::{self, PreferenceState};
 use crate::curate::telemetry::SignalsJson;
 use crate::db::{Db, DbError};
+use crate::imports;
+use crate::jobs::Job;
 use crate::server::AppState;
 use crate::types::{Article, ArticleId, FeedId, RatedArticle};
 use crate::web::rate::RatingWidget;
 use crate::web::session::{AuthSession, Viewer};
 use crate::web::{Html, Page, Pagination, WebError, encode_component, format_time, take_flash};
+
+use super::jobs::{StartJob, set_flash, start_job};
+use super::{db_err, fmt_stored_time};
 
 /// The verdict block and the rebuild set are bounded by count, not age, so the
 /// page lists every current verdict (curation plan §8.3, §8.4).
@@ -37,7 +43,10 @@ const EVENTS_PER_PAGE: u32 = 100;
 
 /// Routes contributed by this page group (merged by `dashboard::router`).
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/dashboard/ratings", get(index))
+    Router::new().route("/dashboard/ratings", get(index)).route(
+        "/dashboard/ratings/import",
+        axum::routing::post(queue_import),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +386,16 @@ struct EventRow {
     superseded: bool,
 }
 
+struct ImportLine {
+    url: String,
+    label: String,
+    verdict: &'static str,
+    status: String,
+    message: String,
+    article_id: Option<ArticleId>,
+    requested: String,
+}
+
 struct FeedOption {
     id: FeedId,
     title: String,
@@ -434,6 +453,9 @@ struct RatingsTemplate {
     tab: String,
     summary_line: String,
     no_embedding_count: usize,
+    imports: Vec<ImportLine>,
+    imports_open: bool,
+    imports_pending: bool,
     how: HowValues,
     filter_label: String,
     filter_source: String,
@@ -477,6 +499,23 @@ async fn index(
     let filters = Filters::parse(query);
     let now = Timestamp::now();
     let db = &state.db;
+    let import_rows = imports::recent(db, 50).await.map_err(db_err)?;
+    let imports_pending = import_rows.iter().any(|row| row.status == "pending");
+    let import_lines = import_rows
+        .into_iter()
+        .map(|row| {
+            let (label, verdict) = widget_label(&row.label);
+            ImportLine {
+                url: row.url,
+                label: label.to_string(),
+                verdict,
+                status: row.status,
+                message: row.message.unwrap_or_default(),
+                article_id: row.article_id,
+                requested: fmt_stored_time(Some(&row.requested_at), &config),
+            }
+        })
+        .collect::<Vec<_>>();
 
     let preference = PreferenceState::load(db, &config.voyage, &config.curation.ranking, now)
         .await
@@ -517,6 +556,9 @@ async fn index(
         tab: filters.tab.clone(),
         summary_line,
         no_embedding_count,
+        imports_open: !import_lines.is_empty(),
+        imports_pending,
+        imports: import_lines,
         how: HowValues::from_config(&config),
         filter_label: filters.label.clone().unwrap_or_default(),
         filter_source: filters.source.clone().unwrap_or_default(),
@@ -588,6 +630,100 @@ async fn index(
         template.feeds = feeds;
     }
     Ok(Html(template).into_response())
+}
+
+fn import_form(body: &[u8]) -> (String, String, Option<String>) {
+    let mut urls = String::new();
+    let mut label = String::new();
+    let mut note = None;
+    for (key, value) in url::form_urlencoded::parse(body) {
+        match key.as_ref() {
+            "urls" => urls = value.into_owned(),
+            "label" => label = value.into_owned(),
+            "note" => note = (!value.trim().is_empty()).then(|| value.trim().to_string()),
+            _ => {}
+        }
+    }
+    (urls, label, note)
+}
+
+async fn queue_import(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    Extension(session): Extension<Session>,
+    body: Bytes,
+) -> Result<Response, WebError> {
+    let viewer = auth
+        .user()
+        .await
+        .map(Viewer::from)
+        .ok_or_else(|| WebError::Unauthenticated {
+            next: "/dashboard/ratings#imports".into(),
+        })?;
+    let (raw_urls, label, note) = import_form(&body);
+    let urls = raw_urls
+        .split(|ch: char| ch.is_whitespace() || ch == ',')
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if urls.is_empty() || urls.len() > 500 {
+        let message = if urls.is_empty() {
+            "Enter at least one URL.".into()
+        } else {
+            "At most 500 URLs can be queued at once.".into()
+        };
+        set_flash(&session, "error", message).await?;
+        return Ok(Redirect::to("/dashboard/ratings#imports").into_response());
+    }
+    if !matches!(label.as_str(), "loved" | "good" | "not_for_me") {
+        set_flash(&session, "error", "Choose a valid verdict.".into()).await?;
+        return Ok(Redirect::to("/dashboard/ratings#imports").into_response());
+    }
+    let count = imports::queue(
+        &state.db,
+        &urls,
+        &label,
+        note.as_deref(),
+        Some(viewer.id),
+        Timestamp::now(),
+    )
+    .await
+    .map_err(db_err)?;
+    match start_job(&state, &viewer, Job::ImportRatings).await? {
+        StartJob::Disabled => {
+            set_flash(
+                &session,
+                "success",
+                format!("Queued {count} URLs; run daily-epub job run import-ratings by hand."),
+            )
+            .await?;
+            Ok(Redirect::to("/dashboard/ratings#imports").into_response())
+        }
+        StartJob::Active(_) => {
+            set_flash(
+                &session,
+                "success",
+                format!("Queued {count} URLs; the running import will pick them up."),
+            )
+            .await?;
+            Ok(Redirect::to("/dashboard/ratings#imports").into_response())
+        }
+        StartJob::Started(id) => {
+            set_flash(&session, "success", format!("Queued {count} URLs.")).await?;
+            Ok(Redirect::to(&format!("/dashboard/jobs/{id}")).into_response())
+        }
+        StartJob::Failed(id, error) => {
+            set_flash(
+                &session,
+                "error",
+                format!(
+                    "Queued {count} URLs, but the import job could not start: {error}. Run daily-epub job run import-ratings by hand."
+                ),
+            )
+            .await?;
+            Ok(Redirect::to(&format!("/dashboard/jobs/{id}")).into_response())
+        }
+    }
 }
 
 async fn embedded_article_ids(db: &Db, config: &Config) -> Result<HashSet<ArticleId>, WebError> {
@@ -909,13 +1045,15 @@ async fn load_events(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode, header};
     use tower::ServiceExt;
 
     use super::*;
     use crate::types::{Entry, RatingEvent, SourceKind, SourceRef};
-    use crate::web::users;
+    use crate::web::{MockRunner, users};
 
     fn rated(article_id: ArticleId, label: &str, value: f64, event_at: &str) -> RatedArticle {
         RatedArticle {
@@ -1190,6 +1328,22 @@ mod tests {
             .unwrap()
     }
 
+    async fn post(app: &axum::Router, uri: &str, body: &str, cookie: &str) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header("sec-fetch-site", "same-origin")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
     async fn text(response: Response) -> String {
         String::from_utf8(
             to_bytes(response.into_body(), 2 * 1024 * 1024)
@@ -1400,5 +1554,98 @@ mod tests {
         let reader = login_cookie(&app, "reader", "correct horse battery").await;
         let forbidden = get(&app, "/dashboard/ratings?tab=events", Some(&reader)).await;
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn import_post_queues_rows_starts_job_and_get_lists_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("db.sqlite"))
+            .await
+            .unwrap();
+        users::add(&db, "admin", "correct horse battery", true)
+            .await
+            .unwrap();
+        let runner = Arc::new(MockRunner::default());
+        let app = crate::server::router(AppState::with_jobs(
+            db.clone(),
+            Config::default(),
+            None,
+            runner.clone(),
+        ));
+        let cookie = login_cookie(&app, "admin", "correct horse battery").await;
+        let response = post(
+            &app,
+            "/dashboard/ratings/import",
+            "urls=https%3A%2F%2Fone.example%2Fpost%0Ahttps%3A%2F%2Ftwo.example%2Fstory%2Chttps%3A%2F%2Fthree.example%2Fx&label=not_for_me&note=historical+miss",
+            &cookie,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response.headers().get(header::LOCATION).unwrap();
+        assert!(
+            location.to_str().unwrap().starts_with("/dashboard/jobs/"),
+            "{location:?}"
+        );
+        let rows = imports::recent(&db, 50).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.status == "pending"));
+        assert!(rows.iter().all(|row| row.label == "not_for_me"));
+        assert!(
+            rows.iter()
+                .all(|row| row.note.as_deref() == Some("historical miss"))
+        );
+        assert!(rows.iter().all(|row| row.requested_by.is_some()));
+        assert_eq!(
+            runner.calls(),
+            vec!["start daily-epub-job@import-ratings.service"]
+        );
+
+        let body = text(get(&app, "/dashboard/ratings", Some(&cookie)).await).await;
+        assert!(body.contains("Import ratings"), "{body}");
+        assert!(body.contains("https://one.example/post"), "{body}");
+        assert!(!body.contains("historical miss"), "notes stay on ratings");
+        assert!(body.contains("badge down\">Not for me"), "{body}");
+        assert!(body.contains("badge pending\">pending"), "{body}");
+        assert!(body.contains("data-refresh=\"5\""), "{body}");
+        assert!(body.contains("<details id=\"imports\" class=\"disclosure\" open"));
+    }
+
+    #[tokio::test]
+    async fn disabled_jobs_leave_imports_pending_with_manual_command_flash() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("db.sqlite"))
+            .await
+            .unwrap();
+        users::add(&db, "admin", "correct horse battery", true)
+            .await
+            .unwrap();
+        let mut config = Config::default();
+        config.server.jobs_enabled = false;
+        let app = crate::server::router(AppState::with_jobs(
+            db.clone(),
+            config,
+            None,
+            Arc::new(crate::web::DisabledRunner),
+        ));
+        let cookie = login_cookie(&app, "admin", "correct horse battery").await;
+        let response = post(
+            &app,
+            "/dashboard/ratings/import",
+            "urls=https%3A%2F%2Fexample.com%2Fpost&label=loved&note=",
+            &cookie,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/dashboard/ratings#imports"
+        );
+        assert_eq!(imports::recent(&db, 10).await.unwrap().len(), 1);
+        assert!(crate::jobs::list(&db, 10).await.unwrap().is_empty());
+        let body = text(get(&app, "/dashboard/ratings", Some(&cookie)).await).await;
+        assert!(
+            body.contains("run daily-epub job run import-ratings by hand"),
+            "{body}"
+        );
     }
 }

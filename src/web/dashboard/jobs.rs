@@ -196,7 +196,7 @@ fn form_date(body: &[u8]) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-async fn set_flash(session: &Session, kind: &str, text: String) -> Result<(), WebError> {
+pub(crate) async fn set_flash(session: &Session, kind: &str, text: String) -> Result<(), WebError> {
     session
         .insert(
             "flash",
@@ -207,6 +207,57 @@ async fn set_flash(session: &Session, kind: &str, text: String) -> Result<(), We
         )
         .await
         .map_err(|error| WebError::Internal(error.into()))
+}
+
+pub(crate) enum StartJob {
+    Disabled,
+    Active(i64),
+    Started(i64),
+    Failed(i64, String),
+}
+
+/// Request one catalogue job through the configured runner.
+pub(crate) async fn start_job(
+    state: &AppState,
+    viewer: &Viewer,
+    job: Job,
+) -> Result<StartJob, WebError> {
+    if !state.config().server.jobs_enabled {
+        return Ok(StartJob::Disabled);
+    }
+    let unit = job.unit();
+    if let Some(active) = jobs::active_for_unit(&state.db, &unit)
+        .await
+        .map_err(db_err)?
+    {
+        return Ok(StartJob::Active(active));
+    }
+    if let Err(error) = crate::web::WebState::reload_if_changed(state) {
+        tracing::warn!(%error, "config.toml on disk does not load; keeping the previous config");
+    }
+    let id = jobs::insert_requested(&state.db, &job, Some(viewer.id), Timestamp::now())
+        .await
+        .map_err(db_err)?;
+    match state.web.jobs.start(&unit).await {
+        Ok(()) => {
+            tracing::info!(user = %viewer.username, job = %job.name(), job_id = id, %unit, "job requested");
+            Ok(StartJob::Started(id))
+        }
+        Err(error) => {
+            tracing::warn!(user = %viewer.username, job = %job.name(), job_id = id, %unit, %error, "job start failed");
+            jobs::finish(
+                &state.db,
+                id,
+                jobs::Outcome::Failed,
+                &format!("could not start {unit}: {error}"),
+                None,
+                Timestamp::now(),
+            )
+            .await
+            .map_err(db_err)?;
+            Ok(StartJob::Failed(id, error))
+        }
+    }
 }
 
 /// `POST /dashboard/jobs/{name}` (admin, origin-checked): parse the name,
@@ -233,67 +284,41 @@ async fn start(
             .map_err(|_| WebError::BadRequest(format!("invalid date {date:?}")))?;
         job = Job::Generate { date: Some(parsed) };
     }
-    let config = state.config();
-    if !config.server.jobs_enabled {
-        set_flash(
-            &session,
-            "error",
-            "Jobs are disabled on this server (server.jobs_enabled = false).".into(),
-        )
-        .await?;
-        return Ok(Redirect::to("/dashboard/jobs").into_response());
-    }
-    let unit = job.unit();
-    if let Some(active) = jobs::active_for_unit(&state.db, &unit)
-        .await
-        .map_err(db_err)?
-    {
-        let flash = Flash {
-            kind: "error".into(),
-            text: format!(
-                "{} is already requested or running (job {active}).",
-                job.name()
-            ),
-        };
-        let template = jobs_template(&state, Some(viewer), Some(flash)).await?;
-        return Ok((StatusCode::CONFLICT, Html(template)).into_response());
-    }
-
-    // Pick up a hand-edited config.toml before the unit starts (§4.2); a file
-    // that no longer loads keeps the previous config live and is only logged.
-    if let Err(error) = crate::web::WebState::reload_if_changed(&state) {
-        tracing::warn!(%error, "config.toml on disk does not load; keeping the previous config");
-    }
-    let now = Timestamp::now();
-    let id = jobs::insert_requested(&state.db, &job, Some(viewer.id), now)
-        .await
-        .map_err(db_err)?;
-    match state.web.jobs.start(&unit).await {
-        Ok(()) => {
-            tracing::info!(user = %viewer.username, job = %job.name(), job_id = id, %unit, "job requested");
-            set_flash(&session, "success", format!("Started {}.", job.name())).await?;
-        }
-        Err(error) => {
-            tracing::warn!(user = %viewer.username, job = %job.name(), job_id = id, %unit, %error, "job start failed");
-            jobs::finish(
-                &state.db,
-                id,
-                jobs::Outcome::Failed,
-                &format!("could not start {unit}: {error}"),
-                None,
-                Timestamp::now(),
+    match start_job(&state, &viewer, job).await? {
+        StartJob::Disabled => {
+            set_flash(
+                &session,
+                "error",
+                "Jobs are disabled on this server (server.jobs_enabled = false).".into(),
             )
-            .await
-            .map_err(db_err)?;
+            .await?;
+            Ok(Redirect::to("/dashboard/jobs").into_response())
+        }
+        StartJob::Active(active) => {
+            let flash = Flash {
+                kind: "error".into(),
+                text: format!(
+                    "{} is already requested or running (job {active}).",
+                    job.name()
+                ),
+            };
+            let template = jobs_template(&state, Some(viewer), Some(flash)).await?;
+            Ok((StatusCode::CONFLICT, Html(template)).into_response())
+        }
+        StartJob::Started(id) => {
+            set_flash(&session, "success", format!("Started {}.", job.name())).await?;
+            Ok(Redirect::to(&format!("/dashboard/jobs/{id}")).into_response())
+        }
+        StartJob::Failed(id, error) => {
             set_flash(
                 &session,
                 "error",
                 format!("Could not start {}: {error}", job.name()),
             )
             .await?;
+            Ok(Redirect::to(&format!("/dashboard/jobs/{id}")).into_response())
         }
     }
-    Ok(Redirect::to(&format!("/dashboard/jobs/{id}")).into_response())
 }
 
 /// `GET /dashboard/jobs/{id}`: the row, the live unit status and the journal

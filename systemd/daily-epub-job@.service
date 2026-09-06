@@ -1,7 +1,7 @@
 # The Daily EPUB — one operator job (dashboard plan §14): an instance of this
 # template runs `daily-epub job run <name>` for a catalogue name such as
 # `generate`, `generate-2026-09-03`, `dry-run`, `profile-rebuild`,
-# `features-backfill`, `backfill-social` or `features-prune`. The Jobs page
+# `features-backfill`, `backfill-social`, `features-prune` or `import-ratings`. The Jobs page
 # starts instances through systemd + polkit (systemd/50-daily-epub.rules); by
 # hand: `sudo systemctl start daily-epub-job@features-prune`.
 #

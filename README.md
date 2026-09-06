@@ -217,6 +217,21 @@ scoped `systemd/50-daily-epub.rules` polkit rule, and put the server user in
 `systemd-journal` so the page can show status and its configured journal tail.
 Set `server.jobs_enabled = false` to make starts unavailable.
 
+| Job name | Action |
+|---|---|
+| `generate` / `generate-YYYY-MM-DD` | Build and publish an issue. |
+| `dry-run` | Run the pipeline without publishing or recording an issue. |
+| `profile-rebuild` | Rebuild learned taste adjustments from ratings. |
+| `features-backfill` | Embed rated and recently published articles and interests. |
+| `backfill-social` | Refresh recent social scores. |
+| `features-prune` | Remove stale embeddings and curation telemetry. |
+| `import-ratings` | Fetch, embed, and rate URLs queued from the Ratings page. |
+
+The Ratings page accepts up to 500 historical article URLs at a time with one
+verdict and optional note. Imports run in the background and show per-URL
+status in the page plus live logs on the job page. If dashboard jobs are
+disabled, queueing still works; run `daily-epub job run import-ratings` by hand.
+
 The Settings page derives its fields from `Config`, rewrites `config.toml` in
 place with `toml_edit`, preserves comments/order and file permissions, validates
 before an atomic rename, and records attributed history. It re-reads hand edits
@@ -239,7 +254,8 @@ these writes.
 | `GET /account`, `POST /account/password`, `/account/logout-all` | User or admin | Change the current password or revoke sessions. |
 | `POST /rate` | Admin | Append an attributed dashboard rating event. |
 | `GET /dashboard` | Admin | Run, budget, rating, job, and config overview. |
-| `GET /dashboard/runs[/{id}]`, `/articles[/{id}]`, `/ratings`, `/stats` | Admin | Pipeline history, article explanations, rating contributions/history, and evaluation stats. |
+| `GET /dashboard/runs[/{id}]`, `/articles[/{id}]`, `/ratings`, `/stats` | Admin | Pipeline history, article explanations, rating contributions/history, historical URL imports, and evaluation stats. |
+| `POST /dashboard/ratings/import` | Admin | Queue historical URLs with a verdict and start the background import job. |
 | `GET/POST /dashboard/profile`, `POST /dashboard/profile/restore` | Admin | Edit `profile.md`, inspect prompts/adjustments, and restore a version. |
 | `GET/POST /dashboard/settings`, `POST /dashboard/settings/providers`, `GET /dashboard/settings/history` | Admin | Edit validated configuration and inspect its audit log. |
 | `GET /dashboard/jobs`, `GET /dashboard/jobs/{id}`, `POST /dashboard/jobs/{name}` | Admin | Start fixed systemd jobs and inspect status and logs. |

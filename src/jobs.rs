@@ -42,17 +42,20 @@ pub enum Job {
     BackfillSocial,
     /// `features-prune` → `features prune`.
     FeaturesPrune,
+    /// `import-ratings` → process ratings-dashboard URL imports.
+    ImportRatings,
 }
 
 impl Job {
     /// The catalogue in the order the Jobs page lists it.
-    pub const CATALOGUE: [Job; 6] = [
+    pub const CATALOGUE: [Job; 7] = [
         Job::Generate { date: None },
         Job::DryRun,
         Job::ProfileRebuild,
         Job::FeaturesBackfill,
         Job::BackfillSocial,
         Job::FeaturesPrune,
+        Job::ImportRatings,
     ];
 
     /// `^[a-z0-9-]+$`: the only characters a job (and so a unit instance) name
@@ -77,6 +80,7 @@ impl Job {
             "features-backfill" => Some(Job::FeaturesBackfill),
             "backfill-social" => Some(Job::BackfillSocial),
             "features-prune" => Some(Job::FeaturesPrune),
+            "import-ratings" => Some(Job::ImportRatings),
             _ => {
                 let date = name.strip_prefix("generate-")?;
                 // Exactly `YYYY-MM-DD`; the round trip rejects `2026-9-3`.
@@ -95,6 +99,7 @@ impl Job {
             Job::FeaturesBackfill => "features-backfill".into(),
             Job::BackfillSocial => "backfill-social".into(),
             Job::FeaturesPrune => "features-prune".into(),
+            Job::ImportRatings => "import-ratings".into(),
         }
     }
 
@@ -122,6 +127,7 @@ impl Job {
             Job::FeaturesPrune => {
                 "Drop stale embeddings, old candidate telemetry and old assessments per the retention config."
             }
+            Job::ImportRatings => "Fetch, embed and rate the URLs queued from the Ratings page.",
         }
     }
 
@@ -133,7 +139,7 @@ impl Job {
             Job::ProfileRebuild => Some("profile rebuild"),
             Job::FeaturesBackfill => Some("features backfill"),
             Job::BackfillSocial => Some("backfill-social"),
-            Job::FeaturesPrune => None,
+            Job::FeaturesPrune | Job::ImportRatings => None,
         }
     }
 
@@ -447,6 +453,12 @@ mod tests {
             Some("generate")
         );
         assert_eq!(Job::parse("features-prune").unwrap().takes_lock(), None);
+        assert_eq!(Job::parse("import-ratings"), Some(Job::ImportRatings));
+        assert_eq!(Job::ImportRatings.takes_lock(), None);
+        assert_eq!(
+            Job::ImportRatings.description(),
+            "Fetch, embed and rate the URLs queued from the Ratings page."
+        );
         assert!(Job::parse("generate-2026-09-03").unwrap().dangerous());
         assert!(!Job::parse("dry-run").unwrap().dangerous());
     }

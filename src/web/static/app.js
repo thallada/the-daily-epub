@@ -73,7 +73,8 @@ document.addEventListener("submit", (event) => {
 document.querySelectorAll("details[id]").forEach((details) => {
   try {
     const key = "details:" + details.id;
-    details.open = localStorage.getItem(key) === "open";
+    const saved = localStorage.getItem(key);
+    if (saved === "open" || saved === "closed") details.open = saved === "open";
     details.addEventListener("toggle", () => localStorage.setItem(key, details.open ? "open" : "closed"));
   } catch (_) {}
 });

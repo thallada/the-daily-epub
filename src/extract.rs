@@ -155,17 +155,10 @@ impl Extractor {
                     // Relative URLs in the markup belong to the page we ended up
                     // on, not the one we asked for: shortener and syndication
                     // links land on another host entirely.
-                    let clean =
-                        sanitize_with_base(&normalize_img_tags(&page.html), &page.final_url);
-                    let words = word_count(&clean);
+                    let extracted = self.finish_readable(&article.url, &page);
+                    let words = extracted.word_count;
                     if words > feed_words && words > 0 {
-                        return self.finish(
-                            article,
-                            clean,
-                            words,
-                            ExtractMethod::Readability,
-                            &page.final_url,
-                        );
+                        return extracted;
                     }
                     tracing::debug!(words, feed_words, "readability was not an improvement");
                 }
@@ -286,16 +279,34 @@ impl Extractor {
             body.extend_from_slice(&chunk);
         }
         let html = String::from_utf8_lossy(&body).into_owned();
+        let (title, html) = readable_page(&html, &final_url)?;
         Ok(Page {
-            html: readability(&html, &final_url)?,
+            title,
+            html,
             final_url,
         })
+    }
+
+    /// Sanitize a fetched readability page and derive its article metadata.
+    pub fn finish_readable(&self, requested_url: &str, page: &Page) -> Extracted {
+        let clean = sanitize_with_base(&normalize_img_tags(&page.html), &page.final_url);
+        let words = word_count(&clean);
+        let image_urls = collect_image_urls(&clean, &page.final_url);
+        Extracted {
+            content_html: clean,
+            word_count: words,
+            excerpt_only: looks_paywalled(requested_url, words, &self.paywall_domains),
+            image_urls,
+            method: ExtractMethod::Readability,
+        }
     }
 }
 
 /// An article page after fetching and readability (§3.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
+    /// Readability's title for the page.
+    pub title: String,
     /// Readability's main-content markup.
     pub html: String,
     /// Where the fetch ended up, after any redirects — the base for relative URLs.
@@ -310,6 +321,10 @@ pub struct Page {
 /// their image with them) and its lazy-image heuristic overwrites a perfectly
 /// good `src` with whatever other attribute happens to contain `.jpg`.
 pub fn readability(html: &str, url: &str) -> Result<String, ExtractError> {
+    readable_page(html, url).map(|(_, content)| content)
+}
+
+fn readable_page(html: &str, url: &str) -> Result<(String, String), ExtractError> {
     let html = prepare_for_readability(html);
     let config = dom_smoothie::Config {
         max_elements_to_parse: 60_000,
@@ -322,7 +337,7 @@ pub fn readability(html: &str, url: &str) -> Result<String, ExtractError> {
     if content.trim().is_empty() {
         return Err(ExtractError::NoContent);
     }
-    Ok(content)
+    Ok((parsed.title.trim().to_string(), content))
 }
 
 /// Copy an [`Extracted`] onto its [`Article`].
@@ -707,7 +722,8 @@ mod tests {
              <article><h1>A Post</h1><p>{paragraph}</p><p>{paragraph}</p></article>\
              <footer>© 2026</footer></body></html>"
         );
-        let content = readability(&html, "https://blog.dev/p").expect("main content");
+        let (title, content) = readable_page(&html, "https://blog.dev/p").expect("main content");
+        assert_eq!(title, "A Post");
         assert!(content.contains("Readability keeps the body copy"));
         let clean = sanitize_with_base(&content, "https://blog.dev/p");
         assert!(word_count(&clean) > 200);
