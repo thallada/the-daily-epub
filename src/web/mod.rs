@@ -1,3 +1,4 @@
+pub mod access;
 pub mod dashboard;
 pub mod issue;
 pub mod public;
@@ -694,6 +695,7 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
 
     axum::Router::new()
         .route("/", get(public::latest))
+        .route("/request-access", get(access::page).post(access::submit))
         .route("/issues", get(public::archive))
         .route("/issues/{date}", get(public::show_issue))
         .route("/feed.xml", get(public::feed))

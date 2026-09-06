@@ -1,9 +1,19 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard">
 <header class="page-head"><div>
 <h1>Users</h1>
-<p class="page-desc">Every account on this server, with its role and open sessions.</p>
+<p class="page-desc">{{ requests.len() }} open access request{% if requests.len() != 1 %}s{% endif %}; every account on this server, with its role and open sessions.</p>
 </div></header>
-<p class="muted text-sm">Accounts are read-only here. Create, change, disable, enable, or sign out users with the <code>daily-epub users</code> CLI on the server.</p>
+<p class="muted text-sm">Create accounts with <code>daily-epub users add &lt;username&gt;</code> on the server, then mark the request done. Change, disable, enable, or sign out users with the <code>daily-epub users</code> CLI.</p>
+<section class="card"><h2>Access requests</h2>
+{% if requests.is_empty() %}<p class="muted">No open requests.</p>{% else %}<div class="scroll-x"><table>
+<thead><tr><th>Email</th><th>Reason or comment</th><th>Requested</th><th><span class="sr-only">Action</span></th></tr></thead>
+<tbody>{% for request in requests %}<tr>
+<td class="font-medium text-ink"><a href="mailto:{{ request.email }}">{{ request.email }}</a></td>
+<td class="cell-wrap">{% if request.reason.is_empty() %}<span class="text-muted">—</span>{% else %}{{ request.reason }}{% endif %}</td>
+<td class="cell-tight text-muted">{{ request.requested }}</td>
+<td><form method="post" action="/dashboard/users/requests/{{ request.id }}/done"><button class="btn" type="submit">Mark done</button></form></td>
+</tr>{% endfor %}</tbody></table></div>{% endif %}
+</section>
 {% if users.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table data-filter>
 <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Last login</th><th class="num">Open sessions</th></tr></thead>
 <tbody>{% for user in users %}<tr>
