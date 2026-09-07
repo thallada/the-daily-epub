@@ -17,7 +17,7 @@ use daily_epub::db::Db;
 use daily_epub::pipeline::{self, GenerateOptions, GenerateOutcome};
 use daily_epub::report::{RunReport, VOYAGE_PROVIDER};
 use daily_epub::types::{ArticleId, Vote};
-use daily_epub::{curate, http, imports, jobs, lock, rate, server, social};
+use daily_epub::{curate, discovery, http, imports, jobs, lock, rate, server, social};
 
 /// A personalized daily newspaper, delivered as an EPUB.
 #[derive(Debug, Parser)]
@@ -61,6 +61,9 @@ enum Command {
     /// Manage dashboard users without taking the pipeline run lock.
     #[command(subcommand)]
     Users(UsersCommand),
+    /// Feed subscription candidates (feed discovery plan §4 step 6).
+    #[command(subcommand)]
+    Feeds(FeedsCommand),
     /// Operator jobs (what `daily-epub-job@<name>.service` runs).
     #[command(subcommand)]
     Job(JobCommand),
@@ -74,6 +77,23 @@ enum JobCommand {
         /// `features-backfill`, `backfill-social`, `features-prune` or `import-ratings`.
         name: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum FeedsCommand {
+    /// Look for feeds behind recent aggregator-only articles and record the
+    /// ones not already subscribed as candidates for `/dashboard/feeds`.
+    Discover(FeedsDiscoverArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct FeedsDiscoverArgs {
+    /// How far back to look for articles.
+    #[arg(long, default_value_t = 14)]
+    days: i64,
+    /// How many not-yet-checked hosts to look up.
+    #[arg(long, default_value_t = 200)]
+    limit: usize,
 }
 
 #[derive(Debug, Subcommand)]
@@ -381,6 +401,10 @@ async fn main() -> Result<()> {
             let db = Db::open_and_migrate(&config.database_path).await?;
             cmd_users(&db, command).await?;
         }
+        Command::Feeds(FeedsCommand::Discover(args)) => {
+            let db = Db::open_and_migrate(&config.database_path).await?;
+            println!("{}", cmd_feeds_discover(&config, &db, args).await?);
+        }
         Command::Job(JobCommand::Run { name }) => {
             let Some(job) = jobs::Job::parse(&name) else {
                 eprintln!("unknown job {name:?}; the catalogue is:");
@@ -411,6 +435,8 @@ async fn main() -> Result<()> {
 fn lock_holder(command: &Command) -> Option<&'static str> {
     match command {
         Command::Generate(_) => Some("generate"),
+        // Writes the same tables the discovery stage of a run writes.
+        Command::Feeds(FeedsCommand::Discover(_)) => Some("feeds discover"),
         Command::Profile(ProfileCommand::Rebuild) => Some("profile rebuild"),
         Command::Features(FeaturesCommand::Backfill(_)) => Some("features backfill"),
         Command::BackfillSocial(_) => Some("backfill-social"),
@@ -428,6 +454,39 @@ fn lock_holder(command: &Command) -> Option<&'static str> {
         | Command::Config(_)
         | Command::Users(_) => None,
     }
+}
+
+/// `daily-epub feeds discover` — the same stage `generate` runs, over the last
+/// `--days` of articles, so the dashboard page is useful before tomorrow's run.
+async fn cmd_feeds_discover(config: &Config, db: &Db, args: FeedsDiscoverArgs) -> Result<String> {
+    let since = jiff::Timestamp::now()
+        .checked_sub(jiff::Span::new().hours(args.days.max(0).saturating_mul(24)))
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+    let articles = discovery::articles_since(db, since).await?;
+    let http = http::build_client(http::DEFAULT_TIMEOUT).context("building http client")?;
+    let client = daily_epub::miniflux::MinifluxClient::new(&config.miniflux, http.clone())
+        .context("constructing the miniflux client")?;
+    let feeds = client
+        .feed_map()
+        .await
+        .context("loading the miniflux feed list")?;
+    let mut cfg = config.discovery.clone();
+    cfg.max_lookups_per_run = args.limit;
+    let summary = discovery::run(
+        db,
+        &client,
+        &http,
+        &cfg,
+        &articles,
+        &feeds,
+        jiff::Timestamp::now(),
+    )
+    .await?;
+    Ok(format!(
+        "{} articles since {}: {summary}",
+        articles.len(),
+        since
+    ))
 }
 
 async fn cmd_users(db: &Db, command: UsersCommand) -> Result<()> {
