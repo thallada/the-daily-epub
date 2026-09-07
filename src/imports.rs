@@ -165,7 +165,7 @@ fn imported_article(
         sources: Vec::new(),
         first_seen,
         url: page.final_url,
-        author: None,
+        author: extracted.author,
         feed_id: 0,
         feed_title: "Imported".into(),
         category: None,
@@ -482,6 +482,7 @@ mod tests {
         let page = Page {
             title: "A historical essay".into(),
             html: "<article><p>Useful old writing.</p><script>bad()</script><img src=\"/chart.png\"></article>".into(),
+            author: Some("Essay Writer".into()),
             final_url: "https://example.com/essays/old".into(),
         };
         let extracted = extractor.finish_readable("https://example.com/old", &page);
@@ -494,6 +495,7 @@ mod tests {
         assert_eq!(article.title, "A historical essay");
         assert_eq!(article.best_entry_id, 0);
         assert_eq!(article.feed_title, "Imported");
+        assert_eq!(article.author.as_deref(), Some("Essay Writer"));
         assert!(article.sources.is_empty());
         assert!(!article.content_html.contains("script"));
         assert_eq!(article.image_urls, ["https://example.com/chart.png"]);
@@ -502,6 +504,7 @@ mod tests {
         assert_eq!(loaded.title, "A historical essay");
         assert_eq!(loaded.best_entry_id, 0);
         assert_eq!(loaded.feed_title, "Imported");
+        assert_eq!(loaded.author.as_deref(), Some("Essay Writer"));
     }
 
     #[tokio::test]

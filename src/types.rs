@@ -90,6 +90,8 @@ pub enum ExtractMethod {
 pub struct Extracted {
     /// Sanitized XHTML-safe body markup.
     pub content_html: String,
+    /// Author discovered in the fetched page, if any.
+    pub author: Option<String>,
     pub word_count: i64,
     /// True when we only have an excerpt/paywall stub — penalized in pre-filter.
     pub excerpt_only: bool,
@@ -119,7 +121,7 @@ pub struct Article {
     pub sources: Vec<SourceRef>,
     pub first_seen: Timestamp,
 
-    // --- denormalized, not stored on `articles` ---
+    // --- joined / derived fields ---
     pub url: String,
     pub author: Option<String>,
     pub feed_id: FeedId,

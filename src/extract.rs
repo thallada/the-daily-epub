@@ -18,7 +18,7 @@ use url::Url;
 use crate::html::word_count;
 use crate::images::normalize::{normalize_img_tags, prepare_for_readability};
 use crate::images::refs::collect_image_urls;
-use crate::types::{Article, ExtractMethod, Extracted};
+use crate::types::{Article, ExtractMethod, Extracted, SourceKind};
 
 /// Word count at or above which Miniflux content is treated as full text (§3.3).
 pub const FULL_TEXT_MIN_WORDS: i64 = 250;
@@ -197,6 +197,7 @@ impl Extractor {
             || looks_paywalled(&article.url, words, &self.paywall_domains);
         Extracted {
             content_html,
+            author: None,
             word_count: words,
             excerpt_only,
             image_urls,
@@ -279,10 +280,11 @@ impl Extractor {
             body.extend_from_slice(&chunk);
         }
         let html = String::from_utf8_lossy(&body).into_owned();
-        let (title, html) = readable_page(&html, &final_url)?;
+        let (title, html, author) = readable_page(&html, &final_url)?;
         Ok(Page {
             title,
             html,
+            author,
             final_url,
         })
     }
@@ -294,6 +296,7 @@ impl Extractor {
         let image_urls = collect_image_urls(&clean, &page.final_url);
         Extracted {
             content_html: clean,
+            author: page.author.clone(),
             word_count: words,
             excerpt_only: looks_paywalled(requested_url, words, &self.paywall_domains),
             image_urls,
@@ -309,6 +312,8 @@ pub struct Page {
     pub title: String,
     /// Readability's main-content markup.
     pub html: String,
+    /// Readability's normalized byline for the page.
+    pub author: Option<String>,
     /// Where the fetch ended up, after any redirects — the base for relative URLs.
     pub final_url: String,
 }
@@ -321,10 +326,10 @@ pub struct Page {
 /// their image with them) and its lazy-image heuristic overwrites a perfectly
 /// good `src` with whatever other attribute happens to contain `.jpg`.
 pub fn readability(html: &str, url: &str) -> Result<String, ExtractError> {
-    readable_page(html, url).map(|(_, content)| content)
+    readable_page(html, url).map(|(_, content, _)| content)
 }
 
-fn readable_page(html: &str, url: &str) -> Result<(String, String), ExtractError> {
+fn readable_page(html: &str, url: &str) -> Result<(String, String, Option<String>), ExtractError> {
     let html = prepare_for_readability(html);
     let config = dom_smoothie::Config {
         max_elements_to_parse: 60_000,
@@ -337,7 +342,20 @@ fn readable_page(html: &str, url: &str) -> Result<(String, String), ExtractError
     if content.trim().is_empty() {
         return Err(ExtractError::NoContent);
     }
-    Ok((parsed.title.trim().to_string(), content))
+    Ok((
+        parsed.title.trim().to_string(),
+        content,
+        normalize_author(parsed.byline),
+    ))
+}
+
+fn normalize_author(author: Option<String>) -> Option<String> {
+    let author = author?;
+    if author.chars().any(|c| matches!(c, '\n' | '\r')) {
+        return None;
+    }
+    let author = author.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!author.is_empty() && author.chars().count() <= 100).then_some(author)
 }
 
 /// Copy an [`Extracted`] onto its [`Article`].
@@ -348,6 +366,11 @@ pub fn apply(article: &mut Article, extracted: Extracted) {
     article.word_count = extracted.word_count;
     article.excerpt_only = extracted.excerpt_only;
     article.extract_method = extracted.method;
+    if let Some(author) = extracted.author
+        && (article.author.is_none() || !article.came_via(SourceKind::Feed))
+    {
+        article.author = Some(author);
+    }
 }
 
 fn merge_paywall_domains(configured: Vec<String>) -> Vec<String> {
@@ -722,11 +745,94 @@ mod tests {
              <article><h1>A Post</h1><p>{paragraph}</p><p>{paragraph}</p></article>\
              <footer>© 2026</footer></body></html>"
         );
-        let (title, content) = readable_page(&html, "https://blog.dev/p").expect("main content");
+        let (title, content, author) =
+            readable_page(&html, "https://blog.dev/p").expect("main content");
         assert_eq!(title, "A Post");
+        assert_eq!(author, None);
         assert!(content.contains("Readability keeps the body copy"));
         let clean = sanitize_with_base(&content, "https://blog.dev/p");
         assert!(word_count(&clean) > 200);
         assert!(!clean.contains("<nav"));
+    }
+
+    #[test]
+    fn readable_page_plumbs_meta_author_through_extracted() {
+        let html = format!(
+            "<html><head><title>A Post</title>\
+             <meta name=\"author\" content=\"  Jane   Dev  \"></head>\
+             <body><article><h1>A Post</h1><p>{}</p></article></body></html>",
+            "Substantial body copy for readability. ".repeat(40)
+        );
+        let (title, content, author) =
+            readable_page(&html, "https://blog.dev/p").expect("main content");
+        let page = Page {
+            title,
+            html: content,
+            author,
+            final_url: "https://blog.dev/p".into(),
+        };
+        let extracted = Extractor::offline(vec![]).finish_readable(&page.final_url, &page);
+        assert_eq!(extracted.author.as_deref(), Some("Jane Dev"));
+    }
+
+    #[test]
+    fn readable_page_plumbs_json_ld_author_through_extracted() {
+        let html = format!(
+            r#"<html><head><title>A Post</title>
+             <script type="application/ld+json">{{
+               "@context":"https://schema.org", "@type":"Article",
+               "headline":"A Post", "author":{{"@type":"Person","name":"Alex Writer"}}
+             }}</script></head>
+             <body><article><h1>A Post</h1><p>{}</p></article></body></html>"#,
+            "Substantial body copy for readability. ".repeat(40)
+        );
+        let (title, content, author) =
+            readable_page(&html, "https://blog.dev/p").expect("main content");
+        let page = Page {
+            title,
+            html: content,
+            author,
+            final_url: "https://blog.dev/p".into(),
+        };
+        let extracted = Extractor::offline(vec![]).finish_readable(&page.final_url, &page);
+        assert_eq!(extracted.author.as_deref(), Some("Alex Writer"));
+    }
+
+    #[test]
+    fn apply_uses_page_author_with_feed_precedence() {
+        let extracted = |author: &str| Extracted {
+            content_html: "<p>body</p>".into(),
+            author: Some(author.into()),
+            word_count: 1,
+            excerpt_only: false,
+            image_urls: vec![],
+            method: ExtractMethod::Readability,
+        };
+
+        let mut aggregator = article("https://blog.dev/aggregator", "");
+        aggregator.sources[0].kind = SourceKind::HnFrontpage;
+        aggregator.author = Some("Submitter".into());
+        apply(&mut aggregator, extracted("Page Writer"));
+        assert_eq!(aggregator.author.as_deref(), Some("Page Writer"));
+
+        let mut direct = article("https://blog.dev/direct", "");
+        direct.author = Some("Feed Writer".into());
+        apply(&mut direct, extracted("Page Writer"));
+        assert_eq!(direct.author.as_deref(), Some("Feed Writer"));
+
+        let mut missing = article("https://blog.dev/missing", "");
+        apply(&mut missing, extracted("Page Writer"));
+        assert_eq!(missing.author.as_deref(), Some("Page Writer"));
+    }
+
+    #[test]
+    fn implausible_page_authors_are_dropped() {
+        assert_eq!(
+            normalize_author(Some("  Jane   Dev  ".into())).as_deref(),
+            Some("Jane Dev")
+        );
+        assert_eq!(normalize_author(Some("Jane\nDev".into())), None);
+        assert_eq!(normalize_author(Some("x".repeat(101))), None);
+        assert_eq!(normalize_author(Some("   ".into())), None);
     }
 }

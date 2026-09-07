@@ -291,16 +291,17 @@ impl Db {
 
     /// Upsert a deduped cluster by canonical URL; returns its `articles.id`.
     ///
-    /// The denormalized fields on [`Article`] are not stored here — they come
-    /// from the joined `entries` row when loading.
+    /// Most denormalized fields on [`Article`] come from the joined `entries`
+    /// row when loading; the extracted author is stored on `articles`.
     pub async fn upsert_article(&self, article: &Article) -> Result<ArticleId> {
         let sources = serde_json::to_string(&article.sources).unwrap_or_else(|_| "[]".into());
         let row = sqlx::query(
-            "INSERT INTO articles (canonical_url, title, best_entry_id, content_html, word_count,
-                                   excerpt_only, image_count, sources_json, first_seen)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO articles (canonical_url, title, author, best_entry_id, content_html,
+                                   word_count, excerpt_only, image_count, sources_json, first_seen)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(canonical_url) DO UPDATE SET
                  title = excluded.title,
+                 author = excluded.author,
                  best_entry_id = excluded.best_entry_id,
                  content_html = excluded.content_html,
                  word_count = excluded.word_count,
@@ -311,6 +312,7 @@ impl Db {
         )
         .bind(&article.canonical_url)
         .bind(&article.title)
+        .bind(&article.author)
         .bind((article.best_entry_id != 0).then_some(article.best_entry_id))
         .bind(&article.content_html)
         .bind(article.word_count)
@@ -860,7 +862,7 @@ macro_rules! article_select {
        a.word_count AS word_count, a.excerpt_only AS excerpt_only,
        a.image_count AS image_count, a.sources_json AS sources_json,
        a.first_seen AS first_seen,
-       e.url AS entry_url, e.author AS author, e.feed_id AS feed_id,
+       e.url AS entry_url, COALESCE(a.author, e.author) AS author, e.feed_id AS feed_id,
        e.feed_title AS feed_title, e.category AS category,
        e.published_at AS published_at, e.comments_url AS comments_url
   FROM articles a LEFT JOIN entries e ON e.id = a.best_entry_id
@@ -1163,7 +1165,7 @@ mod tests {
             }],
             first_seen: ts("2026-08-15T05:30:00Z"),
             url: "https://example.com/1".into(),
-            author: None,
+            author: Some("Page Writer".into()),
             feed_id: 7,
             feed_title: "Hacker News".into(),
             category: None,
@@ -1194,11 +1196,20 @@ mod tests {
         assert_eq!(loaded.social.len(), 1);
         assert_eq!(loaded.social[0].score, 342);
         assert_eq!(loaded.feed_title, "Hacker News");
+        assert_eq!(loaded.author.as_deref(), Some("Page Writer"));
         // The batched lookup agrees with the single one and skips unknown ids.
         let batch = db.get_articles(&[id, 9_999]).await.unwrap();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[&id], loaded);
         assert!(db.get_articles(&[]).await.unwrap().is_empty());
+
+        sqlx::query("UPDATE articles SET author = NULL WHERE id = ?")
+            .bind(id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let fallback = db.get_article(id).await.unwrap().unwrap();
+        assert_eq!(fallback.author.as_deref(), Some("someone"));
         assert_eq!(
             db.article_id_for_url("https://example.com/1")
                 .await

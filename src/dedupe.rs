@@ -380,8 +380,17 @@ fn build_article(members: Vec<(Entry, String)>, feed_urls: &FeedUrls) -> Article
             }
         });
 
+    // An aggregator entry's author is usually the submitter, so it only counts
+    // when no direct feed carried the story; extraction may still replace it
+    // with the page's own byline.
+    let is_direct = |e: &Entry| {
+        classify_source_with_feed(e, feed_urls.get(&e.feed_id).map(String::as_str))
+            == SourceKind::Feed
+    };
+    let has_direct = members.iter().any(|(e, _)| is_direct(e));
     let author = members
         .iter()
+        .filter(|(e, _)| !has_direct || is_direct(e))
         .filter_map(|(e, _)| e.author.clone())
         .find(|a| !a.trim().is_empty());
 
@@ -636,6 +645,38 @@ mod tests {
 
         assert_eq!(articles[1].canonical_url, "https://other.dev/x");
         assert_eq!(articles[1].sources.len(), 1);
+    }
+
+    #[test]
+    fn direct_feed_author_beats_aggregator_submitter() {
+        let mut aggregator = entry(1, "https://blog.dev/post", "A Distinct Article Title");
+        aggregator.author = Some("HN Submitter".into());
+        aggregator.raw_content = format!("<p>{}</p>", "word ".repeat(50));
+
+        let mut direct = entry(2, "https://blog.dev/post", "A Distinct Article Title");
+        direct.author = Some("Real Writer".into());
+
+        let feed_urls = FeedUrls::from([
+            (aggregator.feed_id, "https://hnrss.org/frontpage".into()),
+            (direct.feed_id, "https://blog.dev/feed.xml".into()),
+        ]);
+        let (articles, _) = cluster_with_feeds(vec![aggregator, direct], &feed_urls);
+
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].best_entry_id, 1);
+        assert_eq!(articles[0].author.as_deref(), Some("Real Writer"));
+
+        // With a direct feed present, a submitter name is not used as a fallback.
+        let mut aggregator = entry(3, "https://blog.dev/other", "Another Distinct Title");
+        aggregator.author = Some("HN Submitter".into());
+        let mut direct = entry(4, "https://blog.dev/other", "Another Distinct Title");
+        direct.author = None;
+        let feed_urls = FeedUrls::from([
+            (aggregator.feed_id, "https://hnrss.org/frontpage".into()),
+            (direct.feed_id, "https://blog.dev/feed.xml".into()),
+        ]);
+        let (articles, _) = cluster_with_feeds(vec![aggregator, direct], &feed_urls);
+        assert_eq!(articles[0].author, None);
     }
 
     #[test]
