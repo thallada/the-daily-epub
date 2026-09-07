@@ -206,14 +206,17 @@ article chapters, rate articles, and use every `/dashboard/*` page, including
 settings and jobs. Personalization is shared across accounts for now.
 
 Visitors can request an account at `/request-access`; admins review open
-requests on `/dashboard/users`, create accounts with `daily-epub users add
-<username>` on the server, and then mark each request done. Accounts are
-deliberately managed on the host, not in the browser. Usernames
-are case-insensitive and passwords must be 12–1024 characters. Bootstrap with
-`daily-epub users add <username> --admin`; use `users passwd`, `role`,
+requests on `/dashboard/users`. Approving a request creates a `user` account,
+emails a random temporary password to the requester, and marks the request
+done; the new user must choose a new password on first sign-in. Approval is
+available only when `[mail]` is active, so an account is never created with a
+password that cannot be delivered. Admins can instead create an account with
+`daily-epub users add <username>` on the server and mark the request done.
+Usernames are case-insensitive and passwords must be 12–1024 characters.
+Bootstrap with `daily-epub users add <username> --admin`; use `users passwd`, `role`,
 `disable`/`enable`, `list`, and `logout` for later administration. Password
 changes and disabling a user revoke that user's sessions. `/dashboard/users`
-is a read-only view of roles, status, login times, and open sessions.
+also shows roles, status, login times, and open sessions.
 When `[mail]` is active and `mail.notify_to` is set, each stored request queues
 a plain-text SMTP notification with a direct dashboard review link; SMTP runs
 in the background and never delays the visitor's response. Mail settings are
@@ -268,8 +271,8 @@ articles do not yet have embeddings to compare.
 | `GET /issues/{date}/read` | User or admin | Open the Standard edition in BookOrbit's web reader when the integration is enabled. |
 | `GET /robots.txt`, `/static/{file}` | Public | Crawler policy and embedded CSS, JavaScript, and favicon. |
 | `GET/POST /login`, `POST /logout` | Public/session | Sign in and out; login POSTs share a per-client-IP throttle budget with access requests. |
-| `GET/POST /request-access` | Public | Request a reader account; POSTs share the login throttle, while GET stays unlimited. Requests are reviewed by an admin and fulfilled with the CLI. |
-| `GET /account`, `POST /account/password`, `/account/logout-all` | User or admin | Change the current password or revoke sessions. |
+| `GET/POST /request-access` | Public | Request a reader account; POSTs share the login throttle, while GET stays unlimited. Requests are reviewed by an admin. |
+| `GET /account`, `POST /account/password`, `/account/logout-all` | User or admin | Change the current password or revoke sessions; temporary-password users must change it before opening protected pages. |
 | `POST /rate` | Admin | Append an attributed dashboard rating event. |
 | `GET /dashboard` | Admin | Run, budget, rating, job, and config overview. |
 | `GET /dashboard/runs[/{id}]`, `/articles[/{id}]`, `/ratings`, `/stats` | Admin | Pipeline history, article explanations, rating contributions/history, historical URL imports, and evaluation stats. |
@@ -277,7 +280,7 @@ articles do not yet have embeddings to compare.
 | `GET/POST /dashboard/profile`, `POST /dashboard/profile/restore` | Admin | Edit `profile.md`, inspect prompts/adjustments, and restore a version. |
 | `GET/POST /dashboard/settings`, `POST /dashboard/settings/providers`, `GET /dashboard/settings/history` | Admin | Edit validated configuration and inspect its audit log. |
 | `GET /dashboard/jobs`, `GET /dashboard/jobs/{id}`, `POST /dashboard/jobs/{name}` | Admin | Start fixed systemd jobs and inspect status and logs. |
-| `GET /dashboard/users`, `POST /dashboard/users/requests/{id}/done` | Admin | Review access requests and view users/open sessions; account edits use the CLI. |
+| `GET /dashboard/users`, `POST /dashboard/users/requests/{id}/approve`, `POST /dashboard/users/requests/{id}/done` | Admin | Approve and email access requests, mark requests handled another way, and view users/open sessions; other account edits use the CLI. |
 | `GET /files/epub/{name}`, `/files/xtc/{name}` | Public if Basic auth is unset; otherwise session or Basic auth | Published downloads. Keeping them public when Basic auth is absent preserves existing OPDS acquisition links. |
 | `GET /opds`, `/opds/`, `/opds/daily.xml` | Existing optional Basic auth | OPDS acquisition feed. |
 | `GET /r/...`, `/healthz`, `/issues.json` | Existing policy | HMAC rating links, health, and issue reports. |

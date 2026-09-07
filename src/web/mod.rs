@@ -676,7 +676,8 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
             session::Backend,
             login_url = "/login",
             redirect_field = "next"
-        ));
+        ))
+        .route_layer(from_fn(session::require_password_change));
     let full_issues = axum::Router::new()
         .route("/issues/{date}/articles/{article_id}", get(issue::article))
         .route("/issues/{date}/world", get(issue::world))
@@ -687,6 +688,7 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
             login_url = "/login",
             redirect_field = "next"
         ))
+        .route_layer(from_fn(session::require_password_change))
         .route_layer(from_fn(map_forbidden));
     let dashboard = axum::Router::new()
         .merge(dashboard::router())
@@ -697,6 +699,7 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
             redirect_field = "next",
             users::Role::Admin
         ))
+        .route_layer(from_fn(session::require_password_change))
         .route_layer(from_fn(map_forbidden));
 
     axum::Router::new()
