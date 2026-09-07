@@ -146,6 +146,13 @@ daily-epub users logout USER    # revoke all of USER's sessions
 daily-epub job run NAME         # systemd job-unit entry point; normally not run by hand
 ```
 
+On the server, run these through the `justfile` (`just --list`): every server
+recipe wraps the binary in `systemd-run` as the `daily-epub` user with
+`/etc/daily-epub/env` loaded, exactly as the units do, so API keys resolve.
+`just de <subcommand...>` runs anything; `just feeds-discover 30`,
+`just config-check`, `just deploy` and `just logs-generate` cover the common cases.
+Plain `sudo -u daily-epub daily-epub ...` does **not** read the env file.
+
 `--dry-run` does everything except deliver: it still ingests, persists entries and
 articles, curates and **builds both EPUBs into `--out`**, but it does not copy to
 BookOrbit, does not run the retention sweep, does not write the `issues` row and
