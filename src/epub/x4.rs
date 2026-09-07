@@ -30,6 +30,9 @@ pub const MAX_WORD_CHARS: usize = 200;
 /// U+00AD, invisible unless the renderer actually needs to break there.
 const SOFT_HYPHEN: char = '\u{00ad}';
 
+/// U+00A0, rendered as visible indentation even when the X4 collapses whitespace.
+const NO_BREAK_SPACE: char = '\u{00a0}';
+
 /// Elements whose content is code, not prose, and must be copied through
 /// untouched — a soft hyphen inside a stylesheet would corrupt it.
 const RAW_TEXT_ELEMENTS: &[&str] = &["script", "style"];
@@ -127,14 +130,28 @@ pub fn simplify_xhtml(xhtml: &str) -> String {
     break_long_words(&strip_attributes(xhtml, DROPPED_ATTRIBUTES))
 }
 
-/// Insert soft hyphens into words longer than [`MAX_WORD_CHARS`], in text
-/// content only (§3.10).
+/// Insert soft hyphens into over-long words and make `<pre>` whitespace
+/// explicit, in text content only (§3.10).
 fn break_long_words(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut cursor = 0usize;
+    let mut inside_pre = false;
+    let mut at_line_start = false;
+    // A newline right after `<pre>` (or `<pre><code>`) is not a blank line:
+    // browsers drop it, so we do too.
+    let mut pre_just_opened = false;
     while let Some(rel) = html[cursor..].find('<') {
         let start = cursor + rel;
-        soften_text(&html[cursor..start], &mut out);
+        if inside_pre {
+            preserve_pre_whitespace(
+                &html[cursor..start],
+                &mut out,
+                &mut at_line_start,
+                &mut pre_just_opened,
+            );
+        } else {
+            soften_text(&html[cursor..start], &mut out);
+        }
         let Some(end) = tag_end(html, start) else {
             out.push_str(&html[start..]);
             return out;
@@ -142,6 +159,17 @@ fn break_long_words(html: &str) -> String {
         let tag = &html[start..end];
         out.push_str(tag);
         cursor = end;
+        if is_element_tag(tag, "pre", false) {
+            inside_pre = true;
+            at_line_start = true;
+            pre_just_opened = true;
+        } else if is_element_tag(tag, "pre", true) {
+            inside_pre = false;
+        } else if inside_pre && is_element_tag(tag, "br", false) {
+            at_line_start = true;
+        } else if inside_pre && !is_element_tag(tag, "code", false) {
+            pre_just_opened = false;
+        }
         // `<style>`/`<script>` bodies are not prose: copy to the closing tag verbatim.
         if let Some(name) = raw_text_name(tag)
             && let Some(close) = find_close_tag(html, cursor, name)
@@ -150,8 +178,82 @@ fn break_long_words(html: &str) -> String {
             cursor = close;
         }
     }
-    soften_text(&html[cursor..], &mut out);
+    if inside_pre {
+        preserve_pre_whitespace(
+            &html[cursor..],
+            &mut out,
+            &mut at_line_start,
+            &mut pre_just_opened,
+        );
+    } else {
+        soften_text(&html[cursor..], &mut out);
+    }
     out
+}
+
+/// Whether `tag` opens or closes the named element.
+fn is_element_tag(tag: &str, name: &str, closing: bool) -> bool {
+    let Some(mut rest) = tag.strip_prefix('<') else {
+        return false;
+    };
+    if closing {
+        let Some(after_slash) = rest.strip_prefix('/') else {
+            return false;
+        };
+        rest = after_slash;
+    } else if rest.starts_with(['/', '!', '?']) {
+        return false;
+    }
+    rest.len() >= name.len()
+        && rest[..name.len()].eq_ignore_ascii_case(name)
+        && rest[name.len()..].starts_with([' ', '\t', '\n', '\r', '>', '/'])
+}
+
+/// Make whitespace in a `<pre>` text node survive renderers that ignore CSS.
+fn preserve_pre_whitespace(
+    text: &str,
+    out: &mut String,
+    at_line_start: &mut bool,
+    pre_just_opened: &mut bool,
+) {
+    let mut rest = text;
+    if *pre_just_opened && !rest.is_empty() {
+        *pre_just_opened = false;
+        rest = rest
+            .strip_prefix("\r\n")
+            .or_else(|| rest.strip_prefix(['\n', '\r']))
+            .unwrap_or(rest);
+    }
+    while !rest.is_empty() {
+        let plain_len = rest.find([' ', '\t', '\n', '\r']).unwrap_or(rest.len());
+        if plain_len > 0 {
+            soften_text(&rest[..plain_len], out);
+            *at_line_start = false;
+            rest = &rest[plain_len..];
+            continue;
+        }
+
+        if rest.starts_with("\r\n") {
+            out.push_str("<br/>");
+            *at_line_start = true;
+            rest = &rest[2..];
+        } else if rest.starts_with(['\n', '\r']) {
+            out.push_str("<br/>");
+            *at_line_start = true;
+            rest = &rest[1..];
+        } else if rest.starts_with('\t') {
+            out.extend(std::iter::repeat_n(NO_BREAK_SPACE, 4));
+            rest = &rest[1..];
+        } else {
+            let spaces = rest.bytes().take_while(|&b| b == b' ').count();
+            if *at_line_start || spaces >= 2 {
+                out.extend(std::iter::repeat_n(NO_BREAK_SPACE, spaces));
+            } else {
+                out.push(' ');
+            }
+            rest = &rest[spaces..];
+        }
+    }
 }
 
 /// The element name when `tag` opens a raw-text element, else `None`.
@@ -502,6 +604,57 @@ mod tests {
             out,
             r#"<p class="meta">a &amp; b</p><img src="x.jpg" alt="An x"/>"#
         );
+    }
+
+    #[test]
+    fn pre_whitespace_is_made_explicit_inside_nested_tags() {
+        let input = "<pre><code>fn main() {\n    if x &lt; 2 {\n        <em>return</em>;\n    }\n <strong><a href=\"#\">// done</a></strong>\n}</code></pre>";
+        let out = simplify_xhtml(input);
+        assert_eq!(
+            out,
+            concat!(
+                "<pre><code>fn main() {<br/>",
+                "\u{00a0}\u{00a0}\u{00a0}\u{00a0}if x &lt; 2 {<br/>",
+                "\u{00a0}\u{00a0}\u{00a0}\u{00a0}\u{00a0}\u{00a0}\u{00a0}\u{00a0}<em>return</em>;<br/>",
+                "\u{00a0}\u{00a0}\u{00a0}\u{00a0}}<br/>",
+                "\u{00a0}<strong><a href=\"#\">// done</a></strong><br/>}</code></pre>"
+            )
+        );
+    }
+
+    #[test]
+    fn tabs_in_pre_become_four_no_break_spaces() {
+        assert_eq!(
+            simplify_xhtml("<pre><code>one\ttwo</code></pre>"),
+            "<pre><code>one\u{00a0}\u{00a0}\u{00a0}\u{00a0}two</code></pre>"
+        );
+    }
+
+    #[test]
+    fn whitespace_outside_pre_is_untouched() {
+        let input = "<p>outside  text\n next\tword</p><pre>x  y</pre><p>tail  text</p>";
+        assert_eq!(
+            simplify_xhtml(input),
+            "<p>outside  text\n next\tword</p><pre>x\u{00a0}\u{00a0}y</pre><p>tail  text</p>"
+        );
+    }
+
+    #[test]
+    fn newline_right_after_pre_open_is_not_a_blank_line() {
+        assert_eq!(
+            simplify_xhtml("<pre><code>\nlet a = 1;\n\nlet b = 2;</code></pre>"),
+            "<pre><code>let a = 1;<br/><br/>let b = 2;</code></pre>"
+        );
+        assert_eq!(
+            simplify_xhtml("<pre>\n  x</pre>"),
+            "<pre>\u{00a0}\u{00a0}x</pre>"
+        );
+    }
+
+    #[test]
+    fn pre_without_a_trailing_newline_gets_no_extra_break() {
+        let input = "<pre><code>let answer = 42;</code></pre>";
+        assert_eq!(simplify_xhtml(input), input);
     }
 
     /// The shipped X4 stylesheet must already satisfy the X4 rules, so the
