@@ -84,6 +84,9 @@ struct FeedRow {
     article_count: usize,
     first_seen: String,
     last_seen: String,
+    /// `last_seen` as a short date for the column; the full first/last
+    /// timestamps sit in the cell's tooltip.
+    seen: String,
     decided_at: String,
     /// `{miniflux.base_url}/feeds/{id}` for a candidate we subscribed to.
     miniflux_href: Option<String>,
@@ -347,6 +350,21 @@ async fn article_titles(
     Ok(titles)
 }
 
+/// `Sep 7` for the current year, `Sep 7, 2025` otherwise, in the configured
+/// time zone; the raw string when it does not parse.
+fn compact_date(raw: &str, config: &Config) -> String {
+    let (Ok(timestamp), Ok(tz)) = (raw.parse::<Timestamp>(), config.tz()) else {
+        return raw.to_string();
+    };
+    let zoned = timestamp.to_zoned(tz.clone());
+    let format = if zoned.year() == Timestamp::now().to_zoned(tz).year() {
+        "%b %-d"
+    } else {
+        "%b %-d, %Y"
+    };
+    zoned.strftime(format).to_string()
+}
+
 fn evidence_of(
     candidate: &Candidate,
     evidence: &HashMap<ArticleId, ArticleEvidence>,
@@ -411,6 +429,7 @@ fn row(
         article_count: candidate.article_ids.len(),
         first_seen: fmt_stored_time(Some(&candidate.first_seen), config),
         last_seen: fmt_stored_time(Some(&candidate.last_seen), config),
+        seen: compact_date(&candidate.last_seen, config),
         decided_at: fmt_stored_time(candidate.decided_at.as_deref(), config),
         miniflux_href: candidate
             .miniflux_feed_id

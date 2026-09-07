@@ -6,16 +6,16 @@
 <nav class="tabs" aria-label="Candidate status"><a href="/dashboard/feeds"{% if status == "candidate" %} class="active" aria-current="page"{% endif %}>Candidates ({{ candidate_count }})</a> <a href="/dashboard/feeds?status=added"{% if status == "added" %} class="active" aria-current="page"{% endif %}>Added ({{ added_count }})</a> <a href="/dashboard/feeds?status=dismissed"{% if status == "dismissed" %} class="active" aria-current="page"{% endif %}>Dismissed ({{ dismissed_count }})</a></nav>
 {% if let Some(error) = categories_error %}<p class="notice">{{ error }}</p>{% endif %}
 {% include "dashboard/_pager.html" %}
-<div class="scroll-x tall"><table>
-<thead><tr><th class="num">Score</th><th>Feed</th><th>Why</th><th class="num">Articles</th><th>Seen</th><th><span class="sr-only">Actions</span></th></tr></thead>
+<table class="table-fixed">
+<thead><tr><th class="num w-14">Score</th><th>Feed</th><th>Why</th><th class="num w-20">Articles</th><th class="w-20">Seen</th><th class="w-60 lg:w-84"><span class="sr-only">Actions</span></th></tr></thead>
 <tbody>{% for row in rows %}<tr>
 <td class="num tabular-nums">{{ row.score }}</td>
-<td class="cell-wrap"><a href="{{ row.feed_url }}" rel="noopener" target="_blank">{{ row.label }}</a><br><span class="muted text-xs">{{ row.host }}</span></td>
-<td class="cell-wrap">{% for interest in row.interests %}<span class="badge">{{ interest }}</span> {% endfor %}{% for article in row.articles %}<div class="text-xs"><a href="/dashboard/articles/{{ article.id }}">{{ article.title }}</a></div>{% endfor %}</td>
+<td class="cell-wrap"><a class="line-clamp-2" href="{{ row.feed_url }}" rel="noopener" target="_blank" title="{{ row.feed_url }}">{{ row.label }}</a><span class="muted block truncate text-xs" title="{{ row.host }}">{{ row.host }}</span></td>
+<td class="cell-wrap">{% for interest in row.interests %}<span class="badge">{{ interest }}</span> {% endfor %}{% for article in row.articles %}<div class="line-clamp-1 text-xs"><a href="/dashboard/articles/{{ article.id }}" title="{{ article.title }}">{{ article.title }}</a></div>{% endfor %}</td>
 <td class="num">{{ row.article_count }}</td>
-<td class="cell-tight text-muted">{{ row.first_seen }}<br>{{ row.last_seen }}</td>
-<td>{% if status == "candidate" %}<div class="flex flex-wrap gap-2"><form class="form-inline" method="post" action="/dashboard/feeds/{{ row.id }}/add"><select name="category_id" aria-label="Category for {{ row.label }}"{% if categories.is_empty() %} disabled{% endif %}>{% for category in categories %}<option value="{{ category.id }}"{% if category.id == selected_category %} selected{% endif %}>{{ category.title }}</option>{% endfor %}</select><button class="btn-primary" type="submit"{% if categories.is_empty() %} disabled title="Miniflux categories are unavailable"{% endif %}>Add</button></form><form method="post" action="/dashboard/feeds/{{ row.id }}/dismiss"><button class="btn" type="submit">Dismiss</button></form></div>{% else %}<span class="muted text-xs">{{ row.decided_at }}{% if let Some(href) = row.miniflux_href %} · <a href="{{ href }}" rel="noopener" target="_blank">in Miniflux</a>{% endif %}</span>{% endif %}</td>
+<td class="cell-tight text-xs text-muted"><span title="First seen {{ row.first_seen }} · last seen {{ row.last_seen }}">{{ row.seen }}</span></td>
+<td>{% if status == "candidate" %}<div class="flex flex-wrap items-start gap-2"><form class="form-inline flex-nowrap" method="post" action="/dashboard/feeds/{{ row.id }}/add"><select class="min-w-0 max-w-36 truncate" name="category_id" aria-label="Category for {{ row.label }}"{% if categories.is_empty() %} disabled{% endif %}>{% for category in categories %}<option value="{{ category.id }}"{% if category.id == selected_category %} selected{% endif %}>{{ category.title }}</option>{% endfor %}</select><button class="btn-primary" type="submit"{% if categories.is_empty() %} disabled title="Miniflux categories are unavailable"{% endif %}>Add</button></form><form method="post" action="/dashboard/feeds/{{ row.id }}/dismiss"><button class="btn" type="submit">Dismiss</button></form></div>{% else %}<span class="muted text-xs">{{ row.decided_at }}{% if let Some(href) = row.miniflux_href %} · <a href="{{ href }}" rel="noopener" target="_blank">in Miniflux</a>{% endif %}</span>{% endif %}</td>
 </tr>{% endfor %}{% if rows.is_empty() %}<tr><td colspan="6" class="text-muted">No feed candidates with this status. The discovery stage adds them during a run; <code>daily-epub feeds discover</code> backfills from recent articles.</td></tr>{% endif %}</tbody>
-</table></div>
+</table>
 {% include "dashboard/_pager.html" %}
 </section>{% endblock %}
