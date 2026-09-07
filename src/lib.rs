@@ -27,6 +27,7 @@ pub mod images;
 pub mod imports;
 pub mod jobs;
 pub mod lock;
+pub mod mail;
 pub mod miniflux;
 pub mod pipeline;
 pub mod publish;

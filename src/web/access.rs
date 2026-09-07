@@ -71,6 +71,7 @@ pub(super) async fn submit(
         return Ok(Html(view).into_response());
     }
 
+    let requested_at = crate::db::fmt_ts(jiff::Timestamp::now());
     sqlx::query(
         "INSERT INTO account_requests (email, reason, status, requested_at)
          VALUES (?, ?, 'open', ?)
@@ -81,10 +82,39 @@ pub(super) async fn submit(
     )
     .bind(email)
     .bind((!reason.is_empty()).then_some(reason))
-    .bind(crate::db::fmt_ts(jiff::Timestamp::now()))
+    .bind(&requested_at)
     .execute(state.db.pool())
     .await
     .map_err(|error| WebError::Db(error.into()))?;
+
+    let config = state.config();
+    if let (Some(mailer), Some(to)) = (
+        state.mailer.clone(),
+        config
+            .mail
+            .notify_to
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+    ) {
+        let reason = if reason.is_empty() {
+            "(no reason given)"
+        } else {
+            reason
+        };
+        let message = crate::mail::Message {
+            to: to.to_string(),
+            subject: format!("Access request from {email}"),
+            body: format!(
+                "Email: {email}\nReason: {reason}\nRequested at: {requested_at}\nReview: {}/dashboard/users\n",
+                config.server.public_url.trim_end_matches('/')
+            ),
+        };
+        tokio::spawn(async move {
+            if let Err(error) = mailer.send(message).await {
+                tracing::warn!(%error, "could not send access-request notification");
+            }
+        });
+    }
 
     let mut view = template(viewer);
     view.submitted = true;
@@ -117,11 +147,15 @@ mod tests {
     use crate::server::{AppState, router};
 
     async fn app() -> (tempfile::TempDir, Db, axum::Router) {
+        app_with_config(Config::default()).await
+    }
+
+    async fn app_with_config(config: Config) -> (tempfile::TempDir, Db, axum::Router) {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_and_migrate(&dir.path().join("db.sqlite"))
             .await
             .unwrap();
-        let app = router(AppState::new(db.clone(), Config::default(), None));
+        let app = router(AppState::new(db.clone(), config, None));
         (dir, db, app)
     }
 
@@ -156,6 +190,7 @@ mod tests {
                     .uri("/request-access")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header("sec-fetch-site", "same-origin")
+                    .header("x-forwarded-for", "192.0.2.30")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -207,6 +242,70 @@ mod tests {
             Some("I love the paper")
         );
         assert_eq!(row.get::<String, _>("status"), "open");
+    }
+
+    #[tokio::test]
+    async fn stored_request_queues_an_operator_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("db.sqlite"))
+            .await
+            .unwrap();
+        let mut config = Config::default();
+        config.server.public_url = "https://daily.example/".into();
+        config.mail.notify_to = Some("Operator <operator@example.com>".into());
+        let (mailer, messages) = crate::mail::Mailer::recording();
+        let mut state = AppState::new(db, config, None);
+        state.mailer = Some(mailer);
+        let app = router(state);
+
+        let (status, _) = post(&app, "email=reader%40example.com&reason=&website=").await;
+        assert_eq!(status, StatusCode::OK);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if !messages
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("notification task did not run");
+
+        let messages = messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].to, "Operator <operator@example.com>");
+        assert_eq!(
+            messages[0].subject,
+            "Access request from reader@example.com"
+        );
+        assert!(messages[0].body.contains("Email: reader@example.com"));
+        assert!(messages[0].body.contains("Reason: (no reason given)"));
+        assert!(messages[0].body.contains("Requested at: "));
+        assert!(
+            messages[0]
+                .body
+                .contains("Review: https://daily.example/dashboard/users")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_access_post_is_rate_limited_per_ip() {
+        let mut config = Config::default();
+        config.server.login_attempts = 3;
+        let (_dir, _db, app) = app_with_config(config).await;
+
+        for _ in 0..3 {
+            let (status, _) = post(&app, "email=reader%40example.com&reason=&website=").await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, _) = post(&app, "email=reader%40example.com&reason=&website=").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

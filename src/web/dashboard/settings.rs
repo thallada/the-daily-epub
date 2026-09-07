@@ -205,6 +205,14 @@ pub const RESTART_REQUIRED: &[&str] = &[
     "server.session_days",
     "server.login_attempts",
     "server.login_window_minutes",
+    "mail.enabled",
+    "mail.smtp_host",
+    "mail.smtp_port",
+    "mail.smtp_starttls",
+    "mail.smtp_user",
+    "mail.smtp_pass",
+    "mail.from",
+    "mail.notify_to",
 ];
 
 /// Optional keys that `Config::default()` leaves unset (and therefore do not
@@ -219,10 +227,19 @@ const OPTIONAL_KEYS: &[(&str, FieldKind)] = &[
     ("server.basic_auth_pass", FieldKind::Secret),
     ("bookorbit.opds_user", FieldKind::Text),
     ("bookorbit.opds_pass", FieldKind::Secret),
+    ("mail.smtp_user", FieldKind::Text),
+    ("mail.smtp_pass", FieldKind::Secret),
+    ("mail.notify_to", FieldKind::Text),
     ("xtc.settings", FieldKind::Path),
 ];
 
-const SECRET_SUFFIXES: &[&str] = &["api_key", "hmac_secret", "basic_auth_pass", "opds_pass"];
+const SECRET_SUFFIXES: &[&str] = &[
+    "api_key",
+    "hmac_secret",
+    "basic_auth_pass",
+    "opds_pass",
+    "smtp_pass",
+];
 
 const PATH_KEYS: &[&str] = &[
     "database_path",
@@ -259,6 +276,7 @@ const GROUP_ORDER: &[&str] = &[
     "server",
     "miniflux",
     "bookorbit",
+    "mail",
 ];
 
 /// Help text per key, seeded from the README configuration table and the
@@ -375,6 +393,14 @@ pub const SETTINGS_HELP: &[(&str, &str)] = &[
     ("bookorbit.api_url", "Base URL used by the server for BookOrbit OPDS requests; usually the loopback address."),
     ("bookorbit.opds_user", "Dedicated OPDS user created in BookOrbit Settings → OPDS."),
     ("bookorbit.opds_pass", "Password for bookorbit.opds_user. Environment only."),
+    ("mail.enabled", "Enable outbound SMTP when the relay, sender and credentials are configured. Requires a server restart."),
+    ("mail.smtp_host", "SMTP relay hostname, such as an AWS SES SMTP endpoint. Requires a server restart."),
+    ("mail.smtp_port", "SMTP relay port: usually 587 for STARTTLS or 465 for implicit TLS. Requires a server restart."),
+    ("mail.smtp_starttls", "Use STARTTLS when true; false uses implicit TLS. Requires a server restart."),
+    ("mail.smtp_user", "SMTP username. Requires a server restart."),
+    ("mail.smtp_pass", "SMTP password. Environment only; requires a server restart."),
+    ("mail.from", "Sender mailbox as an address or Name <address>. Requires a server restart."),
+    ("mail.notify_to", "Recipient for new access-request notifications. Requires a server restart."),
 ];
 
 /// `DAILY_EPUB_` + the path upper-cased with `.` → `__` (§13.1 item 2).
@@ -1664,6 +1690,9 @@ mod tests {
             "server.basic_auth_user",
             "bookorbit.opds_user",
             "bookorbit.opds_pass",
+            "mail.smtp_user",
+            "mail.smtp_pass",
+            "mail.notify_to",
         ] {
             field(&groups, path);
         }
@@ -1695,6 +1724,7 @@ mod tests {
                 "server",
                 "miniflux",
                 "bookorbit",
+                "mail",
             ]
         );
         let anthropic = groups
@@ -1811,6 +1841,7 @@ mod tests {
         config.server.hmac_secret = Some("hunter2-hmac".into());
         config.server.basic_auth_pass = Some("hunter2-basic".into());
         config.bookorbit.opds_pass = Some("hunter2-bookorbit".into());
+        config.mail.smtp_pass = Some("hunter2-smtp".into());
         if let Some(provider) = config.providers.get_mut("deepseek") {
             provider.api_key = Some("hunter2-deepseek".into());
         }
@@ -1821,6 +1852,7 @@ mod tests {
             "server.hmac_secret",
             "server.basic_auth_pass",
             "bookorbit.opds_pass",
+            "mail.smtp_pass",
             "providers.deepseek.api_key",
             "providers.anthropic.api_key",
         ] {
