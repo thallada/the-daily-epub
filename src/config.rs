@@ -84,6 +84,8 @@ pub struct Config {
     pub server: ServerConfig,
     pub bookorbit: BookorbitConfig,
     pub mail: MailConfig,
+    /// `[discovery]` — propose new feed subscriptions from aggregator hits.
+    pub discovery: DiscoveryConfig,
 }
 
 impl Default for Config {
@@ -110,6 +112,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             bookorbit: BookorbitConfig::default(),
             mail: MailConfig::default(),
+            discovery: DiscoveryConfig::default(),
         }
     }
 }
@@ -819,6 +822,44 @@ impl Default for MailConfig {
             smtp_pass: None,
             from: String::new(),
             notify_to: None,
+        }
+    }
+}
+
+/// `[discovery]` — feed discovery from aggregator-only articles (feed
+/// discovery plan §3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DiscoveryConfig {
+    /// Whether the discovery stage runs during `generate`.
+    pub enabled: bool,
+    /// How many not-yet-checked hosts one run may look up in Miniflux.
+    pub max_lookups_per_run: usize,
+    /// Hosts never looked up (aggregators, code hosts, social networks).
+    pub skip_hosts: Vec<String>,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_lookups_per_run: 30,
+            skip_hosts: [
+                "news.ycombinator.com",
+                "lobste.rs",
+                "reddit.com",
+                "github.com",
+                "gist.github.com",
+                "x.com",
+                "twitter.com",
+                "youtube.com",
+                "en.wikipedia.org",
+                "arxiv.org",
+                "docs.google.com",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
         }
     }
 }
