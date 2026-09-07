@@ -46,7 +46,7 @@ use crate::types::{
     Article, ArticleId, Artifact, BehindThePaper, Candidate, Colophon, Edition, Issue, IssueMeta,
     Lineup, Models, TokenUsage, reading_minutes,
 };
-use crate::{comments, dedupe, epub, http, miniflux, publish, social, world};
+use crate::{comments, dedupe, discovery, epub, http, miniflux, publish, social, world};
 
 /// One `generate` invocation's inputs — the CLI flags, already parsed (§2).
 #[derive(Debug, Clone, Default)]
@@ -448,6 +448,32 @@ async fn run_stages(
     let enricher = social::SocialEnricher::new(http.clone(), db.clone());
     report.counts.social_hits = enricher.enrich_all(&mut articles).await as i64;
     report.timings.record("social", elapsed_ms(stage));
+
+    // --- Stage 5b: feed discovery (feed discovery plan §4) — best effort ---
+    // Runs here because it needs the real article ids stage 4 minted and the
+    // subscription map stage 1 already loaded, and because `articles` is moved
+    // into hygiene next.
+    if config.discovery.enabled {
+        let stage = Timestamp::now();
+        match discovery::run(
+            db,
+            &client,
+            &http,
+            &config.discovery,
+            &articles,
+            &feeds,
+            Timestamp::now(),
+        )
+        .await
+        {
+            Ok(summary) => {
+                tracing::info!(%summary, "feed discovery");
+                report.counts.feed_candidates_new = summary.candidates_new as i64;
+            }
+            Err(error) => report.warn(format!("feed discovery failed: {error:#}")),
+        }
+        report.timings.record("discovery", elapsed_ms(stage));
+    }
 
     // --- Stage 6: hygiene, embeddings, and cheap signals (§8.1, §9) ---
     let stage = Timestamp::now();

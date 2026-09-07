@@ -1,13 +1,16 @@
 //! Miniflux API client (spec §3.1).
 //!
-//! Reads only: entries are fetched with `published_after` inside the lookback
-//! window **regardless of read/unread status**, and read state is never mutated
-//! so normal reader usage is undisturbed.
+//! Almost reads only: entries are fetched with `published_after` inside the
+//! lookback window **regardless of read/unread status**, and read state is never
+//! mutated so normal reader usage is undisturbed. The single writing call is
+//! [`MinifluxClient::create_feed`], which the dashboard's feed-discovery page
+//! uses to subscribe to a candidate the operator picked (feed discovery plan
+//! §4 step 2); the pipeline never calls it.
 
 use std::collections::HashMap;
 
 use jiff::Timestamp;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::config::MinifluxConfig;
 use crate::http::{RetryPolicy, is_retryable};
@@ -24,11 +27,13 @@ pub enum MinifluxError {
     MissingApiKey,
     #[error("miniflux request failed: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("miniflux returned {status} for {path}: {body}")]
+    #[error("miniflux returned {status} for {path}: {message}")]
     Status {
         status: u16,
         path: String,
-        body: String,
+        /// `error_message` when the body was Miniflux's JSON error envelope,
+        /// else the truncated body — what a dashboard flash should show.
+        message: String,
     },
     #[error("could not parse miniflux response for {path}: {source}")]
     Decode {
@@ -39,6 +44,46 @@ pub enum MinifluxError {
 }
 
 type Result<T> = std::result::Result<T, MinifluxError>;
+
+impl MinifluxError {
+    /// Build a [`MinifluxError::Status`], pulling `error_message` out of
+    /// Miniflux's JSON error envelope when the body has one (§4 step 2).
+    fn status(status: u16, path: &str, body: &str) -> Self {
+        #[derive(Deserialize)]
+        struct ErrorBody {
+            error_message: String,
+        }
+        let body: String = body.chars().take(300).collect();
+        let message = serde_json::from_str::<ErrorBody>(&body)
+            .map(|e| e.error_message)
+            .unwrap_or_else(|_| body.clone());
+        MinifluxError::Status {
+            status,
+            path: path.to_string(),
+            message,
+        }
+    }
+
+    /// True for the `400 This feed already exists.` a duplicate `POST /v1/feeds`
+    /// returns — the dashboard flips the row to `added` on it instead of
+    /// treating it as a failure.
+    pub fn is_duplicate_feed(&self) -> bool {
+        matches!(
+            self,
+            MinifluxError::Status { status: 400, message, .. }
+                if message.trim().eq_ignore_ascii_case("This feed already exists.")
+        )
+    }
+}
+
+/// Network failures and 5xx/429 responses are worth another attempt (§3.1).
+fn retryable(error: &MinifluxError) -> bool {
+    match error {
+        MinifluxError::Http(e) => is_retryable(e),
+        MinifluxError::Status { status, .. } => *status >= 500 || *status == 429,
+        _ => false,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Wire types (only the fields §3.1 lists as used)
@@ -104,6 +149,27 @@ pub struct EntriesResponse {
     pub total: i64,
     #[serde(default)]
     pub entries: Vec<MinifluxEntry>,
+}
+
+/// `POST /v1/discover` element — a *lead*, not a verified feed: Miniflux
+/// returns well-known paths that merely answered 200 (plan §2), so every one is
+/// validated before it becomes a candidate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Discovered {
+    #[serde(default)]
+    pub url: String,
+    /// Miniflux substitutes the URL when the `<link>` tag has no title, which is
+    /// how a well-known-path guess is told apart from a real link-tag hit.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+}
+
+/// `POST /v1/feeds` response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatedFeed {
+    pub feed_id: i64,
 }
 
 /// Feed metadata joined onto every entry we persist (§3.1).
@@ -247,39 +313,95 @@ impl MinifluxClient {
         let url = self.url(path);
         let body = self
             .retry
-            .run(
-                &format!("GET {path}"),
-                |e: &MinifluxError| match e {
-                    MinifluxError::Http(e) => is_retryable(e),
-                    MinifluxError::Status { status, .. } => *status >= 500 || *status == 429,
-                    _ => false,
-                },
-                || async {
-                    let resp = self
-                        .http
-                        .get(&url)
-                        .header("X-Auth-Token", &self.api_key)
-                        .header("Accept", "application/json")
-                        .query(query)
-                        .send()
-                        .await?;
-                    let status = resp.status();
-                    let text = resp.text().await?;
-                    if !status.is_success() {
-                        return Err(MinifluxError::Status {
-                            status: status.as_u16(),
-                            path: path.to_string(),
-                            body: text.chars().take(300).collect(),
-                        });
-                    }
-                    Ok(text)
-                },
-            )
+            .run(&format!("GET {path}"), retryable, || async {
+                let resp = self
+                    .http
+                    .get(&url)
+                    .header("X-Auth-Token", &self.api_key)
+                    .header("Accept", "application/json")
+                    .query(query)
+                    .send()
+                    .await?;
+                let status = resp.status();
+                let text = resp.text().await?;
+                if !status.is_success() {
+                    return Err(MinifluxError::status(status.as_u16(), path, &text));
+                }
+                Ok(text)
+            })
             .await?;
         serde_json::from_str(&body).map_err(|source| MinifluxError::Decode {
             path: path.to_string(),
             source,
         })
+    }
+
+    /// One `POST path` with a JSON body, no retry.
+    async fn post_once<B: Serialize>(&self, path: &str, body: &B) -> Result<String> {
+        let resp = self
+            .http
+            .post(self.url(path))
+            .header("X-Auth-Token", &self.api_key)
+            .header("Accept", "application/json")
+            .json(body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(MinifluxError::status(status.as_u16(), path, &text));
+        }
+        Ok(text)
+    }
+
+    /// POST `path` with the auth header, mirroring [`Self::get_json`].
+    ///
+    /// `retry` is false for calls that are not safe to repeat: a retried
+    /// `POST /v1/feeds` whose response was merely lost would subscribe twice.
+    async fn post_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        retry: bool,
+    ) -> Result<T> {
+        let text = if retry {
+            self.retry
+                .run(&format!("POST {path}"), retryable, || {
+                    self.post_once(path, body)
+                })
+                .await?
+        } else {
+            self.post_once(path, body).await?
+        };
+        serde_json::from_str(&text).map_err(|source| MinifluxError::Decode {
+            path: path.to_string(),
+            source,
+        })
+    }
+
+    /// `POST /v1/discover` — the feed(s) Miniflux can find behind a page URL
+    /// (feed discovery plan §4 step 2). Retried: it changes nothing.
+    pub async fn discover(&self, url: &str) -> Result<Vec<Discovered>> {
+        self.post_json("/discover", &serde_json::json!({ "url": url }), true)
+            .await
+    }
+
+    /// `GET /v1/categories` — the Add form's category picker.
+    pub async fn categories(&self) -> Result<Vec<MinifluxCategory>> {
+        self.get_json("/categories", &[]).await
+    }
+
+    /// `POST /v1/feeds` — subscribe to `feed_url` in `category_id`, returning
+    /// the new feed id. Never retried (a repeat can double-subscribe).
+    pub async fn create_feed(&self, feed_url: &str, category_id: i64) -> Result<i64> {
+        let created: CreatedFeed = self
+            .post_json(
+                "/feeds",
+                &serde_json::json!({ "feed_url": feed_url, "category_id": category_id }),
+                false,
+            )
+            .await?;
+        Ok(created.feed_id)
     }
 
     /// `GET /v1/feeds` — once per run (§3.1).
@@ -481,6 +603,93 @@ mod tests {
         assert_eq!(entries[1].comments_url, None);
         assert_eq!(entries[1].feed_title.as_deref(), Some("Scour: Rust"));
         assert_eq!(entries[1].category, None);
+    }
+
+    /// Observed live for an article URL whose page carries `<link rel=alternate>`
+    /// tags: the same feed offered twice under one title (plan §2).
+    const DISCOVER_LINK_TAGS_JSON: &str = r#"[
+      {"title":"blog.philz.dev","url":"https://blog.philz.dev/feed/feed.xml","type":"atom"},
+      {"title":"blog.philz.dev","url":"https://blog.philz.dev/feed/feed.json","type":"json"}
+    ]"#;
+
+    /// Observed live for a site that answers 200 for any path: nine unverified
+    /// well-known-path guesses, each with `title == url` (plan §2).
+    const DISCOVER_GUESSES_JSON: &str = r#"[
+      {"title":"https://zombo.com/atom.xml","url":"https://zombo.com/atom.xml","type":"atom"},
+      {"title":"https://zombo.com/feed.atom","url":"https://zombo.com/feed.atom","type":"atom"},
+      {"title":"https://zombo.com/feed.xml","url":"https://zombo.com/feed.xml","type":"atom"},
+      {"title":"https://zombo.com/feed/","url":"https://zombo.com/feed/","type":"atom"},
+      {"title":"https://zombo.com/index.rss","url":"https://zombo.com/index.rss","type":"rss"},
+      {"title":"https://zombo.com/index.xml","url":"https://zombo.com/index.xml","type":"rss"},
+      {"title":"https://zombo.com/rss.xml","url":"https://zombo.com/rss.xml","type":"rss"},
+      {"title":"https://zombo.com/rss/","url":"https://zombo.com/rss/","type":"rss"},
+      {"title":"https://zombo.com/rss/feed.xml","url":"https://zombo.com/rss/feed.xml","type":"rss"}
+    ]"#;
+
+    const CATEGORIES_JSON: &str = r#"[
+      {"id": 1, "user_id": 1, "title": "Tech", "hide_globally": false},
+      {"id": 4, "user_id": 1, "title": "Long reads", "hide_globally": true}
+    ]"#;
+
+    #[test]
+    fn deserializes_discover_results() {
+        let hits: Vec<Discovered> = serde_json::from_str(DISCOVER_LINK_TAGS_JSON).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].title, "blog.philz.dev");
+        assert_eq!(hits[0].url, "https://blog.philz.dev/feed/feed.xml");
+        assert_eq!(hits[0].kind, "atom");
+        assert_eq!(hits[1].kind, "json");
+
+        let guesses: Vec<Discovered> = serde_json::from_str(DISCOVER_GUESSES_JSON).unwrap();
+        assert_eq!(guesses.len(), 9);
+        assert!(guesses.iter().all(|g| g.title == g.url));
+    }
+
+    #[test]
+    fn deserializes_categories_and_created_feed() {
+        let categories: Vec<MinifluxCategory> = serde_json::from_str(CATEGORIES_JSON).unwrap();
+        assert_eq!(categories.len(), 2);
+        assert_eq!(categories[1].id, 4);
+        assert_eq!(categories[1].title, "Long reads");
+
+        let created: CreatedFeed = serde_json::from_str(r#"{"feed_id": 123}"#).unwrap();
+        assert_eq!(created.feed_id, 123);
+    }
+
+    #[test]
+    fn status_errors_carry_the_error_message() {
+        let duplicate = MinifluxError::status(
+            400,
+            "/feeds",
+            r#"{"error_message":"This feed already exists."}"#,
+        );
+        assert!(duplicate.is_duplicate_feed());
+        assert_eq!(
+            duplicate.to_string(),
+            "miniflux returned 400 for /feeds: This feed already exists."
+        );
+
+        let fetcher = MinifluxError::status(
+            502,
+            "/discover",
+            r#"{"error_message":"fetcher: bad gateway (502 status code)"}"#,
+        );
+        assert!(!fetcher.is_duplicate_feed());
+        assert!(retryable(&fetcher));
+        match fetcher {
+            MinifluxError::Status { message, .. } => {
+                assert_eq!(message, "fetcher: bad gateway (502 status code)");
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+
+        // A non-JSON body falls back to the truncated body itself.
+        let html = MinifluxError::status(404, "/discover", "<html>nope</html>");
+        assert!(!retryable(&html));
+        assert_eq!(
+            html.to_string(),
+            "miniflux returned 404 for /discover: <html>nope</html>"
+        );
     }
 
     #[test]

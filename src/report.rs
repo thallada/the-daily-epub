@@ -67,6 +67,10 @@ pub struct StageCounts {
     pub excerpt_only: i64,
     /// Social lookups that returned a hit (§3.4).
     pub social_hits: i64,
+    /// Feed candidates recorded for the first time by the discovery stage
+    /// (feed discovery plan §4 step 3).
+    #[serde(default)]
+    pub feed_candidates_new: i64,
     /// Articles passing hygiene and eligible for personalized signals.
     pub eligible: i64,
     /// Eligible articles with a valid embedding.

@@ -19,6 +19,7 @@ pub mod config;
 pub mod curate;
 pub mod db;
 pub mod dedupe;
+pub mod discovery;
 pub mod epub;
 pub mod extract;
 pub mod html;
