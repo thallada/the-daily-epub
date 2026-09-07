@@ -264,6 +264,27 @@ pub async fn require_same_origin(
     next.run(request).await
 }
 
+/// Redirect signed-in users with a temporary password to the password-change form.
+pub async fn require_password_change(auth: AuthSession, request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let allowed = matches!(
+        (request.method(), path),
+        (&axum::http::Method::GET, "/account")
+            | (&axum::http::Method::POST, "/account/password")
+            | (&axum::http::Method::POST, "/logout")
+            | (&axum::http::Method::POST, "/account/logout-all")
+    );
+    if !allowed
+        && auth
+            .user()
+            .await
+            .is_some_and(|user| user.must_change_password)
+    {
+        return axum::response::Redirect::to("/account?change=1").into_response();
+    }
+    next.run(request).await
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct LoginQuery {
     #[serde(default)]
@@ -283,6 +304,14 @@ struct LoginTemplate {
 struct AccountTemplate {
     page: Page,
     error: String,
+    change_required: bool,
+}
+
+/// Query parameters accepted by the account page.
+#[derive(Debug, Default, Deserialize)]
+pub struct AccountQuery {
+    #[serde(default)]
+    change: Option<String>,
 }
 
 /// The `<meta name="description">` for both renders of the sign-in page.
@@ -313,6 +342,11 @@ pub async fn login(
         .map_err(|error| WebError::Internal(error.into()))?
     {
         Some(user) => {
+            let destination = if user.must_change_password {
+                "/account?change=1"
+            } else {
+                &destination
+            };
             auth.login(&user)
                 .await
                 .map_err(|error| WebError::Internal(error.into()))?;
@@ -322,7 +356,7 @@ pub async fn login(
                 .execute(state.db.pool())
                 .await
                 .map_err(crate::db::DbError::from)?;
-            Ok(axum::response::Redirect::to(&destination).into_response())
+            Ok(axum::response::Redirect::to(destination).into_response())
         }
         None => Ok((
             StatusCode::UNAUTHORIZED,
@@ -343,13 +377,18 @@ pub async fn logout(auth: AuthSession) -> Result<Response, WebError> {
     Ok(axum::response::Redirect::to("/").into_response())
 }
 
-pub async fn account(auth: AuthSession) -> Result<Response, WebError> {
+pub async fn account(
+    auth: AuthSession,
+    Query(query): Query<AccountQuery>,
+) -> Result<Response, WebError> {
     let user = auth.user().await.ok_or_else(|| WebError::Unauthenticated {
         next: "/account".into(),
     })?;
+    let change_required = query.change.as_deref() == Some("1") || user.must_change_password;
     Ok(Html(AccountTemplate {
         page: Page::new("Account", Some(user.into()), "account"),
         error: String::new(),
+        change_required,
     })
     .into_response())
 }
@@ -387,6 +426,7 @@ pub async fn change_password(
         return Ok((
             StatusCode::BAD_REQUEST,
             Html(AccountTemplate {
+                change_required: user.must_change_password,
                 page: Page::new("Account", Some(user.into()), "account"),
                 error,
             }),
@@ -397,7 +437,7 @@ pub async fn change_password(
     let password_hash = tokio::task::spawn_blocking(move || users::hash_password(&password))
         .await
         .map_err(|error| WebError::Internal(error.into()))?;
-    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+    sqlx::query("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?")
         .bind(&password_hash)
         .bind(user.id)
         .execute(state.db.pool())
@@ -409,6 +449,7 @@ pub async fn change_password(
         .map_err(crate::db::DbError::from)?;
     let mut updated = user;
     updated.password_hash = password_hash;
+    updated.must_change_password = false;
     auth.login(&updated)
         .await
         .map_err(|error| WebError::Internal(error.into()))?;
@@ -457,9 +498,12 @@ fn request_origin(headers: &axum::http::HeaderMap) -> Option<String> {
 mod tests {
     use std::collections::HashMap;
 
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request, StatusCode, header};
     use axum_login::tower_sessions::SessionStore;
     use serde_json::json;
     use time::Duration;
+    use tower::ServiceExt as _;
 
     use super::*;
 
@@ -545,5 +589,126 @@ mod tests {
         assert_eq!(valid_next(Some("/dashboard")), "/dashboard");
         assert_eq!(valid_next(Some("//evil.example/")), "/");
         assert_eq!(valid_next(Some("https://evil.example/")), "/");
+    }
+
+    #[tokio::test]
+    async fn temporary_password_forces_change_before_full_issue_access() {
+        let seed = crate::web::dashboard::tests::seed().await;
+        let (user, temporary_password) =
+            users::add_with_temporary_password(&seed.db, "temporary_reader")
+                .await
+                .unwrap();
+        let article_uri = format!("/issues/{}/articles/1", seed.date);
+        let app = crate::server::router(AppState::new(
+            seed.db.clone(),
+            crate::config::Config::default(),
+            None,
+        ));
+
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header("sec-fetch-site", "same-origin")
+                    .header("x-forwarded-for", "192.0.2.90")
+                    .body(Body::from(format!(
+                        "username=temporary_reader&password={temporary_password}&next={article_uri}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            login.headers().get(header::LOCATION).unwrap(),
+            "/account?change=1"
+        );
+        let cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+
+        let blocked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&article_uri)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            blocked.headers().get(header::LOCATION).unwrap(),
+            "/account?change=1"
+        );
+
+        let account = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/account?change=1")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let account_body = String::from_utf8(
+            to_bytes(account.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(account_body.contains("Choose a new password to continue."));
+
+        let changed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/account/password")
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header("sec-fetch-site", "same-origin")
+                    .body(Body::from(format!(
+                        "current_password={temporary_password}&new_password=a+final+reader+password&confirm_password=a+final+reader+password"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed.status(), StatusCode::SEE_OTHER);
+        assert!(
+            !users::find_by_id(&seed.db, user.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .must_change_password
+        );
+
+        let article = app
+            .oneshot(
+                Request::builder()
+                    .uri(article_uri)
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(article.status(), StatusCode::OK);
     }
 }

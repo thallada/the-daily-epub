@@ -2,12 +2,16 @@ use std::fmt;
 use std::str::FromStr;
 
 use jiff::Timestamp;
+use rand::RngExt as _;
 use sqlx::Row;
 
 use crate::db::{Db, DbError, fmt_ts, parse_ts};
 
 pub const MIN_PASSWORD_LEN: usize = 12;
 pub const MAX_PASSWORD_LEN: usize = 1024;
+const TEMPORARY_PASSWORD_LEN: usize = 20;
+const TEMPORARY_PASSWORD_ALPHABET: &[u8] =
+    b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
@@ -49,6 +53,8 @@ pub struct User {
     pub password_hash: String,
     pub role: Role,
     pub disabled: bool,
+    /// Whether protected routes must redirect this user to change their password.
+    pub must_change_password: bool,
     pub created_at: Timestamp,
     pub last_login_at: Option<Timestamp>,
 }
@@ -61,6 +67,7 @@ impl fmt::Debug for User {
             .field("password_hash", &"[REDACTED]")
             .field("role", &self.role)
             .field("disabled", &self.disabled)
+            .field("must_change_password", &self.must_change_password)
             .field("created_at", &self.created_at)
             .field("last_login_at", &self.last_login_at)
             .finish()
@@ -105,7 +112,8 @@ pub fn verify_password(hash: &str, plain: &str) -> bool {
 
 pub async fn find_by_username(db: &Db, username: &str) -> Result<Option<User>, DbError> {
     let row = sqlx::query(
-        "SELECT id, username, password_hash, role, disabled, created_at, last_login_at
+        "SELECT id, username, password_hash, role, disabled, must_change_password,
+                created_at, last_login_at
          FROM users WHERE username = ? COLLATE NOCASE",
     )
     .bind(username)
@@ -116,7 +124,8 @@ pub async fn find_by_username(db: &Db, username: &str) -> Result<Option<User>, D
 
 pub async fn find_by_id(db: &Db, id: i64) -> Result<Option<User>, DbError> {
     let row = sqlx::query(
-        "SELECT id, username, password_hash, role, disabled, created_at, last_login_at
+        "SELECT id, username, password_hash, role, disabled, must_change_password,
+                created_at, last_login_at
          FROM users WHERE id = ?",
     )
     .bind(id)
@@ -126,6 +135,26 @@ pub async fn find_by_id(db: &Db, id: i64) -> Result<Option<User>, DbError> {
 }
 
 pub async fn add(db: &Db, username: &str, password: &str, admin: bool) -> anyhow::Result<User> {
+    add_user(db, username, password, admin, false).await
+}
+
+/// Create a reader account with a random password that must be changed at first sign-in.
+pub async fn add_with_temporary_password(
+    db: &Db,
+    username: &str,
+) -> anyhow::Result<(User, String)> {
+    let password = temporary_password();
+    let user = add_user(db, username, &password, false, true).await?;
+    Ok((user, password))
+}
+
+async fn add_user(
+    db: &Db,
+    username: &str,
+    password: &str,
+    admin: bool,
+    must_change_password: bool,
+) -> anyhow::Result<User> {
     validate_username(username)?;
     validate_password(password)?;
     if find_by_username(db, username).await?.is_some() {
@@ -135,12 +164,14 @@ pub async fn add(db: &Db, username: &str, password: &str, admin: bool) -> anyhow
     let created_at = Timestamp::now();
     let role = if admin { Role::Admin } else { Role::User };
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO users (username, password_hash, role, created_at)
-         VALUES (?, ?, ?, ?) RETURNING id",
+        "INSERT INTO users
+             (username, password_hash, role, must_change_password, created_at)
+         VALUES (?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(username)
     .bind(&hash)
     .bind(role.as_str())
+    .bind(must_change_password)
     .bind(fmt_ts(created_at))
     .fetch_one(db.pool())
     .await?;
@@ -150,6 +181,7 @@ pub async fn add(db: &Db, username: &str, password: &str, admin: bool) -> anyhow
         password_hash: hash,
         role,
         disabled: false,
+        must_change_password,
         created_at,
         last_login_at: None,
     })
@@ -158,12 +190,14 @@ pub async fn add(db: &Db, username: &str, password: &str, admin: bool) -> anyhow
 pub async fn passwd(db: &Db, username: &str, password: &str) -> anyhow::Result<u64> {
     validate_password(password)?;
     let hash = hash_password(password);
-    let result =
-        sqlx::query("UPDATE users SET password_hash = ? WHERE username = ? COLLATE NOCASE")
-            .bind(hash)
-            .bind(username)
-            .execute(db.pool())
-            .await?;
+    let result = sqlx::query(
+        "UPDATE users SET password_hash = ?, must_change_password = 0
+             WHERE username = ? COLLATE NOCASE",
+    )
+    .bind(hash)
+    .bind(username)
+    .execute(db.pool())
+    .await?;
     require_one(username, result.rows_affected())?;
     logout(db, username).await
 }
@@ -204,8 +238,9 @@ pub async fn logout(db: &Db, username: &str) -> anyhow::Result<u64> {
 
 pub async fn list(db: &Db) -> anyhow::Result<Vec<UserListRow>> {
     let rows = sqlx::query(
-        "SELECT u.id, u.username, u.password_hash, u.role, u.disabled, u.created_at,
-                u.last_login_at, COUNT(s.id) AS open_sessions
+        "SELECT u.id, u.username, u.password_hash, u.role, u.disabled,
+                u.must_change_password, u.created_at, u.last_login_at,
+                COUNT(s.id) AS open_sessions
          FROM users u LEFT JOIN sessions s ON s.user_id = u.id AND s.expiry > unixepoch()
          GROUP BY u.id ORDER BY u.username COLLATE NOCASE",
     )
@@ -217,6 +252,16 @@ pub async fn list(db: &Db) -> anyhow::Result<Vec<UserListRow>> {
                 user: user_from_row(row)?,
                 open_sessions: row.get("open_sessions"),
             })
+        })
+        .collect()
+}
+
+fn temporary_password() -> String {
+    let mut rng = rand::rng();
+    (0..TEMPORARY_PASSWORD_LEN)
+        .map(|_| {
+            let index = rng.random_range(..TEMPORARY_PASSWORD_ALPHABET.len());
+            char::from(TEMPORARY_PASSWORD_ALPHABET[index])
         })
         .collect()
 }
@@ -240,6 +285,7 @@ fn user_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<User, DbError> {
         password_hash: row.get("password_hash"),
         role,
         disabled: row.get("disabled"),
+        must_change_password: row.get("must_change_password"),
         created_at: parse_ts("users.created_at", &row.get::<String, _>("created_at"))?,
         last_login_at: row
             .get::<Option<String>, _>("last_login_at")
@@ -267,11 +313,42 @@ mod tests {
                     password_hash: hash.clone(),
                     role: Role::User,
                     disabled: false,
+                    must_change_password: false,
                     created_at: Timestamp::now(),
                     last_login_at: None,
                 }
             )
             .contains(&hash)
+        );
+    }
+
+    #[tokio::test]
+    async fn temporary_password_is_valid_and_passwd_clears_the_change_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("db.sqlite"))
+            .await
+            .unwrap();
+        let (user, password) = add_with_temporary_password(&db, "reader").await.unwrap();
+
+        assert_eq!(password.len(), TEMPORARY_PASSWORD_LEN);
+        assert!(
+            password
+                .bytes()
+                .all(|byte| TEMPORARY_PASSWORD_ALPHABET.contains(&byte))
+        );
+        validate_password(&password).unwrap();
+        assert!(verify_password(&user.password_hash, &password));
+        assert!(user.must_change_password);
+
+        passwd(&db, "reader", "a final operator password")
+            .await
+            .unwrap();
+        assert!(
+            !find_by_username(&db, "reader")
+                .await
+                .unwrap()
+                .unwrap()
+                .must_change_password
         );
     }
 
@@ -286,6 +363,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(user.role, Role::Admin);
+        assert!(!user.must_change_password);
         assert!(
             add(&db, "reader", "another valid password", false)
                 .await

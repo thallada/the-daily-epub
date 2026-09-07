@@ -3,7 +3,7 @@
 <h1>Users</h1>
 <p class="page-desc">{{ requests.len() }} open access request{% if requests.len() != 1 %}s{% endif %}; every account on this server, with its role and open sessions.</p>
 </div></header>
-<p class="muted text-sm">Create accounts with <code>daily-epub users add &lt;username&gt;</code> on the server, then mark the request done. Change, disable, enable, or sign out users with the <code>daily-epub users</code> CLI.</p>
+<p class="muted text-sm">Approve creates a user account with a temporary password and emails it; the user must choose a new password on first sign-in. Or create accounts with <code>daily-epub users add</code> and mark the request done. Change, disable, enable, or sign out users with the <code>daily-epub users</code> CLI.</p>
 <section class="card"><h2>Access requests</h2>
 {% if requests.is_empty() %}<p class="muted">No open requests.</p>{% else %}<div class="scroll-x"><table>
 <thead><tr><th>Email</th><th>Reason or comment</th><th>Requested</th><th><span class="sr-only">Action</span></th></tr></thead>
@@ -11,7 +11,7 @@
 <td class="font-medium text-ink"><a href="mailto:{{ request.email }}">{{ request.email }}</a></td>
 <td class="cell-wrap">{% if request.reason.is_empty() %}<span class="text-muted">—</span>{% else %}{{ request.reason }}{% endif %}</td>
 <td class="cell-tight text-muted">{{ request.requested }}</td>
-<td><form method="post" action="/dashboard/users/requests/{{ request.id }}/done"><button class="btn" type="submit">Mark done</button></form></td>
+<td><div class="flex flex-wrap gap-2"><form class="form-inline" method="post" action="/dashboard/users/requests/{{ request.id }}/approve"><input type="text" name="username" value="{{ request.suggested_username }}" required pattern="[a-z0-9_-]+" aria-label="Username for {{ request.email }}"><button class="btn-primary" type="submit"{% if !mail_configured %} disabled title="Email is not configured"{% endif %}>Approve</button></form><form method="post" action="/dashboard/users/requests/{{ request.id }}/done"><button class="btn" type="submit">Mark done</button></form></div></td>
 </tr>{% endfor %}</tbody></table></div>{% endif %}
 </section>
 {% if users.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table data-filter>

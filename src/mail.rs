@@ -26,6 +26,8 @@ enum Transport {
     Smtp(AsyncSmtpTransport<Tokio1Executor>),
     #[cfg(test)]
     Recording(Arc<std::sync::Mutex<Vec<Message>>>),
+    #[cfg(test)]
+    Failing,
 }
 
 /// A reusable SMTP sender built from the startup configuration.
@@ -78,6 +80,10 @@ impl Mailer {
                 .push(message);
             return Ok(());
         }
+        #[cfg(test)]
+        if let Transport::Failing = &self.transport {
+            anyhow::bail!("test mail delivery failed");
+        }
 
         let to = parse_mailbox(&message.to, "message recipient")?;
         let email = lettre::Message::builder()
@@ -96,6 +102,8 @@ impl Mailer {
             }
             #[cfg(test)]
             Transport::Recording(_) => unreachable!("recording transport returned above"),
+            #[cfg(test)]
+            Transport::Failing => unreachable!("failing transport returned above"),
         }
         Ok(())
     }
@@ -110,6 +118,14 @@ impl Mailer {
             },
             messages,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failing() -> Self {
+        Self {
+            from: "daily@example.com".parse().expect("valid test mailbox"),
+            transport: Transport::Failing,
+        }
     }
 }
 
