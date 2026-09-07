@@ -162,6 +162,7 @@
   .scroll-x > table { min-width:max-content; }
   .scroll-x.tall { @apply max-h-[70vh] overflow-y-auto; overscroll-behavior-block:contain; }
 
+  .reader-page { @apply min-w-0; overflow-wrap:anywhere; }
   .prose-body { @apply text-[1.0625rem] leading-[1.72] text-ink; }
   .prose-body > * + * { @apply mt-5; }
   .prose-body p, .index-summary { text-wrap:pretty; }
@@ -171,6 +172,7 @@
   .prose-body img { @apply mx-auto my-7 block h-auto max-w-full rounded-sm text-center font-sans text-xs italic text-muted; outline:1px solid oklch(0 0 0 / 0.1); outline-offset:-1px; }
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .prose-body img { outline-color:oklch(1 0 0 / 0.1); } }
   :root[data-theme="dark"] .prose-body img { outline-color:oklch(1 0 0 / 0.1); }
+  .prose-body table { @apply block max-w-full overflow-x-auto; overscroll-behavior-inline:contain; }
   .prose-body pre { @apply max-w-full overflow-x-auto rounded-sm bg-paper-2 p-4 text-sm leading-relaxed; }
   .prose-body :not(pre) > code { @apply rounded-sm bg-paper-2 px-1 py-0.5 text-[0.9em]; }
   .prose-body blockquote { @apply my-7 border-l-2 border-rule-strong pl-5 text-ink-2; }
