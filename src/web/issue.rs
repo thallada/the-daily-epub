@@ -643,7 +643,8 @@ fn download(
     let name = path.file_name()?.to_str()?;
     Some(Download {
         label: label.to_string(),
-        href: format!("/files/{kind}/{}", crate::web::encode_component(name)),
+        // A path segment, not a query string: spaces must be %20, never `+`.
+        href: format!("/files/{kind}/{}", crate::publish::percent_encode(name)),
         size_bytes: metadata.len(),
         size: format_file_size(metadata.len()),
     })
@@ -1224,13 +1225,16 @@ pub async fn read(
     Path(date): Path<Date>,
     Query(query): Query<ReadQuery>,
 ) -> Result<Response, WebError> {
-    let _viewer = auth
+    let viewer = auth
         .user()
         .await
         .map(Viewer::from)
         .ok_or_else(|| WebError::Unauthenticated {
             next: format!("/issues/{date}/read"),
         })?;
+    if viewer.role != crate::web::users::Role::Admin {
+        return Err(WebError::Forbidden);
+    }
     let config = state.config();
     if !config.bookorbit.is_active() {
         return Err(WebError::NotFound);
@@ -2253,13 +2257,21 @@ mod tests {
             ["X4 EPUB", "XTC"]
         );
 
+        let primary_href = downloads.primary.href.clone();
+        assert!(
+            primary_href.starts_with("/files/epub/The%20Daily%20EPUB%20-%20"),
+            "{primary_href}"
+        );
+        assert!(!primary_href.contains('+'), "{primary_href}");
+
         let app = crate::server::router(crate::server::AppState::new(db, config, None));
         let cookie = login_cookie(&app, "reader", "correct horse battery").await;
         let issue = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/issues/{}", source.meta.date))
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2268,6 +2280,18 @@ mod tests {
         let issue = response_text(issue).await;
         assert!(issue.contains(">Download EPUB</a>"));
         assert!(issue.contains("Choose download format"));
+        // The link the page renders must resolve to the file it names.
+        let file = app
+            .oneshot(
+                Request::builder()
+                    .uri(primary_href)
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(file.status(), StatusCode::OK);
         assert!(issue.contains("Standard EPUB"));
         assert!(issue.contains("X4 EPUB"));
         assert!(issue.contains("XTC"));
@@ -2279,7 +2303,7 @@ mod tests {
     #[tokio::test]
     async fn bookorbit_read_is_hidden_and_not_found_when_inactive() {
         let (_dir, db, source) = seeded_issue(false).await;
-        crate::web::users::add(&db, "reader", "correct horse battery", false)
+        crate::web::users::add(&db, "admin", "correct horse battery", true)
             .await
             .unwrap();
         let app = crate::server::router(crate::server::AppState::new(
@@ -2287,7 +2311,7 @@ mod tests {
             crate::config::Config::default(),
             None,
         ));
-        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+        let cookie = login_cookie(&app, "admin", "correct horse battery").await;
 
         let issue = app
             .clone()
@@ -2320,7 +2344,7 @@ mod tests {
     #[tokio::test]
     async fn bookorbit_read_button_and_cached_redirect_use_the_public_url() {
         let (dir, db, source) = seeded_issue(true).await;
-        crate::web::users::add(&db, "reader", "correct horse battery", false)
+        crate::web::users::add(&db, "admin", "correct horse battery", true)
             .await
             .unwrap();
         let epub_dir = dir.path().join("epubs");
@@ -2349,7 +2373,7 @@ mod tests {
             config.clone(),
             None,
         ));
-        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+        let cookie = login_cookie(&app, "admin", "correct horse battery").await;
 
         let issue = app
             .clone()
@@ -2384,7 +2408,7 @@ mod tests {
 
         config.bookorbit.public_url = "https://example.test/".into();
         let app = crate::server::router(crate::server::AppState::new(db, config, None));
-        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+        let cookie = login_cookie(&app, "admin", "correct horse battery").await;
         let read = app
             .oneshot(
                 Request::builder()
@@ -2400,6 +2424,62 @@ mod tests {
             read.headers().get(header::LOCATION).unwrap(),
             "https://example.test/read/12/34"
         );
+    }
+
+    #[tokio::test]
+    async fn bookorbit_read_is_admin_only() {
+        let (dir, db, source) = seeded_issue(true).await;
+        crate::web::users::add(&db, "reader", "correct horse battery", false)
+            .await
+            .unwrap();
+        let epub_dir = dir.path().join("epubs");
+        std::fs::create_dir(&epub_dir).unwrap();
+        std::fs::write(
+            epub_dir.join(crate::publish::issue_filename(
+                source.meta.date,
+                Edition::Standard,
+                "epub",
+            )),
+            b"standard epub",
+        )
+        .unwrap();
+        db.set_bookorbit_ids(source.meta.date, Some((12, 34)))
+            .await
+            .unwrap();
+        let mut config = crate::config::Config::default();
+        config.publish.epub_dir = epub_dir;
+        config.bookorbit.enabled = true;
+        config.bookorbit.opds_user = Some("reader".into());
+        config.bookorbit.opds_pass = Some("secret".into());
+        let app = crate::server::router(crate::server::AppState::new(db, config, None));
+        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+
+        let issue = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}", source.meta.date))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let issue = response_text(issue).await;
+        assert!(!issue.contains("Read in BookOrbit"));
+        assert!(issue.contains(">Download EPUB</a>"));
+
+        let read = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}/read", source.meta.date))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -2434,7 +2514,7 @@ mod tests {
     #[tokio::test]
     async fn bookorbit_read_reports_upstream_connection_errors() {
         let (_dir, db, source) = seeded_issue(true).await;
-        crate::web::users::add(&db, "reader", "correct horse battery", false)
+        crate::web::users::add(&db, "admin", "correct horse battery", true)
             .await
             .unwrap();
         let mut config = crate::config::Config::default();
@@ -2443,7 +2523,7 @@ mod tests {
         config.bookorbit.opds_pass = Some("secret".into());
         config.bookorbit.api_url = "http://127.0.0.1:9".into();
         let app = crate::server::router(crate::server::AppState::new(db, config, None));
-        let cookie = login_cookie(&app, "reader", "correct horse battery").await;
+        let cookie = login_cookie(&app, "admin", "correct horse battery").await;
 
         let read = app
             .oneshot(

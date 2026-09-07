@@ -460,7 +460,7 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Percent-encode one URL path segment (filenames contain spaces and parens).
-fn percent_encode(s: &str) -> String {
+pub fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for byte in s.as_bytes() {
         match byte {

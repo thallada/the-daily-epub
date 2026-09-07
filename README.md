@@ -394,7 +394,7 @@ prints what resolved.
 | `editorial.summary_input_tokens` | `3000` | Article text offered to the summary prompt. |
 | `publish.epub_dir` | `/srv/bookorbit/libraries/daily-epub` | Both EPUB editions land here by atomic copy, and this is the directory the OPDS feed lists. The editions are distinguished by a `(X4)` tag in **both** the filename and `dc:title` — libraries and OPDS clients list books by title, so the filename alone would make them look identical. Point a BookOrbit watched folder at it if you want its UI too. **Renamed from `bookorbit_dir`**; the old key is a hard config error. |
 | `publish.xtc_dir` | `/var/lib/daily-epub/xtc` | XTC artifacts. **Not** listed in the OPDS feed — CrossPoint cannot acquire them — but downloadable at `/files/xtc/<name>` for sideloading. |
-| `bookorbit.enabled` | `false` | Enable the signed-in **Read in BookOrbit** integration when both OPDS credentials are set. |
+| `bookorbit.enabled` | `false` | Enable the admin-only **Read in BookOrbit** integration when both OPDS credentials are set. |
 | `bookorbit.public_url` | `https://bookorbit.hallada.net` | Browser-facing BookOrbit base URL. |
 | `bookorbit.api_url` | `http://127.0.0.1:3498` | Server-facing BookOrbit base URL used for OPDS lookups. |
 | `bookorbit.opds_user` | unset | Dedicated OPDS user created in BookOrbit's Settings → OPDS. |
@@ -753,7 +753,7 @@ This is deliberately independent of BookOrbit: it needs only the directory, so
 BookOrbit is optional, and it puts the day's issue one screen from the X4's home
 instead of several clicks down a library tree.
 
-For desktop reading, the signed-in issue page can show a **Read in BookOrbit**
+For desktop reading, the issue page can show admins a **Read in BookOrbit**
 button that opens the Standard edition in BookOrbit's web reader. Create an OPDS
 user in BookOrbit under Settings → OPDS, put its name in `config.toml`, put
 `DAILY_EPUB_BOOKORBIT__OPDS_PASS` in `/etc/daily-epub/env`, set
