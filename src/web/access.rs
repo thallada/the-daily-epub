@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::server::AppState;
 use crate::web::session::{AuthSession, Viewer};
+use crate::web::users;
 use crate::web::{Html, Page, WebError};
 
 const DESCRIPTION: &str =
@@ -17,6 +18,8 @@ const DESCRIPTION: &str =
 #[derive(Debug, Deserialize)]
 pub(super) struct AccessRequestForm {
     email: String,
+    #[serde(default)]
+    username: String,
     #[serde(default)]
     reason: String,
     #[serde(default)]
@@ -28,6 +31,7 @@ pub(super) struct AccessRequestForm {
 struct RequestAccessTemplate {
     page: Page,
     email: String,
+    username: String,
     reason: String,
     error: String,
     submitted: bool,
@@ -37,6 +41,7 @@ fn template(viewer: Option<Viewer>) -> RequestAccessTemplate {
     RequestAccessTemplate {
         page: Page::new("Request access", viewer, "").with_description(DESCRIPTION),
         email: String::new(),
+        username: String::new(),
         reason: String::new(),
         error: String::new(),
         submitted: false,
@@ -62,25 +67,62 @@ pub(super) async fn submit(
     }
 
     let email = form.email.trim();
+    let username = form.username.trim();
     let reason = form.reason.trim();
-    if let Some(error) = validate(email, reason) {
+    if let Some(error) = validate(email, username, reason) {
         let mut view = template(viewer);
         view.email = email.to_string();
+        view.username = username.to_string();
         view.reason = reason.to_string();
-        view.error = error.to_string();
+        view.error = error;
+        return Ok(Html(view).into_response());
+    }
+    if users::find_by_username(&state.db, username)
+        .await
+        .map_err(|error| WebError::Internal(error.into()))?
+        .is_some()
+    {
+        let mut view = template(viewer);
+        view.email = email.to_string();
+        view.username = username.to_string();
+        view.reason = reason.to_string();
+        view.error = "That username is already taken.".into();
+        return Ok(Html(view).into_response());
+    }
+    let claimed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM account_requests
+             WHERE status = 'open'
+               AND username = ? COLLATE NOCASE
+               AND email <> ? COLLATE NOCASE
+         )",
+    )
+    .bind(username)
+    .bind(email)
+    .fetch_one(state.db.pool())
+    .await
+    .map_err(|error| WebError::Db(error.into()))?;
+    if claimed {
+        let mut view = template(viewer);
+        view.email = email.to_string();
+        view.username = username.to_string();
+        view.reason = reason.to_string();
+        view.error = "That username is already requested; choose another.".into();
         return Ok(Html(view).into_response());
     }
 
     let requested_at = crate::db::fmt_ts(jiff::Timestamp::now());
     sqlx::query(
-        "INSERT INTO account_requests (email, reason, status, requested_at)
-         VALUES (?, ?, 'open', ?)
+        "INSERT INTO account_requests (email, username, reason, status, requested_at)
+         VALUES (?, ?, ?, 'open', ?)
          ON CONFLICT(email) WHERE status = 'open' DO UPDATE SET
              email = excluded.email,
+             username = excluded.username,
              reason = excluded.reason,
              requested_at = excluded.requested_at",
     )
     .bind(email)
+    .bind(username)
     .bind((!reason.is_empty()).then_some(reason))
     .bind(&requested_at)
     .execute(state.db.pool())
@@ -105,7 +147,7 @@ pub(super) async fn submit(
             to: to.to_string(),
             subject: format!("Access request from {email}"),
             body: format!(
-                "Email: {email}\nReason: {reason}\nRequested at: {requested_at}\nReview: {}/dashboard/users\n",
+                "Email: {email}\nUsername: {username}\nReason: {reason}\nRequested at: {requested_at}\nReview: {}/dashboard/users\n",
                 config.server.public_url.trim_end_matches('/')
             ),
         };
@@ -121,16 +163,19 @@ pub(super) async fn submit(
     Ok(Html(view).into_response())
 }
 
-fn validate(email: &str, reason: &str) -> Option<&'static str> {
+fn validate(email: &str, username: &str, reason: &str) -> Option<String> {
     let valid_email = email.chars().count() <= 254
         && email.split_once('@').is_some_and(|(local, domain)| {
             !local.is_empty() && !domain.is_empty() && !domain.contains('@')
         });
     if !valid_email {
-        return Some("Enter a valid email address.");
+        return Some("Enter a valid email address.".into());
+    }
+    if let Err(error) = users::validate_username(username) {
+        return Some(error.to_string());
     }
     if reason.chars().count() > 2000 {
-        return Some("Reason or comment must be 2,000 characters or fewer.");
+        return Some("Reason or comment must be 2,000 characters or fewer.".into());
     }
     None
 }
@@ -226,17 +271,18 @@ mod tests {
         let (_dir, db, app) = app().await;
         let (status, body) = post(
             &app,
-            "email=reader%40example.com&reason=I+love+the+paper&website=",
+            "email=reader%40example.com&username=Morning.Reader&reason=I+love+the+paper&website=",
         )
         .await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("requests are reviewed by hand"), "{body}");
-        let row = sqlx::query("SELECT email, reason, status FROM account_requests")
+        let row = sqlx::query("SELECT email, username, reason, status FROM account_requests")
             .fetch_one(db.pool())
             .await
             .unwrap();
         assert_eq!(row.get::<String, _>("email"), "reader@example.com");
+        assert_eq!(row.get::<String, _>("username"), "Morning.Reader");
         assert_eq!(
             row.get::<Option<String>, _>("reason").as_deref(),
             Some("I love the paper")
@@ -258,7 +304,11 @@ mod tests {
         state.mailer = Some(mailer);
         let app = router(state);
 
-        let (status, _) = post(&app, "email=reader%40example.com&reason=&website=").await;
+        let (status, _) = post(
+            &app,
+            "email=reader%40example.com&username=morning_reader&reason=&website=",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
@@ -285,6 +335,7 @@ mod tests {
             "Access request from reader@example.com"
         );
         assert!(messages[0].body.contains("Email: reader@example.com"));
+        assert!(messages[0].body.contains("Username: morning_reader"));
         assert!(messages[0].body.contains("Reason: (no reason given)"));
         assert!(messages[0].body.contains("Requested at: "));
         assert!(
@@ -301,10 +352,18 @@ mod tests {
         let (_dir, _db, app) = app_with_config(config).await;
 
         for _ in 0..3 {
-            let (status, _) = post(&app, "email=reader%40example.com&reason=&website=").await;
+            let (status, _) = post(
+                &app,
+                "email=reader%40example.com&username=reader&reason=&website=",
+            )
+            .await;
             assert_eq!(status, StatusCode::OK);
         }
-        let (status, _) = post(&app, "email=reader%40example.com&reason=&website=").await;
+        let (status, _) = post(
+            &app,
+            "email=reader%40example.com&username=reader&reason=&website=",
+        )
+        .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 
@@ -339,17 +398,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_username_rerenders_with_the_values_without_storing() {
+        let (_dir, db, app) = app().await;
+        let (status, body) = post(
+            &app,
+            "email=reader%40example.com&username=bad+name&reason=Please&website=",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("username must be 1-32 characters from A-Z, a-z, 0-9"),
+            "{body}"
+        );
+        assert!(body.contains("value=\"reader@example.com\""), "{body}");
+        assert!(body.contains("value=\"bad name\""), "{body}");
+        assert!(body.contains(">Please</textarea>"), "{body}");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM account_requests")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn username_matching_an_existing_account_is_rejected_case_insensitively() {
+        let (_dir, db, app) = app().await;
+        crate::web::users::add(&db, "Existing.Reader", "correct horse battery", false)
+            .await
+            .unwrap();
+
+        let (status, body) = post(
+            &app,
+            "email=new%40example.com&username=existing.reader&reason=&website=",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("That username is already taken."), "{body}");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM account_requests")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn username_claimed_by_another_open_request_is_rejected_case_insensitively() {
+        let (_dir, db, app) = app().await;
+        sqlx::query(
+            "INSERT INTO account_requests (email, username, requested_at)
+             VALUES ('first@example.com', 'Claimed.Name', '2026-09-05T12:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let (status, body) = post(
+            &app,
+            "email=second%40example.com&username=claimed.name&reason=&website=",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("That username is already requested; choose another."),
+            "{body}"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM account_requests")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
     async fn repeated_email_updates_the_open_request_case_insensitively() {
         let (_dir, db, app) = app().await;
-        post(&app, "email=Reader%40Example.com&reason=first&website=").await;
-        post(&app, "email=reader%40example.COM&reason=updated&website=").await;
+        post(
+            &app,
+            "email=Reader%40Example.com&username=first_name&reason=first&website=",
+        )
+        .await;
+        post(
+            &app,
+            "email=reader%40example.COM&username=updated.name&reason=updated&website=",
+        )
+        .await;
 
-        let rows = sqlx::query("SELECT email, reason FROM account_requests")
+        let rows = sqlx::query("SELECT email, username, reason FROM account_requests")
             .fetch_all(db.pool())
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get::<String, _>("email"), "reader@example.COM");
+        assert_eq!(rows[0].get::<String, _>("username"), "updated.name");
         assert_eq!(
             rows[0].get::<Option<String>, _>("reason").as_deref(),
             Some("updated")

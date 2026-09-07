@@ -205,8 +205,9 @@ from a single download menu. An
 article chapters, rate articles, and use every `/dashboard/*` page, including
 settings and jobs. Personalization is shared across accounts for now.
 
-Visitors can request an account at `/request-access`; admins review open
-requests on `/dashboard/users`. Approving a request creates a `user` account,
+Visitors can request an account with their preferred username at
+`/request-access`; admins review open requests on `/dashboard/users`. Approving
+a request creates a `user` account,
 emails a random temporary password to the requester, and marks the request
 done; the new user must choose a new password on first sign-in. Approval is
 available only when `[mail]` is active, so an account is never created with a
