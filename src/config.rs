@@ -1364,6 +1364,17 @@ mod tests {
     use super::*;
     use figment::Jail;
 
+    /// `Config::load` reads the process environment and `toml_then_env_layering`
+    /// writes it, so every test that does either takes this lock; tests run in
+    /// parallel threads and the environment is shared.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn defaults_match_the_spec() {
         let c = Config::default();
@@ -1409,6 +1420,7 @@ mod tests {
     // `Jail::expect_with` dictates the closure's `figment::Error` return type.
     #[allow(clippy::result_large_err)]
     fn toml_then_env_layering() {
+        let _env = env_guard();
         Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
@@ -1535,6 +1547,7 @@ mod tests {
 
     #[test]
     fn explicit_missing_path_is_an_error() {
+        let _env = env_guard();
         assert!(matches!(
             Config::load(Some(Path::new("/nonexistent/daily-epub.toml"))),
             Err(ConfigError::Missing(_))
@@ -1547,6 +1560,7 @@ mod tests {
     /// the OPDS feed would then find nothing.
     #[test]
     fn the_renamed_publish_key_fails_loudly() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -1563,6 +1577,7 @@ mod tests {
 
     #[test]
     fn removed_prefilter_keep_fails_loudly() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "prefilter_keep = 120\n").unwrap();
@@ -1574,6 +1589,7 @@ mod tests {
 
     #[test]
     fn removed_score_batch_size_names_deep_batch_size() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[deepseek]\nscore_batch_size = 12\n").unwrap();
@@ -1585,6 +1601,7 @@ mod tests {
     /// that lived in `[deepseek]` fail loudly, naming their new homes.
     #[test]
     fn stale_provider_tables_and_role_keys_fail_loudly() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         for (body, needles) in [
             (
@@ -1665,6 +1682,7 @@ mod tests {
 
     #[test]
     fn registry_validation_rejects_bad_roles_kinds_and_efforts() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -1759,6 +1777,7 @@ mod tests {
 
     #[test]
     fn check_report_lists_every_fact_and_flags_missing_keys() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let mut c = Config {
             profile_path: dir.path().join("profile.md"),
@@ -1800,6 +1819,7 @@ mod tests {
 
     #[test]
     fn shipped_example_config_parses() {
+        let _env = env_guard();
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         let c = Config::load(Some(&example)).expect("config.example.toml must parse");
         assert_eq!(c.xtc.command, "node");
@@ -1926,6 +1946,7 @@ mod tests {
 
     #[test]
     fn voyage_and_ranking_defaults_and_validation() {
+        let _env = env_guard();
         let cfg = Config::default();
         assert!(cfg.voyage.enabled);
         assert_eq!(cfg.voyage.base_url, "https://api.voyageai.com/v1");
