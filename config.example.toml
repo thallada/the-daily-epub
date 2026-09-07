@@ -237,3 +237,20 @@ smtp_user = ""
 # smtp_pass: environment only (DAILY_EPUB_MAIL__SMTP_PASS)
 from = ""                            # e.g. The Daily EPUB <daily@hallada.net>
 # notify_to = "operator@example.com" # recipient for access-request notifications
+
+[discovery]
+enabled = true                       # run the feed discovery stage during generate
+max_lookups_per_run = 30             # hosts looked up in Miniflux per run; each host is re-checked at most every 90 days
+skip_hosts = [                       # never looked up: the host itself or any subdomain of it
+    "news.ycombinator.com",
+    "lobste.rs",
+    "reddit.com",
+    "github.com",
+    "gist.github.com",
+    "x.com",
+    "twitter.com",
+    "youtube.com",
+    "en.wikipedia.org",
+    "arxiv.org",
+    "docs.google.com",
+]

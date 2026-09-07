@@ -277,6 +277,7 @@ const GROUP_ORDER: &[&str] = &[
     "miniflux",
     "bookorbit",
     "mail",
+    "discovery",
 ];
 
 /// Help text per key, seeded from the README configuration table and the
@@ -401,6 +402,9 @@ pub const SETTINGS_HELP: &[(&str, &str)] = &[
     ("mail.smtp_pass", "SMTP password. Environment only; requires a server restart."),
     ("mail.from", "Sender mailbox as an address or Name <address>. Requires a server restart."),
     ("mail.notify_to", "Recipient for new access-request notifications. Requires a server restart."),
+    ("discovery.enabled", "Run the feed discovery stage during generate."),
+    ("discovery.max_lookups_per_run", "How many not-yet-checked hosts one run may look up in Miniflux; each host is re-checked at most every 90 days."),
+    ("discovery.skip_hosts", "Hosts never looked up, one per line. Matches the host or any subdomain of it."),
 ];
 
 /// `DAILY_EPUB_` + the path upper-cased with `.` → `__` (§13.1 item 2).
@@ -1725,6 +1729,7 @@ mod tests {
                 "miniflux",
                 "bookorbit",
                 "mail",
+                "discovery",
             ]
         );
         let anthropic = groups

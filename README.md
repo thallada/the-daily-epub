@@ -133,6 +133,7 @@ daily-epub stats [--days 14]    # the evaluation framework, one fact per line
 daily-epub features backfill [--days 30] [--rated-only] [--all] [--yes]
 daily-epub features prune       # stale embeddings, old telemetry and assessments
 daily-epub backfill-social [--days 7]   # re-poll social scores for recent articles
+daily-epub feeds discover [--days 14] [--limit 50]  # seed feed candidates from recent aggregator articles
 daily-epub db migrate           # run migrations (also automatic on every start)
 daily-epub config check         # validate the config, print the resolved roles, keys and paths
 daily-epub users add USER [--admin] [--password-stdin]
@@ -244,6 +245,14 @@ The Ratings page accepts up to 500 historical article URLs at a time with one
 verdict and optional note. Imports run in the background and show per-URL
 status in the page plus live logs on the job page. If dashboard jobs are
 disabled, queueing still works; run `daily-epub job run import-ratings` by hand.
+
+The Feeds page lists feeds discovered behind articles that reached the paper
+only through an aggregator (Hacker News, Lobsters, Reddit, Scour), ranked by
+the same per-article signals the paper selects on, so the strongest leads sit
+at the top. Each row offers **Add**, which subscribes the feed in a chosen
+Miniflux category, and **Dismiss**. Discovery runs as a best-effort stage
+during `generate`; `daily-epub feeds discover --days 14 --limit 50` seeds the
+page from articles already in the database.
 
 The Settings page derives its fields from `Config`, rewrites `config.toml` in
 place with `toml_edit`, preserves comments/order and file permissions, validates
@@ -407,6 +416,9 @@ prints what resolved.
 | `mail.smtp_pass` | — | **`DAILY_EPUB_MAIL__SMTP_PASS`**, environment only. |
 | `mail.from` | `""` | Sender mailbox, either a bare address or `Name <address>`. |
 | `mail.notify_to` | unset | Recipient for access-request notifications. |
+| `discovery.enabled` | `true` | Run the feed discovery stage during `generate`. |
+| `discovery.max_lookups_per_run` | `30` | Hosts one run may look up in Miniflux. Each host is re-checked at most every 90 days. |
+| `discovery.skip_hosts` | aggregators, code hosts, social networks | Hosts never looked up. A host matches itself or any subdomain of it. |
 | `xtc.enabled` | `true` | Set `false` to skip the converter entirely. |
 | `xtc.command` | `node` | Converter executable. |
 | `xtc.args` | `["/opt/epub-to-xtc-converter/cli/index.js", "convert"]` | Prefix; the code appends `<input.epub> -o <output> -f <format>` (plus `-c <settings>`). |
