@@ -173,6 +173,8 @@
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .prose-body img { outline-color:oklch(1 0 0 / 0.1); } }
   :root[data-theme="dark"] .prose-body img { outline-color:oklch(1 0 0 / 0.1); }
   .prose-body table { @apply block max-w-full overflow-x-auto; overscroll-behavior-inline:contain; }
+  /* Cells keep whole words and let the table scroll instead of squeezing. */
+  .prose-body th, .prose-body td { overflow-wrap:normal; }
   .prose-body pre { @apply max-w-full overflow-x-auto rounded-sm bg-paper-2 p-4 text-sm leading-relaxed; }
   .prose-body :not(pre) > code { @apply rounded-sm bg-paper-2 px-1 py-0.5 text-[0.9em]; }
   .prose-body blockquote { @apply my-7 border-l-2 border-rule-strong pl-5 text-ink-2; }
