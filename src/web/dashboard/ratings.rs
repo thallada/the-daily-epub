@@ -58,7 +58,8 @@ pub fn routes() -> Router<AppState> {
 pub struct FeedCredit {
     pub feed_id: FeedId,
     pub feed_title: String,
-    /// `value × decay / n` over the article's `n` direct feeds.
+    /// `value × decay / n` over the article's `n` direct feeds, reduced for an
+    /// aggregator-only article.
     pub credit: f64,
 }
 
@@ -97,7 +98,12 @@ pub fn contribution(
     let feed_credits = if rating.label == "cleared" || feeds.is_empty() {
         Vec::new()
     } else {
-        let credit = weight / feeds.len() as f64;
+        let feed_weight = if article.is_some_and(crate::discovery::aggregator_only) {
+            weight * signals::AGGREGATOR_FEED_SHARE
+        } else {
+            weight
+        };
+        let credit = feed_weight / feeds.len() as f64;
         feeds
             .iter()
             .map(|feed_id| FeedCredit {

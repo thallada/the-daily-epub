@@ -497,7 +497,7 @@ Computed in `src/curate/signals.rs` after embeddings. Every signal is `Option<f6
 |---|---|---|
 | `interest` | z-scored standing-interest match (§9.1) | no embedding, or fewer than 30 eligible articles have embeddings (then use raw top-1 cosine and log it) |
 | `knn` | signed rated-neighbour preference (§9.2) | no embedding, or gate closed |
-| `feed` | mean Beta-smoothed rating rate over the article's distinct direct feeds (§9.3) | no direct feed with any rating, or gate closed |
+| `feed` | mean Beta-smoothed rating rate over the article's distinct direct feeds and author (§9.3) | no direct feed or author with any rating, or gate closed |
 | `social` | existing `composite_social_score` | no `social` rows |
 | `heuristic` | `longform_points(word_count)` − excerpt-only penalty − roundup penalty, from `prefilter.rs` with the social, Scour/HN, multi-source, and feed-prior terms **removed** | never |
 
@@ -531,7 +531,9 @@ preference: 14 rated articles with embeddings → knn gate 0.35; feed gate 0.0 (
 
 ### 9.3 Feed affinity
 
-From the same rating set. Credit each rating's `value` to the article's distinct direct feeds (`SourceKind::Feed`), split evenly; if there are none, to `best_entry_id`'s feed. Per feed: `rate = (up + 1) / (up + down + 2)` where `up = Σ max(value, 0)` and `down = Σ max(−value, 0)`, decayed as in §9.2. A candidate's `feed` signal is the **mean** over its distinct direct feeds that have any rating (never the max). Gate: `feed_floor = 15`, `feed_full = 40` attributable ratings.
+From the same rating set. Credit each rating's decayed `value` to the article's distinct direct feeds (`SourceKind::Feed`), split evenly; if there are none, use `best_entry_id`'s feed. For an aggregator-only article, that fallback aggregator feed receives only `0.25 ×` the feed credit. When an article has an author, its normalized author key (trimmed, internal whitespace collapsed, lowercased) separately receives the full credit, so future articles by that author carry the history across any feed.
+
+Per feed and author: `rate = (up + 1) / (up + down + 2)` where `up = Σ max(value × decay, 0)` and `down = Σ max(−value × decay, 0)`. A candidate's `feed` signal is the **mean** over its distinct direct feeds and author that have any rating (never the max). A rating is attributable if it credits at least one feed or author. Gate: `feed_floor = 15`, `feed_full = 40` attributable ratings.
 
 ---
 
@@ -987,7 +989,7 @@ No test touches the network. Mock backends for all three providers, following th
 - **Rating events**: latest explicit event wins; `cleared` removes an article from the learned set; migration copies old rows with the right labels and values; the CLI `set`/`clear` append rows with `source = 'cli'`.
 - **Embeddings**: BLOB round trip; wrong length and non-finite rejected; cache hit on same hash, miss on changed text/model/dimension; response mapped by index and length-checked; a failed batch does not abort the others; embedded text contains no feed name or author.
 - **Interest z-scores**: a broad interest with uniformly high cosine does not dominate; a specific interest with one strong match does; raw fallback under 30 articles.
-- **Preference**: one loved article gives a positive `knn` to a near neighbour; two unrelated loved clusters both score high (the anti-centroid test); `good` moves the signal 0.35× as much as `loved`; decay halves at the half-life; gate is 0 below `knn_floor`, 1 at `knn_full`, linear between; feed credit sums to 1 across direct feeds; feed affinity uses the mean.
+- **Preference**: one loved article gives a positive `knn` to a near neighbour; two unrelated loved clusters both score high (the anti-centroid test); `good` moves the signal 0.35× as much as `loved`; decay halves at the half-life; gate is 0 below `knn_floor`, 1 at `knn_full`, linear between; ordinary feed credit sums to 1 across direct feeds; aggregator-only credit is 0.25× to its feed and 1× to its author; feed affinity uses the mean of rated feeds and author.
 - **Normalization**: a constant signal normalizes to 0.5 for everyone; ties get equal percentiles (400 identical zeros → all 0.5, no id ramp); absent values do not shift others; effective weights sum to 1; a candidate missing a signal is scored on the rest.
 - **Triage and deep parsing**: realistic fixtures; malformed items do not sink a batch; unknown facet tokens degrade to `None`; every enum token in both prompts round-trips; cached assessments are reused within `assessment_reuse_days` and ignored with `--rescore`.
 - **Admission**: a strong-interest, weak-heuristic, no-social article reaches the deep set; a 60-word stub with high interest similarity is not admitted by `interest`/`knn`; quotas honoured; inactive retrievers release quota; exploration deterministic per date; auto-includes always admitted; excluded articles get thin rows with the right reason.

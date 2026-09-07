@@ -23,6 +23,9 @@ pub const INTEREST_ZSCORE_MIN_ARTICLES: usize = 30;
 const ZSCORE_STD_FLOOR: f64 = 1e-3;
 /// How many interests and rated neighbours `signals_json` records (§7.5).
 const RECORDED_TOP: usize = 3;
+/// Aggregators carried the link rather than authored the article, so they get
+/// only a small share of an aggregator-only article's feed-affinity credit.
+pub const AGGREGATOR_FEED_SHARE: f64 = 0.25;
 
 /// The signal names that go through the percentile normalizer, in the order
 /// they are rendered (§12.2). LLM scores (`triage`, `quality`, `fit`) are
@@ -126,6 +129,10 @@ pub struct RatedExample {
     pub embedding: Vec<f32>,
     /// Distinct direct feeds that carried the rated article (§9.3).
     pub feeds: Vec<FeedId>,
+    /// Whitespace-normalized, lowercase author key (§9.3).
+    pub author: Option<String>,
+    /// Whether the article arrived only through link aggregators (§9.3).
+    pub aggregator_only: bool,
 }
 
 impl RatedExample {
@@ -153,6 +160,7 @@ impl FeedRate {
 pub struct PreferenceState {
     pub examples: Vec<RatedExample>,
     feed_rates: HashMap<FeedId, FeedRate>,
+    author_rates: HashMap<String, FeedRate>,
     pub attributable_feed_ratings: usize,
     pub knn_gate: f64,
     pub feed_gate: f64,
@@ -160,8 +168,11 @@ pub struct PreferenceState {
 
 impl PreferenceState {
     /// Build the state from already-loaded examples (pure; tests use this).
-    pub fn build(examples: Vec<RatedExample>, ranking: &RankingConfig) -> Self {
-        let (feed_rates, attributable_feed_ratings) = feed_rates(&examples);
+    pub fn build(mut examples: Vec<RatedExample>, ranking: &RankingConfig) -> Self {
+        for example in &mut examples {
+            example.author = normalize_author(example.author.as_deref());
+        }
+        let (feed_rates, author_rates, attributable_feed_ratings) = feed_rates(&examples);
         Self {
             knn_gate: gate(examples.len(), ranking.knn_floor, ranking.knn_full),
             feed_gate: gate(
@@ -171,6 +182,7 @@ impl PreferenceState {
             ),
             examples,
             feed_rates,
+            author_rates,
             attributable_feed_ratings,
         }
     }
@@ -194,12 +206,14 @@ impl PreferenceState {
             let Some(embedding) = embeddings.get(&rating.article_id).cloned() else {
                 continue;
             };
-            let feeds = db
-                .get_article(rating.article_id)
-                .await?
+            let article = db.get_article(rating.article_id).await?;
+            let feeds = article.as_ref().map(direct_feeds).unwrap_or_default();
+            let author = article
                 .as_ref()
-                .map(direct_feeds)
-                .unwrap_or_default();
+                .and_then(|article| normalize_author(article.author.as_deref()));
+            let aggregator_only = article
+                .as_ref()
+                .is_some_and(crate::discovery::aggregator_only);
             let age_days = (now.as_second() - rating.event_at.as_second()).max(0) as f64 / 86_400.0;
             examples.push(RatedExample {
                 article_id: rating.article_id,
@@ -209,6 +223,8 @@ impl PreferenceState {
                 decay: decay(age_days, ranking.rating_half_life_days),
                 embedding,
                 feeds,
+                author,
+                aggregator_only,
             });
         }
         Ok(Self::build(examples, ranking))
@@ -298,22 +314,36 @@ impl PreferenceState {
         (knn, neighbours)
     }
 
-    /// Mean Beta-smoothed rate over the article's rated direct feeds (§9.3).
+    /// Mean Beta-smoothed rate over the article's rated direct feeds and author
+    /// (§9.3).
     pub fn feed(&self, article: &Article) -> Option<f64> {
         if self.feed_gate <= 0.0 {
             return None;
         }
-        let rates = direct_feeds(article)
+        let mut rates = direct_feeds(article)
             .into_iter()
             .filter_map(|feed| self.feed_rates.get(&feed))
             .map(|rate| rate.rate())
             .collect::<Vec<_>>();
+        if let Some(rate) = normalize_author(article.author.as_deref())
+            .as_ref()
+            .and_then(|author| self.author_rates.get(author))
+        {
+            rates.push(rate.rate());
+        }
         (!rates.is_empty()).then(|| rates.iter().sum::<f64>() / rates.len() as f64)
     }
 
     /// Per-feed `(up, down)` credit, exposed for tests of §9.3.
     pub fn feed_credit(&self, feed: FeedId) -> Option<(f64, f64)> {
         self.feed_rates.get(&feed).map(|rate| (rate.up, rate.down))
+    }
+
+    /// Per-author `(up, down)` credit, exposed for tests of §9.3.
+    pub fn author_credit(&self, author: &str) -> Option<(f64, f64)> {
+        normalize_author(Some(author))
+            .and_then(|author| self.author_rates.get(&author))
+            .map(|rate| (rate.up, rate.down))
     }
 }
 
@@ -354,22 +384,46 @@ pub fn direct_feeds(article: &Article) -> Vec<FeedId> {
     feeds
 }
 
-fn feed_rates(examples: &[RatedExample]) -> (HashMap<FeedId, FeedRate>, usize) {
-    let mut rates: HashMap<FeedId, FeedRate> = HashMap::new();
+fn normalize_author(author: Option<&str>) -> Option<String> {
+    let normalized = author?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn feed_rates(
+    examples: &[RatedExample],
+) -> (HashMap<FeedId, FeedRate>, HashMap<String, FeedRate>, usize) {
+    let mut feed_rates: HashMap<FeedId, FeedRate> = HashMap::new();
+    let mut author_rates: HashMap<String, FeedRate> = HashMap::new();
     let mut attributable = 0;
     for example in examples {
-        if example.feeds.is_empty() {
-            continue;
+        let weight = example.weight();
+        if !example.feeds.is_empty() {
+            let feed_weight = if example.aggregator_only {
+                weight * AGGREGATOR_FEED_SHARE
+            } else {
+                weight
+            };
+            let credit = feed_weight / example.feeds.len() as f64;
+            for feed in &example.feeds {
+                let rate = feed_rates.entry(*feed).or_default();
+                rate.up += credit.max(0.0);
+                rate.down += (-credit).max(0.0);
+            }
         }
-        attributable += 1;
-        let credit = example.weight() / example.feeds.len() as f64;
-        for feed in &example.feeds {
-            let rate = rates.entry(*feed).or_default();
-            rate.up += credit.max(0.0);
-            rate.down += (-credit).max(0.0);
+        if let Some(author) = &example.author {
+            let rate = author_rates.entry(author.clone()).or_default();
+            rate.up += weight.max(0.0);
+            rate.down += (-weight).max(0.0);
+        }
+        if !example.feeds.is_empty() || example.author.is_some() {
+            attributable += 1;
         }
     }
-    (rates, attributable)
+    (feed_rates, author_rates, attributable)
 }
 
 /// The interest match of §9.1 for one article.
@@ -620,6 +674,8 @@ mod tests {
             decay: 1.0,
             embedding: unit(embedding),
             feeds: vec![id],
+            author: None,
+            aggregator_only: false,
         }
     }
 
@@ -843,6 +899,69 @@ mod tests {
         let best = state.feed(&article(8, &[10])).unwrap();
         assert!((best - 2.0 / 3.0).abs() < 1e-9);
         assert_eq!(state.feed(&article(9, &[99])), None);
+    }
+
+    #[test]
+    fn aggregator_only_rating_splits_credit_between_feed_and_author() {
+        let mut rated = example(1, "loved", 1.0, &[1.0, 0.0]);
+        rated.decay = 0.4;
+        rated.feeds = vec![10];
+        rated.author = Some("example author".into());
+        rated.aggregator_only = true;
+        let state = PreferenceState::build(vec![rated], &ranking());
+
+        assert!((state.feed_credit(10).unwrap().0 - 0.25 * 0.4).abs() < 1e-9);
+        assert!((state.author_credit("example author").unwrap().0 - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn author_affinity_applies_across_feeds_with_normalized_keys() {
+        let mut ranking = ranking();
+        ranking.feed_floor = 0;
+        ranking.feed_full = 1;
+        let mut rated = example(1, "loved", 1.0, &[1.0, 0.0]);
+        rated.feeds = vec![10];
+        rated.author = Some("Ada Lovelace".into());
+        let state = PreferenceState::build(vec![rated], &ranking);
+        let mut candidate = article(2, &[99]);
+        candidate.author = Some("  ADA   lovelace ".into());
+
+        assert_eq!(state.examples[0].author.as_deref(), Some("ada lovelace"));
+        assert_eq!(state.feed_credit(99), None);
+        assert!((state.feed(&candidate).unwrap() - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(state.author_credit(" ADA   Lovelace "), Some((1.0, 0.0)));
+    }
+
+    #[test]
+    fn feed_affinity_means_rated_feed_and_rated_author() {
+        let mut ranking = ranking();
+        ranking.feed_floor = 0;
+        ranking.feed_full = 1;
+        let mut feed_loved = example(1, "loved", 1.0, &[1.0, 0.0]);
+        feed_loved.feeds = vec![10];
+        let mut author_down = example(2, "not_for_me", -1.0, &[1.0, 0.0]);
+        author_down.feeds.clear();
+        author_down.author = Some("writer".into());
+        let state = PreferenceState::build(vec![feed_loved, author_down], &ranking);
+        let mut candidate = article(3, &[10]);
+        candidate.author = Some("Writer".into());
+
+        assert!((state.feed(&candidate).unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregator_only_without_author_keeps_feed_behavior_at_reduced_credit() {
+        let mut ranking = ranking();
+        ranking.feed_floor = 0;
+        ranking.feed_full = 1;
+        let mut rated = example(1, "not_for_me", -1.0, &[1.0, 0.0]);
+        rated.feeds = vec![10];
+        rated.aggregator_only = true;
+        let state = PreferenceState::build(vec![rated], &ranking);
+
+        assert_eq!(state.feed_credit(10), Some((0.0, 0.25)));
+        assert_eq!(state.author_credit(""), None);
+        assert!((state.feed(&article(2, &[10])).unwrap() - 1.0 / 2.25).abs() < 1e-9);
     }
 
     #[test]
