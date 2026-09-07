@@ -18,7 +18,7 @@ use time::OffsetDateTime;
 use crate::db::{Db, fmt_ts};
 use crate::server::AppState;
 use crate::web::users::{self, Role, User};
-use crate::web::{Html, Page, WebError};
+use crate::web::{Html, Page, WebError, encode_component};
 
 /// The session key axum-login keeps the signed-in user under (its default
 /// `data_key`); the presence of this key is what "signed in" means to
@@ -280,7 +280,15 @@ pub async fn require_password_change(auth: AuthSession, request: Request, next: 
             .await
             .is_some_and(|user| user.must_change_password)
     {
-        return axum::response::Redirect::to("/account?change=1").into_response();
+        let destination = request
+            .uri()
+            .path_and_query()
+            .map_or("/", |value| value.as_str());
+        return axum::response::Redirect::to(&format!(
+            "/account?change=1&next={}",
+            encode_component(destination)
+        ))
+        .into_response();
     }
     next.run(request).await
 }
@@ -305,6 +313,7 @@ struct AccountTemplate {
     page: Page,
     error: String,
     change_required: bool,
+    next: String,
 }
 
 /// Query parameters accepted by the account page.
@@ -312,6 +321,8 @@ struct AccountTemplate {
 pub struct AccountQuery {
     #[serde(default)]
     change: Option<String>,
+    #[serde(default)]
+    next: Option<String>,
 }
 
 /// The `<meta name="description">` for both renders of the sign-in page.
@@ -343,9 +354,9 @@ pub async fn login(
     {
         Some(user) => {
             let destination = if user.must_change_password {
-                "/account?change=1"
+                format!("/account?change=1&next={}", encode_component(&destination))
             } else {
-                &destination
+                destination
             };
             auth.login(&user)
                 .await
@@ -356,7 +367,7 @@ pub async fn login(
                 .execute(state.db.pool())
                 .await
                 .map_err(crate::db::DbError::from)?;
-            Ok(axum::response::Redirect::to(destination).into_response())
+            Ok(axum::response::Redirect::to(&destination).into_response())
         }
         None => Ok((
             StatusCode::UNAUTHORIZED,
@@ -389,6 +400,7 @@ pub async fn account(
         page: Page::new("Account", Some(user.into()), "account"),
         error: String::new(),
         change_required,
+        next: valid_next(query.next.as_deref()).to_string(),
     })
     .into_response())
 }
@@ -398,6 +410,8 @@ pub struct PasswordForm {
     current_password: String,
     new_password: String,
     confirm_password: String,
+    #[serde(default)]
+    next: Option<String>,
 }
 
 pub async fn change_password(
@@ -408,6 +422,7 @@ pub async fn change_password(
     let user = auth.user().await.ok_or_else(|| WebError::Unauthenticated {
         next: "/account".into(),
     })?;
+    let destination = valid_next(form.next.as_deref()).to_string();
     let hash = user.password_hash.clone();
     let current = form.current_password;
     let valid = tokio::task::spawn_blocking(move || users::verify_password(&hash, &current))
@@ -429,6 +444,7 @@ pub async fn change_password(
                 change_required: user.must_change_password,
                 page: Page::new("Account", Some(user.into()), "account"),
                 error,
+                next: destination,
             }),
         )
             .into_response());
@@ -453,7 +469,7 @@ pub async fn change_password(
     auth.login(&updated)
         .await
         .map_err(|error| WebError::Internal(error.into()))?;
-    Ok(axum::response::Redirect::to("/account").into_response())
+    Ok(axum::response::Redirect::to(&destination).into_response())
 }
 
 pub async fn logout_everywhere(
@@ -599,6 +615,8 @@ mod tests {
                 .await
                 .unwrap();
         let article_uri = format!("/issues/{}/articles/1", seed.date);
+        let password_change_uri =
+            format!("/account?change=1&next={}", encode_component(&article_uri));
         let app = crate::server::router(AppState::new(
             seed.db.clone(),
             crate::config::Config::default(),
@@ -624,7 +642,7 @@ mod tests {
         assert_eq!(login.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             login.headers().get(header::LOCATION).unwrap(),
-            "/account?change=1"
+            password_change_uri.as_str()
         );
         let cookie = login
             .headers()
@@ -651,14 +669,14 @@ mod tests {
         assert_eq!(blocked.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             blocked.headers().get(header::LOCATION).unwrap(),
-            "/account?change=1"
+            password_change_uri.as_str()
         );
 
         let account = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/account?change=1")
+                    .uri(&password_change_uri)
                     .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -673,6 +691,35 @@ mod tests {
         )
         .unwrap();
         assert!(account_body.contains("Choose a new password to continue."));
+        assert!(account_body.contains(&format!("name=\"next\" value=\"{article_uri}\"")));
+
+        let invalid_change = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/account/password")
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header("sec-fetch-site", "same-origin")
+                    .body(Body::from(format!(
+                        "current_password={temporary_password}&new_password=a+final+reader+password&confirm_password=does+not+match&next={}",
+                        encode_component(&article_uri)
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_change.status(), StatusCode::BAD_REQUEST);
+        let invalid_body = String::from_utf8(
+            to_bytes(invalid_change.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(invalid_body.contains("Choose a new password to continue."));
+        assert!(invalid_body.contains(&format!("name=\"next\" value=\"{article_uri}\"")));
 
         let changed = app
             .clone()
@@ -684,13 +731,18 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header("sec-fetch-site", "same-origin")
                     .body(Body::from(format!(
-                        "current_password={temporary_password}&new_password=a+final+reader+password&confirm_password=a+final+reader+password"
+                        "current_password={temporary_password}&new_password=a+final+reader+password&confirm_password=a+final+reader+password&next={}",
+                        encode_component(&article_uri)
                     )))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(changed.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            changed.headers().get(header::LOCATION).unwrap(),
+            article_uri.as_str()
+        );
         assert!(
             !users::find_by_id(&seed.db, user.id)
                 .await
@@ -710,5 +762,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(article.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn password_change_rejects_external_next_targets() {
+        let seed = crate::web::dashboard::tests::seed().await;
+        for username in ["unsafe_next_one", "unsafe_next_two"] {
+            users::add(&seed.db, username, "correct horse battery", false)
+                .await
+                .unwrap();
+        }
+        let app = crate::server::router(AppState::new(
+            seed.db,
+            crate::config::Config::default(),
+            None,
+        ));
+
+        for (username, destination) in [
+            ("unsafe_next_one", "//evil"),
+            ("unsafe_next_two", "https://x"),
+        ] {
+            let cookie =
+                crate::web::dashboard::tests::login_cookie(&app, username, "correct horse battery")
+                    .await;
+            let changed = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/account/password")
+                        .header(header::COOKIE, cookie)
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .header("sec-fetch-site", "same-origin")
+                        .body(Body::from(format!(
+                            "current_password=correct+horse+battery&new_password=a+final+reader+password&confirm_password=a+final+reader+password&next={}",
+                            encode_component(destination)
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(changed.status(), StatusCode::SEE_OTHER);
+            assert_eq!(changed.headers().get(header::LOCATION).unwrap(), "/");
+        }
     }
 }

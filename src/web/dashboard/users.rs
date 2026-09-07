@@ -69,7 +69,7 @@ async fn index(
     let viewer = auth.user().await.map(Viewer::from);
     let config = state.config();
     let requests = sqlx::query(
-        "SELECT id, email, reason, requested_at FROM account_requests
+        "SELECT id, email, username, reason, requested_at FROM account_requests
          WHERE status = 'open' ORDER BY requested_at DESC, id DESC",
     )
     .fetch_all(state.db.pool())
@@ -80,7 +80,9 @@ async fn index(
         let email: String = row.get("email");
         AccessRequestLine {
             id: row.get("id"),
-            suggested_username: suggested_username(&email),
+            suggested_username: row
+                .get::<Option<String>, _>("username")
+                .unwrap_or_else(|| suggested_username(&email)),
             email,
             reason: row.get::<Option<String>, _>("reason").unwrap_or_default(),
             requested: fmt_stored_time(
@@ -315,8 +317,8 @@ mod tests {
     async fn users_page_is_admin_only_and_lists_accounts_and_sessions() {
         let seed = seed().await;
         sqlx::query(
-            "INSERT INTO account_requests (email, reason, requested_at)
-             VALUES ('reader@example.com', 'Daily commute', '2026-09-05T12:00:00Z')",
+            "INSERT INTO account_requests (email, username, reason, requested_at)
+             VALUES ('reader@example.com', 'Requested.Name', 'Daily commute', '2026-09-05T12:00:00Z')",
         )
         .execute(seed.db.pool())
         .await
@@ -327,8 +329,10 @@ mod tests {
         assert!(body.contains("<h1>Users</h1>"), "{body}");
         assert!(body.contains("1 open access request"), "{body}");
         assert!(body.contains("reader@example.com"), "{body}");
+        assert!(body.contains("<th>Username</th>"), "{body}");
+        assert!(body.contains(">Requested.Name</td>"), "{body}");
         assert!(body.contains("Daily commute"), "{body}");
-        assert!(body.contains("value=\"reader\""), "{body}");
+        assert!(body.contains("value=\"Requested.Name\""), "{body}");
         assert!(body.contains(">Approve</button>"), "{body}");
         assert!(body.contains("Email is not configured"), "{body}");
         assert!(body.contains("Mark done"), "{body}");
@@ -336,6 +340,24 @@ mod tests {
         assert!(body.contains("admin"), "{body}");
         assert!(body.contains("Open sessions"), "{body}");
         assert!(body.contains("daily-epub users"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn old_request_without_a_username_uses_the_email_suggestion() {
+        let seed = seed().await;
+        sqlx::query(
+            "INSERT INTO account_requests (email, requested_at)
+             VALUES ('Legacy.Reader+news@example.com', '2026-09-05T12:00:00Z')",
+        )
+        .execute(seed.db.pool())
+        .await
+        .unwrap();
+        let app = app_with_users(&seed.db).await;
+
+        let body = assert_admin_only(&app, "/dashboard/users").await;
+
+        assert!(body.contains(">legacyreadernews</td>"), "{body}");
+        assert!(body.contains("value=\"legacyreadernews\""), "{body}");
     }
 
     #[tokio::test]
