@@ -70,6 +70,8 @@ pub enum ServerError {
     },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("could not configure outbound mail: {0}")]
+    Mail(#[source] anyhow::Error),
 }
 
 /// Shared axum state.
@@ -79,6 +81,8 @@ pub struct AppState {
     pub config: Arc<RwLock<Arc<Config>>>,
     pub config_path: Option<PathBuf>,
     pub web: Arc<crate::web::WebState>,
+    /// Startup-built SMTP sender. Mail configuration changes require a restart.
+    pub mailer: Option<crate::mail::Mailer>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -102,6 +106,7 @@ impl AppState {
                 started_at: Timestamp::now(),
                 config_mtime: std::sync::Mutex::new(None),
             }),
+            mailer: None,
         }
     }
 
@@ -201,6 +206,7 @@ pub async fn serve(
         // Not fatal for the OPDS routes, but every rating link would 500.
         tracing::warn!("server.hmac_secret is unset — rating links will be rejected");
     }
+    let mailer = crate::mail::Mailer::from_config(&config.mail).map_err(ServerError::Mail)?;
     let addr = config.server.bind.clone();
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -234,7 +240,9 @@ pub async fn serve(
         tracing::info!("server.jobs_enabled is false; the Jobs page cannot start units");
         Arc::new(crate::web::DisabledRunner)
     };
-    let app = router(AppState::with_jobs(db, config, config_path, jobs));
+    let mut state = AppState::with_jobs(db, config, config_path, jobs);
+    state.mailer = mailer;
+    let app = router(state);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

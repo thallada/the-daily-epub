@@ -211,7 +211,7 @@ settings = "/etc/daily-epub/xtc-settings.json"
 bind = "127.0.0.1:3499"              # listen address; keep loopback when trusting proxy IP headers
 public_url = "https://daily.hallada.net" # base URL for EPUB rating links and same-origin checks
 session_days = 30                    # sliding lifetime for web login sessions
-login_attempts = 10                  # login POSTs allowed per client IP in one throttle window
+login_attempts = 10                  # shared login/access-request POSTs per client IP per window
 login_window_minutes = 15            # length of the login throttle window
 jobs_enabled = true                  # let the dashboard start daily-epub-job@<name>.service
 journal_lines = 300                  # job-page journal tail; valid range 10..=5000
@@ -227,3 +227,13 @@ public_url = "https://bookorbit.hallada.net"   # what the browser opens
 api_url = "http://127.0.0.1:3498"               # where the server talks OPDS; same host
 opds_user = ""                                  # an OPDS user from BookOrbit → Settings → OPDS
 # opds_pass: environment only (DAILY_EPUB_BOOKORBIT__OPDS_PASS)
+
+[mail]
+enabled = false
+smtp_host = ""                       # e.g. email-smtp.us-east-1.amazonaws.com
+smtp_port = 587                      # 587 with STARTTLS; commonly 465 with implicit TLS
+smtp_starttls = true                 # false selects implicit TLS
+smtp_user = ""
+# smtp_pass: environment only (DAILY_EPUB_MAIL__SMTP_PASS)
+from = ""                            # e.g. The Daily EPUB <daily@hallada.net>
+# notify_to = "operator@example.com" # recipient for access-request notifications

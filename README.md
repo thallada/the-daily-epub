@@ -214,6 +214,10 @@ are case-insensitive and passwords must be 12–1024 characters. Bootstrap with
 `disable`/`enable`, `list`, and `logout` for later administration. Password
 changes and disabling a user revoke that user's sessions. `/dashboard/users`
 is a read-only view of roles, status, login times, and open sessions.
+When `[mail]` is active and `mail.notify_to` is set, each stored request queues
+a plain-text SMTP notification with a direct dashboard review link; SMTP runs
+in the background and never delays the visitor's response. Mail settings are
+loaded at server startup, so changes require a service restart.
 
 The Jobs page starts only the fixed job catalogue as
 `daily-epub-job@<name>.service`; the web server never runs the pipeline inside
@@ -263,8 +267,8 @@ articles do not yet have embeddings to compare.
 | `GET /issues/{date}/articles/{id}`, `/world`, `/behind` | User or admin | Private article, World Briefing, and Behind the paper chapters. |
 | `GET /issues/{date}/read` | User or admin | Open the Standard edition in BookOrbit's web reader when the integration is enabled. |
 | `GET /robots.txt`, `/static/{file}` | Public | Crawler policy and embedded CSS, JavaScript, and favicon. |
-| `GET/POST /login`, `POST /logout` | Public/session | Sign in and out; login attempts are throttled per client IP. |
-| `GET/POST /request-access` | Public | Request a reader account; requests are reviewed by an admin and fulfilled with the CLI. |
+| `GET/POST /login`, `POST /logout` | Public/session | Sign in and out; login POSTs share a per-client-IP throttle budget with access requests. |
+| `GET/POST /request-access` | Public | Request a reader account; POSTs share the login throttle, while GET stays unlimited. Requests are reviewed by an admin and fulfilled with the CLI. |
 | `GET /account`, `POST /account/password`, `/account/logout-all` | User or admin | Change the current password or revoke sessions. |
 | `POST /rate` | Admin | Append an attributed dashboard rating event. |
 | `GET /dashboard` | Admin | Run, budget, rating, job, and config overview. |
@@ -391,6 +395,14 @@ prints what resolved.
 | `bookorbit.api_url` | `http://127.0.0.1:3498` | Server-facing BookOrbit base URL used for OPDS lookups. |
 | `bookorbit.opds_user` | unset | Dedicated OPDS user created in BookOrbit's Settings → OPDS. |
 | `bookorbit.opds_pass` | — | **`DAILY_EPUB_BOOKORBIT__OPDS_PASS`**, environment only. |
+| `mail.enabled` | `false` | Enable outbound SMTP when the relay, sender, username, and password are configured. Mail settings require a server restart. |
+| `mail.smtp_host` | `""` | SMTP relay hostname, such as `email-smtp.us-east-1.amazonaws.com`. |
+| `mail.smtp_port` | `587` | SMTP relay port. Use 587 with STARTTLS or commonly 465 with implicit TLS. |
+| `mail.smtp_starttls` | `true` | `true` uses STARTTLS; `false` uses implicit TLS. |
+| `mail.smtp_user` | unset | SMTP username. It may be supplied as `DAILY_EPUB_MAIL__SMTP_USER`. |
+| `mail.smtp_pass` | — | **`DAILY_EPUB_MAIL__SMTP_PASS`**, environment only. |
+| `mail.from` | `""` | Sender mailbox, either a bare address or `Name <address>`. |
+| `mail.notify_to` | unset | Recipient for access-request notifications. |
 | `xtc.enabled` | `true` | Set `false` to skip the converter entirely. |
 | `xtc.command` | `node` | Converter executable. |
 | `xtc.args` | `["/opt/epub-to-xtc-converter/cli/index.js", "convert"]` | Prefix; the code appends `<input.epub> -o <output> -f <format>` (plus `-c <settings>`). |
@@ -401,7 +413,7 @@ prints what resolved.
 | `server.hmac_secret` | — | **`DAILY_EPUB_SERVER__HMAC_SECRET`** (or `DAILY_EPUB_SECRET`). Without it, generated links are rejected with 403. |
 | `server.basic_auth_user` / `_pass` | unset | Optional Basic auth for `/opds/*` and `/files/*`; signed-in web users may download from `/files/*` without Basic auth. |
 | `server.session_days` | `30` | Sliding lifetime for dashboard login sessions. |
-| `server.login_attempts` | `10` | Login attempts allowed per IP in one throttle window. |
+| `server.login_attempts` | `10` | Shared login and access-request POSTs allowed per IP in one throttle window. |
 | `server.login_window_minutes` | `15` | Length of the login throttle window. |
 | `server.jobs_enabled` | `true` | Allow the dashboard to start the fixed systemd job catalogue. |
 | `server.journal_lines` | `300` | Journal lines shown on a dashboard job page (10–5000). |
@@ -456,6 +468,8 @@ DAILY_EPUB_PROVIDERS__ANTHROPIC__API_KEY=…
 # DAILY_EPUB_PROVIDERS__GEMINI__API_KEY=…     # only if a role names "gemini"
 DAILY_EPUB_VOYAGE__API_KEY=…
 DAILY_EPUB_SERVER__HMAC_SECRET=$(openssl rand -hex 32)
+DAILY_EPUB_MAIL__SMTP_USER=…
+DAILY_EPUB_MAIL__SMTP_PASS=…
 EOF
 sudo chown daily-epub:daily-epub /etc/daily-epub/env && sudo chmod 0600 /etc/daily-epub/env
 # One key per [providers.<name>] entry a role uses, named after the table

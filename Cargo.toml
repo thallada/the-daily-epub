@@ -20,6 +20,7 @@ hex = "0.4.3"
 hmac = "0.13.0"
 image = "0.25.10"
 jiff = { version = "0.2.35", features = ["serde"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
 libc = "0.2.189"
 password-auth = "1.0.0"
 rand = "0.10.2"

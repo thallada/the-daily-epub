@@ -83,6 +83,7 @@ pub struct Config {
     pub xtc: XtcConfig,
     pub server: ServerConfig,
     pub bookorbit: BookorbitConfig,
+    pub mail: MailConfig,
 }
 
 impl Default for Config {
@@ -108,6 +109,7 @@ impl Default for Config {
             xtc: XtcConfig::default(),
             server: ServerConfig::default(),
             bookorbit: BookorbitConfig::default(),
+            mail: MailConfig::default(),
         }
     }
 }
@@ -704,7 +706,7 @@ pub struct ServerConfig {
     pub basic_auth_pass: Option<String>,
     /// Sliding web-session lifetime in days.
     pub session_days: u32,
-    /// Login attempts allowed per IP during the configured window.
+    /// Login and access-request POSTs allowed per IP during the configured window.
     pub login_attempts: u32,
     pub login_window_minutes: u32,
     /// Whether the operator dashboard may start systemd jobs.
@@ -781,6 +783,60 @@ impl BookorbitConfig {
     /// Server-facing API base URL without trailing slashes.
     pub fn api_url(&self) -> &str {
         self.api_url.trim_end_matches('/')
+    }
+}
+
+/// `[mail]` — optional outbound SMTP delivery.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MailConfig {
+    /// Whether outbound mail is enabled.
+    pub enabled: bool,
+    /// SMTP relay hostname.
+    pub smtp_host: String,
+    /// SMTP relay port.
+    pub smtp_port: u16,
+    /// Upgrade the connection with STARTTLS; false uses implicit TLS.
+    pub smtp_starttls: bool,
+    /// SMTP username.
+    pub smtp_user: Option<String>,
+    /// SMTP password; supply via `DAILY_EPUB_MAIL__SMTP_PASS`.
+    pub smtp_pass: Option<String>,
+    /// Sender mailbox, either an address or `Name <address>`.
+    pub from: String,
+    /// Recipient for access-request notifications.
+    pub notify_to: Option<String>,
+}
+
+impl Default for MailConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            smtp_host: String::new(),
+            smtp_port: 587,
+            smtp_starttls: true,
+            smtp_user: None,
+            smtp_pass: None,
+            from: String::new(),
+            notify_to: None,
+        }
+    }
+}
+
+impl MailConfig {
+    /// Whether mail is enabled with all fields required for SMTP delivery.
+    pub fn is_active(&self) -> bool {
+        self.enabled
+            && !self.smtp_host.trim().is_empty()
+            && !self.from.trim().is_empty()
+            && self
+                .smtp_user
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self
+                .smtp_pass
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
     }
 }
 
@@ -1001,6 +1057,16 @@ impl Config {
 
     /// Cheap sanity checks so misconfiguration fails at startup, not mid-run.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.mail.enabled && self.mail.smtp_host.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "mail.smtp_host must not be empty when mail.enabled is true".into(),
+            ));
+        }
+        if self.mail.enabled && self.mail.from.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "mail.from must not be empty when mail.enabled is true".into(),
+            ));
+        }
         if self.server.session_days == 0 {
             return Err(ConfigError::Invalid(
                 "server.session_days must be >= 1".into(),
@@ -1328,6 +1394,14 @@ mod tests {
         assert_eq!(c.bookorbit.api_url, "http://127.0.0.1:3498");
         assert!(c.bookorbit.opds_user.is_none());
         assert!(c.bookorbit.opds_pass.is_none());
+        assert!(!c.mail.enabled);
+        assert!(c.mail.smtp_host.is_empty());
+        assert_eq!(c.mail.smtp_port, 587);
+        assert!(c.mail.smtp_starttls);
+        assert!(c.mail.smtp_user.is_none());
+        assert!(c.mail.smtp_pass.is_none());
+        assert!(c.mail.from.is_empty());
+        assert!(c.mail.notify_to.is_none());
         c.validate().unwrap();
     }
 
@@ -1358,6 +1432,7 @@ mod tests {
             jail.set_env("DAILY_EPUB_TARGET_ARTICLE_COUNT", "12");
             jail.set_env("DAILY_EPUB_SERVER__HMAC_SECRET", "hunter2");
             jail.set_env("DAILY_EPUB_BOOKORBIT__OPDS_PASS", "orbit-secret");
+            jail.set_env("DAILY_EPUB_MAIL__SMTP_PASS", "smtp-secret");
             jail.set_env("DAILY_EPUB_VOYAGE__API_KEY", "voyage-key");
             jail.set_env("DAILY_EPUB_VOYAGE__ENABLED", "false");
             jail.set_env("DAILY_EPUB_PROVIDERS__GEMINI__API_KEY", "gemini-key");
@@ -1387,6 +1462,7 @@ mod tests {
             assert_eq!(c.target_article_count, 12);
             assert_eq!(c.server.hmac_secret.as_deref(), Some("hunter2"));
             assert_eq!(c.bookorbit.opds_pass.as_deref(), Some("orbit-secret"));
+            assert_eq!(c.mail.smtp_pass.as_deref(), Some("smtp-secret"));
             // untouched default
             assert_eq!(c.retention_days, 21);
             assert_eq!(c.timezone, "America/New_York");
@@ -1409,6 +1485,52 @@ mod tests {
 
         bookorbit.opds_pass = Some("  ".into());
         assert!(!bookorbit.is_active());
+    }
+
+    #[test]
+    fn mail_defaults_activation_and_validation() {
+        let mut mail = MailConfig::default();
+        assert!(!mail.enabled);
+        assert_eq!(mail.smtp_port, 587);
+        assert!(mail.smtp_starttls);
+        assert!(!mail.is_active());
+
+        mail.enabled = true;
+        assert!(
+            Config {
+                mail: mail.clone(),
+                ..Config::default()
+            }
+            .validate()
+            .is_err()
+        );
+
+        mail.smtp_host = "email-smtp.us-east-1.amazonaws.com".into();
+        assert!(
+            Config {
+                mail: mail.clone(),
+                ..Config::default()
+            }
+            .validate()
+            .is_err()
+        );
+
+        mail.from = "The Daily EPUB <daily@example.com>".into();
+        assert!(
+            Config {
+                mail: mail.clone(),
+                ..Config::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(!mail.is_active());
+
+        mail.smtp_user = Some("smtp-user".into());
+        mail.smtp_pass = Some("smtp-pass".into());
+        assert!(mail.is_active());
+        mail.smtp_pass = Some("  ".into());
+        assert!(!mail.is_active());
     }
 
     #[test]

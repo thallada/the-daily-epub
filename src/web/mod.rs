@@ -659,7 +659,13 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
         .route("/login", get(session::login_page))
         .route(
             "/login",
-            post(session::login).route_layer(GovernorLayer::new(governor)),
+            post(session::login).route_layer(GovernorLayer::new(governor.clone())),
+        );
+    let access_routes = axum::Router::new()
+        .route("/request-access", get(access::page))
+        .route(
+            "/request-access",
+            post(access::submit).route_layer(GovernorLayer::new(governor)),
         );
     let account = axum::Router::new()
         .route("/account", get(session::account))
@@ -695,12 +701,12 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
 
     axum::Router::new()
         .route("/", get(public::latest))
-        .route("/request-access", get(access::page).post(access::submit))
         .route("/issues", get(public::archive))
         .route("/issues/{date}", get(public::show_issue))
         .route("/feed.xml", get(public::feed))
         .route("/robots.txt", get(public::robots))
         .route("/static/{file}", get(static_asset))
+        .merge(access_routes)
         .merge(login)
         .merge(account)
         .merge(full_issues)
@@ -1336,6 +1342,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        let shared = app
+            .clone()
+            .oneshot(post(
+                "/request-access",
+                "email=reader%40example.com&reason=&website=",
+                "192.0.2.20",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(shared.status(), StatusCode::TOO_MANY_REQUESTS);
         let other = app
             .oneshot(post(
                 "/login",
