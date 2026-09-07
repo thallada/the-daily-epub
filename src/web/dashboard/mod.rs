@@ -10,6 +10,7 @@
 //! `_signals_table.html`, the allow-list check and the LIKE-pattern escaper.
 
 pub mod articles;
+pub mod feeds;
 pub mod jobs;
 pub mod profile;
 pub mod ratings;
@@ -44,6 +45,7 @@ pub fn router() -> Router<AppState> {
         .merge(runs::routes())
         .merge(articles::routes())
         .merge(ratings::routes())
+        .merge(feeds::routes())
         .merge(profile::routes())
         .merge(settings::routes())
         .merge(jobs::routes())
@@ -422,6 +424,7 @@ struct OverviewTemplate {
     ratings: Vec<LabelCount>,
     ratings_total: i64,
     access_requests: i64,
+    feed_candidates: i64,
     unrated: Vec<UnratedPick>,
     active_jobs: Vec<JobLine>,
     finished_jobs: Vec<JobLine>,
@@ -448,6 +451,7 @@ async fn overview(
             .fetch_one(db.pool())
             .await
             .map_err(db_err)?;
+    let feed_candidates = crate::discovery::count(db, "candidate").await?;
     let unrated = unrated_picks(db).await?;
     let (active_jobs, finished_jobs) = jobs_summary(db, &config).await?;
     let sparklines = overview_sparklines(db).await?;
@@ -466,6 +470,7 @@ async fn overview(
         ratings,
         ratings_total,
         access_requests,
+        feed_candidates,
         unrated,
         active_jobs,
         finished_jobs,
