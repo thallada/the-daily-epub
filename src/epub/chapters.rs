@@ -43,6 +43,7 @@ struct IndexEntry {
     reading_minutes: i64,
     summary: String,
     why: Option<String>,
+    understanding: Option<String>,
 }
 
 struct IndexSection {
@@ -79,6 +80,7 @@ struct ArticleChapter {
     byline: Option<String>,
     meta_line: String,
     social_line: Option<String>,
+    understanding: Option<String>,
     why: Option<String>,
     summary: Option<String>,
     excerpt_only: bool,
@@ -191,6 +193,84 @@ pub fn social_line(social: &[SocialRef]) -> Option<String> {
     }
 }
 
+fn facet_label(token: &str) -> Option<String> {
+    let label = match token {
+        "software_engineering" => "Software engineering",
+        "ai_ml" => "AI & ML",
+        "science_space" => "Science & space",
+        "culture_arts" => "Culture & arts",
+        "books_writing" => "Books & writing",
+        "games" => "Games",
+        "hardware" => "Hardware",
+        "internet_web" => "Internet & web",
+        "business_economics" => "Business & economics",
+        "politics_policy" => "Politics & policy",
+        "boston_new_england" => "Boston & New England",
+        "outdoors_lifestyle" => "Outdoors & lifestyle",
+        "history" => "History",
+        "reported_news" => "reported news",
+        "analysis_essay" => "analysis essay",
+        "how_to_technical" => "how-to",
+        "first_hand_account" => "first-hand account",
+        "announcement_roundup" => "announcement",
+        "code_repository" => "code repository",
+        "documentation_reference" => "documentation",
+        "tool_or_product_page" => "product page",
+        "discussion_thread" => "discussion thread",
+        "paper_or_report" => "paper or report",
+        "interview_or_transcript" => "interview",
+        "video_or_podcast" => "video or podcast",
+        "fiction_or_humor" => "fiction or humor",
+        "brief" => "brief",
+        "standard" => "standard depth",
+        "deep" => "in depth",
+        "nontechnical" => "non-technical",
+        "light" => "lightly technical",
+        "intermediate" => "moderately technical",
+        "advanced" => "highly technical",
+        "other" => return None,
+        unknown => return Some(unknown.replace('_', " ")),
+    };
+    Some(label.to_string())
+}
+
+/// One muted line saying what the pipeline understood about an article: the
+/// deep-assessment facets, the extracted topics and the best-matching reader
+/// interests. `None` when there is nothing to say (no deep read, no interests).
+pub fn understanding_line(pick: &Pick) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(deep) = &pick.llm {
+        let facets = &deep.facets;
+        for token in [
+            facets.topic_group.as_deref(),
+            facets.format.as_deref(),
+            facets.depth.as_deref(),
+            facets.technicality.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(label) = facet_label(token).filter(|label| !label.is_empty()) {
+                parts.push(label);
+            }
+        }
+        if let Some(topics) = &facets.specific_topics {
+            let topics = topics
+                .iter()
+                .map(|topic| topic.trim())
+                .filter(|topic| !topic.is_empty())
+                .collect::<Vec<_>>();
+            if !topics.is_empty() {
+                parts.push(format!("Topics: {}", topics.join(", ")));
+            }
+        }
+    }
+    if !pick.top_interests.is_empty() {
+        parts.push(format!("Interests: {}", pick.top_interests.join(", ")));
+    }
+    (!parts.is_empty()).then(|| parts.join(" \u{00b7} "))
+}
+
 fn article_href(pick: &Pick) -> String {
     format!("{}.xhtml", pick.article.chapter_id())
 }
@@ -298,6 +378,7 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
                 reading_minutes: pick.article.reading_minutes(),
                 summary: summary_for(issue, pick).unwrap_or_default().to_string(),
                 why: pick.why.clone(),
+                understanding: understanding_line(pick),
             })
             .collect();
         sections.push(IndexSection { name, entries });
@@ -312,6 +393,7 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
                 reading_minutes: 3,
                 summary: "The day's events, as recorded by the Current Events portal.".into(),
                 why: None,
+                understanding: None,
             }],
         });
     }
@@ -386,6 +468,7 @@ pub fn render_article(
         byline: article.author.as_ref().map(|a| format!("By {a}")),
         meta_line: meta_parts.join(" \u{00b7} "),
         social_line: social_line(&article.social),
+        understanding: understanding_line(pick),
         why: pick.why.clone(),
         summary: summary_for(issue, pick).map(str::to_string),
         excerpt_only: article.excerpt_only,
@@ -710,6 +793,46 @@ mod tests {
     }
 
     #[test]
+    fn understanding_line_includes_facets_topics_and_interests() {
+        let issue = issue();
+        assert_eq!(
+            understanding_line(&issue.lineup.picks[0]).as_deref(),
+            Some(
+                "Software engineering · analysis essay · in depth · highly technical · Topics: copy-on-write, ZFS · Interests: Filesystems, Rust"
+            )
+        );
+    }
+
+    #[test]
+    fn understanding_line_is_none_without_a_deep_read_or_interests() {
+        let issue = issue();
+        assert!(understanding_line(&issue.lineup.picks[1]).is_none());
+    }
+
+    #[test]
+    fn understanding_line_can_contain_only_interests() {
+        let issue = issue();
+        let mut pick = issue.lineup.picks[1].clone();
+        pick.top_interests = vec!["Rust".into()];
+        assert_eq!(
+            understanding_line(&pick).as_deref(),
+            Some("Interests: Rust")
+        );
+    }
+
+    #[test]
+    fn understanding_line_skips_other_topic_group() {
+        let issue = issue();
+        let mut pick = issue.lineup.picks[0].clone();
+        pick.llm.as_mut().unwrap().facets = crate::types::Facets {
+            topic_group: Some("other".into()),
+            ..crate::types::Facets::default()
+        };
+        pick.top_interests.clear();
+        assert!(understanding_line(&pick).is_none());
+    }
+
+    #[test]
     fn hrefs_are_deterministic() {
         let issue = issue();
         let pick = &issue.lineup.picks[0];
@@ -743,6 +866,12 @@ mod tests {
         assert!(chapter.xhtml.contains("6 min read"));
         assert!(chapter.xhtml.contains("What it argues"));
         assert!(chapter.xhtml.contains("A short abstract"));
+        // The lead's understanding line is on the index; the second pick has none.
+        assert_eq!(
+            chapter.xhtml.matches("class=\"index-understood\"").count(),
+            1
+        );
+        assert!(chapter.xhtml.contains("Interests: Filesystems, Rust"));
         // Titles are escaped (askama emits numeric references), never injected raw.
         assert!(chapter.xhtml.contains("A Niche Delight &#38; Other Tales"));
         assert_xml_ok(&chapter.xhtml);
@@ -772,6 +901,20 @@ mod tests {
         assert!(chapter.xhtml.contains("/r/2026-08-15/1/down?t="));
         assert!(chapter.xhtml.contains("Read online"));
         assert!(chapter.xhtml.contains("href=\"disc-1001.xhtml\""));
+        assert!(chapter.xhtml.contains("class=\"understood\""));
+        assert!(chapter.xhtml.contains(
+            "Software engineering · analysis essay · in depth · highly technical · Topics: copy-on-write, ZFS · Interests: Filesystems, Rust"
+        ));
+        let second = render_article(
+            &issue,
+            &issue.lineup.picks[1],
+            &[],
+            Edition::Standard,
+            "https://daily.hallada.net",
+            Some("s3cret"),
+        )
+        .unwrap();
+        assert!(!second.xhtml.contains("class=\"understood\""));
         // The un-downloaded image degrades to a placeholder.
         assert!(
             chapter

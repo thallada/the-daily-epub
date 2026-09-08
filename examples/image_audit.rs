@@ -372,6 +372,7 @@ fn pick_for(target: &Target, content_html: String) -> Pick {
         why: None,
         summary: None,
         llm: None,
+        top_interests: Vec::new(),
         discussion: None,
     }
 }

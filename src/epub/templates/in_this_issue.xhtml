@@ -16,6 +16,9 @@
 {% if let Some(text) = entry.why %}
           <p class="index-why"><em>Why it&#39;s here: {{ text }}</em></p>
 {% endif %}
+{% if let Some(line) = entry.understanding %}
+          <p class="index-understood">{{ line }}</p>
+{% endif %}
         </li>
 {% endfor %}
       </ul>

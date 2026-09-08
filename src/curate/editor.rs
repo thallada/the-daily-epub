@@ -588,6 +588,12 @@ fn assemble(
                 why: item.why,
                 summary: None,
                 llm: candidate.assessment.deep,
+                top_interests: candidate
+                    .signals
+                    .top_interests
+                    .iter()
+                    .map(|interest| interest.name.clone())
+                    .collect(),
                 discussion: None,
             }
         })

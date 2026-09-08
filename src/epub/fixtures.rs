@@ -88,7 +88,25 @@ pub fn issue() -> Issue {
         is_lead: true,
         why: Some("The systems story with enough operational detail to matter".into()),
         summary: Some("What it argues, and why it is worth the time.".into()),
-        llm: None,
+        llm: Some(Deep {
+            quality: 9.0,
+            fit: 9.0,
+            category: Some("Tech & Engineering".into()),
+            rationale: "Detailed systems analysis".into(),
+            paywalled_guess: false,
+            facets: Facets {
+                format: Some("analysis_essay".into()),
+                depth: Some("deep".into()),
+                topic_group: Some("software_engineering".into()),
+                technicality: Some("advanced".into()),
+                specific_topics: Some(vec!["copy-on-write".into(), "ZFS".into()]),
+                ..Facets::default()
+            },
+            model: "fixture-model".into(),
+            prompt_version: 2,
+            assessed_at: timestamp(),
+        }),
+        top_interests: vec!["Filesystems".into(), "Rust".into()],
         discussion: Some(discussion(1, 1001)),
     };
     let second = Pick {
@@ -99,6 +117,7 @@ pub fn issue() -> Issue {
         why: Some("A small-scene delight outside the usual technical orbit".into()),
         summary: None,
         llm: None,
+        top_interests: Vec::new(),
         discussion: None,
     };
     let mut summaries = BTreeMap::new();

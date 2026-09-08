@@ -78,11 +78,17 @@ img {
 .stats,
 .meta,
 .social,
+.understood,
+.index-understood,
 .index-meta,
 .discussion-note,
 .attribution,
 .comment-meta {
   font-size: 0.85em;
+}
+
+.understood {
+  margin: 0 0 0.5em 0;
 }
 
 .dateline,
@@ -122,7 +128,8 @@ ul.index-list {
 
 .index-title,
 .index-meta,
-.index-summary {
+.index-summary,
+.index-understood {
   margin: 0;
 }
 

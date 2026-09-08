@@ -338,6 +338,11 @@ pub struct Pick {
     /// Newspaper-abstract summary from stage C; `None` until editorial runs.
     pub summary: Option<String>,
     pub llm: Option<Deep>,
+    /// Names of the reader interests this article matched best, strongest first
+    /// (at most three), recorded by the signals stage. Empty for issues published
+    /// before this field existed and when embeddings were unavailable.
+    #[serde(default)]
+    pub top_interests: Vec<String>,
     /// Rendered comment chapter, when the article had social refs (§3.7).
     pub discussion: Option<Discussion>,
 }

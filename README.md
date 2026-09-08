@@ -13,11 +13,12 @@ the summaries and *The Brief*. It assembles two EPUB editions (a standard one
 and one tuned for the Xteink X4 e-ink reader), converts the X4 edition to XTC, and
 publishes the lot over its own OPDS catalog — which doubles as a
 [BookOrbit](https://github.com/thallada/bookorbit) watched folder if you run one.
-Each article chapter ends with Loved it / Good / Not for me links that feed back
-into tomorrow's curation, and a short *Behind the paper* chapter before the
-colophon says what the run considered, how the deep set was admitted, whether
-the learned signals were active, the ten highest-utility near misses, and what
-it all cost.
+Each article chapter ends with a one-line note of what the pipeline made of the
+piece (topic, format, depth, and the reader interests it matched) and Loved it /
+Good / Not for me links that feed back into tomorrow's curation; a short *Behind
+the paper* chapter before the colophon says what the run considered, how the
+deep set was admitted, whether the learned signals were active, the ten
+highest-utility near misses, and what it all cost.
 
 Steady-state cost is roughly **$1/day**: $0.05–0.30 in DeepSeek tokens plus
 ~$0.50–0.80 for the Claude editor and a few cents of Voyage AI embeddings, each

@@ -154,6 +154,16 @@ hr.rule {
   font-variant: small-caps;
 }
 
+.understood, .index-understood {
+  margin: 0 0 0.75em 0;
+  font-size: 0.8em;
+  color: #444444;
+}
+
+.index-understood {
+  margin: 0.2em 0 0 0;
+}
+
 .summary {
   margin: 0.5em 0 0 0;
   font-style: italic;

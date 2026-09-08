@@ -149,6 +149,7 @@ pub async fn load(
                 why: pick_row.get("why"),
                 summary,
                 llm: None,
+                top_interests: Vec::new(),
                 discussion: None,
             });
         }
@@ -859,6 +860,7 @@ struct FullEntry {
     is_lead: bool,
     summary: String,
     why: Option<String>,
+    understanding: Option<String>,
     rating: Option<RatingWidget>,
 }
 
@@ -927,6 +929,7 @@ struct ArticleTemplate {
     meta_line: String,
     why: Option<String>,
     social_line: Option<String>,
+    understanding: Option<String>,
     summary: Option<String>,
     excerpt_only: bool,
     body_html: String,
@@ -1002,6 +1005,7 @@ pub async fn render_full(
                         .unwrap_or_default()
                         .to_string(),
                     why: pick.why.clone(),
+                    understanding: chapters::understanding_line(pick),
                     rating: is_admin.then(|| {
                         RatingWidget::for_issue(
                             pick.article.id,
@@ -1103,6 +1107,7 @@ pub async fn article(
         ),
         why: pick.why.clone(),
         social_line: chapters::social_line(&article.social),
+        understanding: chapters::understanding_line(pick),
         summary: summary_for(&view.issue, pick).map(str::to_string),
         excerpt_only: article.excerpt_only,
         body_html: prepare_body(&article.content_html),
@@ -1962,6 +1967,7 @@ mod tests {
         assert!(issue.contains("What it argues"));
         assert!(issue.contains("A short abstract for the second piece"));
         assert!(issue.contains("Why it"));
+        assert!(issue.contains("Interests: Filesystems, Rust"));
         assert!(issue.contains("World Briefing"));
         assert!(issue.contains("Behind the paper"));
         assert!(!issue.contains("Was this a good pick?"));

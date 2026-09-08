@@ -400,6 +400,7 @@ mod tests {
             why: Some(format!("the {title} piece you'd argue with")),
             summary: None,
             llm: None,
+            top_interests: Vec::new(),
             discussion: None,
         }
     }

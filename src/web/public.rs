@@ -54,6 +54,7 @@ pub struct PublicEntry {
     pub word_count: i64,
     pub summary: Option<String>,
     pub why: Option<String>,
+    pub understanding: Option<String>,
     pub comment_links: Vec<CommentLink>,
     pub is_lead: bool,
 }
@@ -132,6 +133,7 @@ impl From<&Issue> for PublicIssue {
                                     .filter(|summary| !summary.is_empty())
                                     .map(str::to_string),
                                 why: pick.why.clone(),
+                                understanding: crate::epub::chapters::understanding_line(pick),
                                 comment_links,
                                 is_lead: pick.is_lead,
                             }
@@ -432,13 +434,21 @@ mod tests {
     fn public_issue_shows_summaries_and_why_but_no_bodies() {
         let source = crate::epub::fixtures::issue();
         let public = PublicIssue::from(&source);
-        let html = FeedEntryTemplate { issue: &public }.render().unwrap();
+        let html = IssuePublicTemplate {
+            page: Page::new("Test issue", None, "latest"),
+            issue: public,
+            downloads: Vec::new(),
+            empty: false,
+        }
+        .render()
+        .unwrap();
         assert!(html.contains("The Lead Story"));
         assert!(html.contains("Hacker News"));
         assert!(html.contains("What it argues, and why it is worth the time."));
         assert!(html.contains("A short abstract for the second piece."));
         assert!(html.contains("The systems story with enough operational detail to matter"));
         assert!(html.contains("A small-scene delight outside the usual technical orbit"));
+        assert!(html.contains("Interests: Filesystems, Rust"));
         for private in [
             "Two stories today",
             "Body of",

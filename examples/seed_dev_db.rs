@@ -154,6 +154,10 @@ fn body_html(title: &str, words: i64) -> String {
 
 fn dev_issue(date: Date, issue_number: i64, generated_at: Timestamp) -> Issue {
     let mut issue = fixtures::issue();
+    let deep = issue.lineup.picks[0]
+        .llm
+        .clone()
+        .expect("the fixture lead carries a deep assessment");
     issue.meta.date = date;
     issue.meta.issue_number = issue_number;
     issue.meta.generated_at = generated_at;
@@ -173,6 +177,59 @@ fn dev_issue(date: Date, issue_number: i64, generated_at: Timestamp) -> Issue {
             .count() as i64;
         let article = story_article(index, story);
         summaries.insert(article.id, summary.to_string());
+        // A few picks carry facets and matched interests so the
+        // "what the pipeline understood" line shows up; the rest exercise the
+        // nothing-to-say path.
+        let understood = match index {
+            0 => Some((
+                ("software_engineering", "analysis_essay", "deep", "advanced"),
+                vec!["copy-on-write", "ZFS", "filesystem design"],
+                vec!["Filesystems", "Rust", "Systems programming"],
+            )),
+            1 => Some((
+                (
+                    "software_engineering",
+                    "analysis_essay",
+                    "standard",
+                    "intermediate",
+                ),
+                vec!["feature flags", "technical debt"],
+                vec!["Software craft"],
+            )),
+            3 => Some((
+                (
+                    "software_engineering",
+                    "first_hand_account",
+                    "deep",
+                    "advanced",
+                ),
+                vec!["Raft", "leader election", "incident review"],
+                vec![],
+            )),
+            4 => Some((
+                ("history", "analysis_essay", "deep", "nontechnical"),
+                vec!["map projections", "cartography"],
+                vec!["Maps", "History of science"],
+            )),
+            _ => None,
+        };
+        let (llm, top_interests) = match understood {
+            Some(((topic_group, format, depth, technicality), topics, interests)) => (
+                Some(daily_epub::types::Deep {
+                    facets: daily_epub::types::Facets {
+                        format: Some(format.into()),
+                        depth: Some(depth.into()),
+                        topic_group: Some(topic_group.into()),
+                        technicality: Some(technicality.into()),
+                        specific_topics: Some(topics.into_iter().map(String::from).collect()),
+                        ..Default::default()
+                    },
+                    ..deep.clone()
+                }),
+                interests.into_iter().map(String::from).collect(),
+            ),
+            None => (None, Vec::new()),
+        };
         picks.push(Pick {
             discussion: (index == 0)
                 .then(|| fixtures::discussion(article.id, article.best_entry_id)),
@@ -182,7 +239,8 @@ fn dev_issue(date: Date, issue_number: i64, generated_at: Timestamp) -> Issue {
             is_lead: index == 0,
             why: Some(why.to_string()),
             summary: Some(summary.to_string()),
-            llm: None,
+            llm,
+            top_interests,
         });
     }
     issue.meta.article_count = picks.len() as i64;
