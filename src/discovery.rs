@@ -1049,6 +1049,7 @@ mod tests {
             first_seen: ts("2026-09-07T00:00:00Z"),
             url: url.into(),
             author: None,
+            publication: None,
             feed_id: 1,
             feed_title: "Feed".into(),
             category: None,

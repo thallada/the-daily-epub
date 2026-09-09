@@ -763,6 +763,7 @@ mod tests {
             first_seen: "2026-08-15T00:00:00Z".parse().unwrap(),
             url: format!("https://example.com/{id}"),
             author: None,
+            publication: None,
             feed_id: feeds.first().copied().unwrap_or(0),
             feed_title: String::new(),
             category: None,

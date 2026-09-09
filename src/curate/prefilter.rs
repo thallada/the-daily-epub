@@ -154,6 +154,7 @@ pub(crate) mod tests {
             first_seen: ts(),
             url: format!("https://example.com/{id}"),
             author: Some("A. Writer".into()),
+            publication: None,
             feed_id: 7,
             feed_title: "Some Blog".into(),
             category: Some("Tech".into()),

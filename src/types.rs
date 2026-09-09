@@ -92,6 +92,8 @@ pub struct Extracted {
     pub content_html: String,
     /// Author discovered in the fetched page, if any.
     pub author: Option<String>,
+    /// Site name discovered in the fetched page, if any.
+    pub publication: Option<String>,
     pub word_count: i64,
     /// True when we only have an excerpt/paywall stub — penalized in pre-filter.
     pub excerpt_only: bool,
@@ -124,6 +126,8 @@ pub struct Article {
     // --- joined / derived fields ---
     pub url: String,
     pub author: Option<String>,
+    /// Page-extracted site name persisted on `articles`.
+    pub publication: Option<String>,
     pub feed_id: FeedId,
     pub feed_title: String,
     pub category: Option<String>,
@@ -150,6 +154,19 @@ impl Article {
         self.sources.iter().any(|s| s.kind == kind)
     }
 
+    /// What to show after the feed name: the page's site name, else the domain;
+    /// nothing when it would just repeat the feed name.
+    pub fn publication_label(&self) -> Option<String> {
+        let publication = self
+            .publication
+            .clone()
+            .or_else(|| domain(&self.canonical_url))?;
+        (!publication
+            .trim()
+            .eq_ignore_ascii_case(self.feed_title.trim()))
+        .then_some(publication)
+    }
+
     /// Stable EPUB chapter id used by TOC and rating links (implementation notes §12).
     pub fn chapter_id(&self) -> String {
         format!("art-{}", self.best_entry_id)
@@ -159,6 +176,14 @@ impl Article {
 /// Estimated reading time at 220 wpm, minimum one minute.
 pub fn reading_minutes(word_count: i64) -> i64 {
     (word_count.max(0) as f64 / 220.0).ceil().max(1.0) as i64
+}
+
+/// URL host without a leading `www.`.
+pub fn domain(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()?
+        .host_str()
+        .map(|host| host.strip_prefix("www.").unwrap_or(host).to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -845,6 +870,63 @@ mod tests {
             item_url: None,
             fetched_at: ts(),
         }
+    }
+
+    fn publication_article() -> Article {
+        Article {
+            id: 1,
+            canonical_url: "https://www.example.com/post".into(),
+            title: "A post".into(),
+            best_entry_id: 1,
+            content_html: String::new(),
+            word_count: 1,
+            excerpt_only: false,
+            image_count: 0,
+            sources: Vec::new(),
+            first_seen: ts(),
+            url: "https://www.example.com/post".into(),
+            author: None,
+            publication: None,
+            feed_id: 1,
+            feed_title: "A Feed".into(),
+            category: None,
+            published_at: None,
+            comments_url: None,
+            image_urls: Vec::new(),
+            social: Vec::new(),
+            extract_method: ExtractMethod::Readability,
+        }
+    }
+
+    #[test]
+    fn publication_label_prefers_the_stored_publication() {
+        let mut article = publication_article();
+        article.publication = Some("Example Journal".into());
+        assert_eq!(
+            article.publication_label().as_deref(),
+            Some("Example Journal")
+        );
+    }
+
+    #[test]
+    fn publication_label_falls_back_to_the_domain_without_www() {
+        let article = publication_article();
+        assert_eq!(article.publication_label().as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn publication_label_omits_a_publication_matching_the_feed() {
+        let mut article = publication_article();
+        article.feed_title = "  example JOURNAL ".into();
+        article.publication = Some(" Example Journal ".into());
+        assert_eq!(article.publication_label(), None);
+    }
+
+    #[test]
+    fn publication_label_omits_a_domain_matching_the_feed() {
+        let mut article = publication_article();
+        article.feed_title = " EXAMPLE.com ".into();
+        assert_eq!(article.publication_label(), None);
     }
 
     #[test]

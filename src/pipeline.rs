@@ -1530,6 +1530,7 @@ mod tests {
             first_seen: now(),
             url,
             author: None,
+            publication: None,
             feed_id: 100 + entry_id,
             feed_title: format!("Feed {entry_id}"),
             category: None,

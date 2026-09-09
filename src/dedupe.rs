@@ -409,6 +409,7 @@ fn build_article(members: Vec<(Entry, String)>, feed_urls: &FeedUrls) -> Article
         first_seen,
         url: best_entry.url.clone(),
         author,
+        publication: None,
         feed_id: best_entry.feed_id,
         feed_title: best_entry
             .feed_title

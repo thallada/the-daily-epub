@@ -35,6 +35,7 @@ pub fn article(id: ArticleId, entry_id: EntryId, title: &str) -> Article {
         first_seen: timestamp(),
         url: format!("https://example.com/{entry_id}"),
         author: Some("A. Writer".into()),
+        publication: None,
         feed_id: 7,
         feed_title: "Example Feed".into(),
         category: Some("Tech".into()),

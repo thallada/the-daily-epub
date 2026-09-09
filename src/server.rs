@@ -972,6 +972,7 @@ mod tests {
                 first_seen: ts("2026-08-15T05:30:00Z"),
                 url: "https://example.com/1".into(),
                 author: None,
+                publication: None,
                 feed_id: 7,
                 feed_title: "Hacker News".into(),
                 category: None,

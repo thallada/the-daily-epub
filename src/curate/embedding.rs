@@ -1089,6 +1089,7 @@ mod tests {
             first_seen: "2026-08-15T00:00:00Z".parse().unwrap(),
             url: format!("https://example.com/{id}"),
             author: Some("Secret Author".into()),
+            publication: None,
             feed_id: 9,
             feed_title: "Secret Feed".into(),
             category: None,

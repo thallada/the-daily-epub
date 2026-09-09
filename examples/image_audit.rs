@@ -358,6 +358,7 @@ fn pick_for(target: &Target, content_html: String) -> Pick {
             first_seen: "2026-08-15T05:30:00Z".parse().unwrap(),
             url: target.url.clone(),
             author: None,
+            publication: None,
             feed_id: 1,
             feed_title: host(&target.url),
             category: None,

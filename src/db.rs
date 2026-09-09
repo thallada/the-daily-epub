@@ -292,16 +292,18 @@ impl Db {
     /// Upsert a deduped cluster by canonical URL; returns its `articles.id`.
     ///
     /// Most denormalized fields on [`Article`] come from the joined `entries`
-    /// row when loading; the extracted author is stored on `articles`.
+    /// row when loading; extracted page metadata is stored on `articles`.
     pub async fn upsert_article(&self, article: &Article) -> Result<ArticleId> {
         let sources = serde_json::to_string(&article.sources).unwrap_or_else(|_| "[]".into());
         let row = sqlx::query(
-            "INSERT INTO articles (canonical_url, title, author, best_entry_id, content_html,
-                                   word_count, excerpt_only, image_count, sources_json, first_seen)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO articles (canonical_url, title, author, publication, best_entry_id,
+                                   content_html, word_count, excerpt_only, image_count,
+                                   sources_json, first_seen)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(canonical_url) DO UPDATE SET
                  title = excluded.title,
                  author = excluded.author,
+                 publication = excluded.publication,
                  best_entry_id = excluded.best_entry_id,
                  content_html = excluded.content_html,
                  word_count = excluded.word_count,
@@ -313,6 +315,7 @@ impl Db {
         .bind(&article.canonical_url)
         .bind(&article.title)
         .bind(&article.author)
+        .bind(&article.publication)
         .bind((article.best_entry_id != 0).then_some(article.best_entry_id))
         .bind(&article.content_html)
         .bind(article.word_count)
@@ -889,7 +892,8 @@ macro_rules! article_select {
        a.word_count AS word_count, a.excerpt_only AS excerpt_only,
        a.image_count AS image_count, a.sources_json AS sources_json,
        a.first_seen AS first_seen,
-       e.url AS entry_url, COALESCE(a.author, e.author) AS author, e.feed_id AS feed_id,
+       e.url AS entry_url, COALESCE(a.author, e.author) AS author,
+       a.publication AS publication, e.feed_id AS feed_id,
        e.feed_title AS feed_title, e.category AS category,
        e.published_at AS published_at, e.comments_url AS comments_url
   FROM articles a LEFT JOIN entries e ON e.id = a.best_entry_id
@@ -967,6 +971,7 @@ fn article_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Article> {
             .get::<Option<String>, _>("entry_url")
             .unwrap_or_else(|| row.get("canonical_url")),
         author: row.get("author"),
+        publication: row.get("publication"),
         feed_id: row.get::<Option<i64>, _>("feed_id").unwrap_or(0),
         feed_title: row
             .get::<Option<String>, _>("feed_title")
@@ -1193,6 +1198,7 @@ mod tests {
             first_seen: ts("2026-08-15T05:30:00Z"),
             url: "https://example.com/1".into(),
             author: Some("Page Writer".into()),
+            publication: Some("Example Gazette".into()),
             feed_id: 7,
             feed_title: "Hacker News".into(),
             category: None,
@@ -1224,6 +1230,7 @@ mod tests {
         assert_eq!(loaded.social[0].score, 342);
         assert_eq!(loaded.feed_title, "Hacker News");
         assert_eq!(loaded.author.as_deref(), Some("Page Writer"));
+        assert_eq!(loaded.publication.as_deref(), Some("Example Gazette"));
         // The batched lookup agrees with the single one and skips unknown ids.
         let batch = db.get_articles(&[id, 9_999]).await.unwrap();
         assert_eq!(batch.len(), 1);
@@ -1261,6 +1268,7 @@ mod tests {
             first_seen: ts("2026-09-06T00:00:00Z"),
             url: "https://example.com/imported".into(),
             author: None,
+            publication: None,
             feed_id: 0,
             feed_title: "Imported".into(),
             category: None,
@@ -1479,6 +1487,7 @@ mod tests {
             first_seen: ts("2026-08-15T05:30:00Z"),
             url: "https://example.com/1".into(),
             author: None,
+            publication: None,
             feed_id: 7,
             feed_title: "Hacker News".into(),
             category: None,
@@ -1596,6 +1605,7 @@ mod tests {
             first_seen: ts("2026-08-15T05:30:00Z"),
             url: "https://example.com/1".into(),
             author: Some("Page Writer".into()),
+            publication: None,
             feed_id: 7,
             feed_title: "Hacker News".into(),
             category: None,

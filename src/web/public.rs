@@ -6,7 +6,7 @@ use axum_login::tower_sessions::Session;
 use jiff::civil::Date;
 
 use crate::server::AppState;
-use crate::types::{Issue, SocialSource};
+use crate::types::{Issue, SocialSource, domain};
 use crate::web::issue::{self, Download};
 use crate::web::session::{AuthSession, Viewer};
 use crate::web::{Html, Page, WebError};
@@ -116,7 +116,7 @@ impl From<&Issue> for PublicIssue {
                                 url: article.canonical_url.clone(),
                                 author: article.author.clone(),
                                 source: article.feed_title.clone(),
-                                domain: domain(&article.canonical_url),
+                                domain: domain(&article.canonical_url).unwrap_or_default(),
                                 reading_minutes: article.reading_minutes(),
                                 word_count: article.word_count,
                                 summary: pick
@@ -167,14 +167,6 @@ impl PublicIssue {
             self.sections.len(),
         )
     }
-}
-
-fn domain(raw: &str) -> String {
-    url::Url::parse(raw)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .map(|host| host.strip_prefix("www.").unwrap_or(&host).to_string())
-        .unwrap_or_default()
 }
 
 #[derive(Template)]

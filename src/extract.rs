@@ -198,6 +198,7 @@ impl Extractor {
         Extracted {
             content_html,
             author: None,
+            publication: None,
             word_count: words,
             excerpt_only,
             image_urls,
@@ -280,11 +281,12 @@ impl Extractor {
             body.extend_from_slice(&chunk);
         }
         let html = String::from_utf8_lossy(&body).into_owned();
-        let (title, html, author) = readable_page(&html, &final_url)?;
+        let (title, html, author, site_name) = readable_page(&html, &final_url)?;
         Ok(Page {
             title,
             html,
             author,
+            site_name,
             final_url,
         })
     }
@@ -297,6 +299,7 @@ impl Extractor {
         Extracted {
             content_html: clean,
             author: page.author.clone(),
+            publication: page.site_name.clone(),
             word_count: words,
             excerpt_only: looks_paywalled(requested_url, words, &self.paywall_domains),
             image_urls,
@@ -314,6 +317,8 @@ pub struct Page {
     pub html: String,
     /// Readability's normalized byline for the page.
     pub author: Option<String>,
+    /// Readability's normalized site name for the page.
+    pub site_name: Option<String>,
     /// Where the fetch ended up, after any redirects — the base for relative URLs.
     pub final_url: String,
 }
@@ -326,10 +331,13 @@ pub struct Page {
 /// their image with them) and its lazy-image heuristic overwrites a perfectly
 /// good `src` with whatever other attribute happens to contain `.jpg`.
 pub fn readability(html: &str, url: &str) -> Result<String, ExtractError> {
-    readable_page(html, url).map(|(_, content, _)| content)
+    readable_page(html, url).map(|(_, content, _, _)| content)
 }
 
-fn readable_page(html: &str, url: &str) -> Result<(String, String, Option<String>), ExtractError> {
+fn readable_page(
+    html: &str,
+    url: &str,
+) -> Result<(String, String, Option<String>, Option<String>), ExtractError> {
     let html = prepare_for_readability(html);
     let config = dom_smoothie::Config {
         max_elements_to_parse: 60_000,
@@ -345,17 +353,18 @@ fn readable_page(html: &str, url: &str) -> Result<(String, String, Option<String
     Ok((
         parsed.title.trim().to_string(),
         content,
-        normalize_author(parsed.byline),
+        normalize_meta_text(parsed.byline),
+        normalize_meta_text(parsed.site_name),
     ))
 }
 
-fn normalize_author(author: Option<String>) -> Option<String> {
-    let author = author?;
-    if author.chars().any(|c| matches!(c, '\n' | '\r')) {
+fn normalize_meta_text(text: Option<String>) -> Option<String> {
+    let text = text?;
+    if text.chars().any(|c| matches!(c, '\n' | '\r')) {
         return None;
     }
-    let author = author.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!author.is_empty() && author.chars().count() <= 100).then_some(author)
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty() && text.chars().count() <= 100).then_some(text)
 }
 
 /// Copy an [`Extracted`] onto its [`Article`].
@@ -370,6 +379,9 @@ pub fn apply(article: &mut Article, extracted: Extracted) {
         && (article.author.is_none() || !article.came_via(SourceKind::Feed))
     {
         article.author = Some(author);
+    }
+    if let Some(publication) = extracted.publication {
+        article.publication = Some(publication);
     }
 }
 
@@ -518,6 +530,7 @@ mod tests {
             first_seen: ts(),
             url: url.into(),
             author: None,
+            publication: None,
             feed_id: 1,
             feed_title: "Feed".into(),
             category: None,
@@ -745,10 +758,11 @@ mod tests {
              <article><h1>A Post</h1><p>{paragraph}</p><p>{paragraph}</p></article>\
              <footer>© 2026</footer></body></html>"
         );
-        let (title, content, author) =
+        let (title, content, author, site_name) =
             readable_page(&html, "https://blog.dev/p").expect("main content");
         assert_eq!(title, "A Post");
         assert_eq!(author, None);
+        assert_eq!(site_name, None);
         assert!(content.contains("Readability keeps the body copy"));
         let clean = sanitize_with_base(&content, "https://blog.dev/p");
         assert!(word_count(&clean) > 200);
@@ -756,53 +770,60 @@ mod tests {
     }
 
     #[test]
-    fn readable_page_plumbs_meta_author_through_extracted() {
+    fn readable_page_plumbs_meta_author_and_og_site_name_through_extracted() {
         let html = format!(
             "<html><head><title>A Post</title>\
-             <meta name=\"author\" content=\"  Jane   Dev  \"></head>\
+             <meta name=\"author\" content=\"  Jane   Dev  \">\
+             <meta property=\"og:site_name\" content=\"  Dev   Journal  \"></head>\
              <body><article><h1>A Post</h1><p>{}</p></article></body></html>",
             "Substantial body copy for readability. ".repeat(40)
         );
-        let (title, content, author) =
+        let (title, content, author, site_name) =
             readable_page(&html, "https://blog.dev/p").expect("main content");
         let page = Page {
             title,
             html: content,
             author,
+            site_name,
             final_url: "https://blog.dev/p".into(),
         };
         let extracted = Extractor::offline(vec![]).finish_readable(&page.final_url, &page);
         assert_eq!(extracted.author.as_deref(), Some("Jane Dev"));
+        assert_eq!(extracted.publication.as_deref(), Some("Dev Journal"));
     }
 
     #[test]
-    fn readable_page_plumbs_json_ld_author_through_extracted() {
+    fn readable_page_plumbs_json_ld_author_and_publisher_through_extracted() {
         let html = format!(
             r#"<html><head><title>A Post</title>
              <script type="application/ld+json">{{
                "@context":"https://schema.org", "@type":"Article",
-               "headline":"A Post", "author":{{"@type":"Person","name":"Alex Writer"}}
+               "headline":"A Post", "author":{{"@type":"Person","name":"Alex Writer"}},
+               "publisher":{{"@type":"Organization","name":"Example Gazette"}}
              }}</script></head>
              <body><article><h1>A Post</h1><p>{}</p></article></body></html>"#,
             "Substantial body copy for readability. ".repeat(40)
         );
-        let (title, content, author) =
+        let (title, content, author, site_name) =
             readable_page(&html, "https://blog.dev/p").expect("main content");
         let page = Page {
             title,
             html: content,
             author,
+            site_name,
             final_url: "https://blog.dev/p".into(),
         };
         let extracted = Extractor::offline(vec![]).finish_readable(&page.final_url, &page);
         assert_eq!(extracted.author.as_deref(), Some("Alex Writer"));
+        assert_eq!(extracted.publication.as_deref(), Some("Example Gazette"));
     }
 
     #[test]
-    fn apply_uses_page_author_with_feed_precedence() {
+    fn apply_uses_page_metadata() {
         let extracted = |author: &str| Extracted {
             content_html: "<p>body</p>".into(),
             author: Some(author.into()),
+            publication: Some("Example Gazette".into()),
             word_count: 1,
             excerpt_only: false,
             image_urls: vec![],
@@ -814,6 +835,7 @@ mod tests {
         aggregator.author = Some("Submitter".into());
         apply(&mut aggregator, extracted("Page Writer"));
         assert_eq!(aggregator.author.as_deref(), Some("Page Writer"));
+        assert_eq!(aggregator.publication.as_deref(), Some("Example Gazette"));
 
         let mut direct = article("https://blog.dev/direct", "");
         direct.author = Some("Feed Writer".into());
@@ -826,13 +848,13 @@ mod tests {
     }
 
     #[test]
-    fn implausible_page_authors_are_dropped() {
+    fn implausible_page_metadata_is_dropped() {
         assert_eq!(
-            normalize_author(Some("  Jane   Dev  ".into())).as_deref(),
+            normalize_meta_text(Some("  Jane   Dev  ".into())).as_deref(),
             Some("Jane Dev")
         );
-        assert_eq!(normalize_author(Some("Jane\nDev".into())), None);
-        assert_eq!(normalize_author(Some("x".repeat(101))), None);
-        assert_eq!(normalize_author(Some("   ".into())), None);
+        assert_eq!(normalize_meta_text(Some("Jane\nDev".into())), None);
+        assert_eq!(normalize_meta_text(Some("x".repeat(101))), None);
+        assert_eq!(normalize_meta_text(Some("   ".into())), None);
     }
 }

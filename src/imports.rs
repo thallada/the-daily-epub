@@ -167,6 +167,7 @@ fn imported_article(
         first_seen,
         url: page.final_url,
         author: extracted.author,
+        publication: extracted.publication,
         feed_id: 0,
         feed_title: "Imported".into(),
         category: None,
@@ -379,6 +380,7 @@ mod tests {
             first_seen: now,
             url: url.into(),
             author: None,
+            publication: None,
             feed_id: 7,
             feed_title: "Feed".into(),
             category: None,
@@ -484,6 +486,7 @@ mod tests {
             title: "A historical essay".into(),
             html: "<article><p>Useful old writing.</p><script>bad()</script><img src=\"/chart.png\"></article>".into(),
             author: Some("Essay Writer".into()),
+            site_name: Some("Example Review".into()),
             final_url: "https://example.com/essays/old".into(),
         };
         let extracted = extractor.finish_readable("https://example.com/old", &page);
@@ -497,6 +500,7 @@ mod tests {
         assert_eq!(article.best_entry_id, 0);
         assert_eq!(article.feed_title, "Imported");
         assert_eq!(article.author.as_deref(), Some("Essay Writer"));
+        assert_eq!(article.publication.as_deref(), Some("Example Review"));
         assert!(article.sources.is_empty());
         assert!(!article.content_html.contains("script"));
         assert_eq!(article.image_urls, ["https://example.com/chart.png"]);
@@ -506,6 +510,7 @@ mod tests {
         assert_eq!(loaded.best_entry_id, 0);
         assert_eq!(loaded.feed_title, "Imported");
         assert_eq!(loaded.author.as_deref(), Some("Essay Writer"));
+        assert_eq!(loaded.publication.as_deref(), Some("Example Review"));
     }
 
     #[tokio::test]

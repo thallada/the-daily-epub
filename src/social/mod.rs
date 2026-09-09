@@ -328,6 +328,7 @@ mod tests {
             first_seen: ts("2026-08-15T05:00:00Z"),
             url: url.into(),
             author: None,
+            publication: None,
             feed_id: 1,
             feed_title: "Feed".into(),
             category: None,
