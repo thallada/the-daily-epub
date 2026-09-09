@@ -31,9 +31,38 @@
       } catch (_) {}
     });
   };
+  let tocPanel;
+  let tocRestored = false;
+  const findToc = (root) => {
+    if (tocPanel || root.nodeType !== Node.ELEMENT_NODE) return;
+    tocPanel = root.matches("[data-toc-panel]") ? root : root.querySelector("[data-toc-panel]");
+  };
+  const restoreToc = () => {
+    if (!tocPanel || tocRestored) return;
+    tocRestored = true;
+    if (!window.matchMedia("(min-width: 64rem)").matches) return;
+    try {
+      const saved = sessionStorage.getItem("toc-scroll");
+      const separator = saved ? saved.lastIndexOf("\n") : -1;
+      if (separator < 0 || saved.slice(0, separator) !== tocPanel.dataset.tocIssue) return;
+      const scrollTop = Number(saved.slice(separator + 1));
+      if (Number.isFinite(scrollTop)) tocPanel.scrollTop = scrollTop;
+    } catch (_) {}
+  };
   const detailsObserver = new MutationObserver((records) => {
-    records.forEach((record) => record.addedNodes.forEach(restoreDetails));
+    const addedNodes = [];
+    records.forEach((record) => record.addedNodes.forEach((node) => {
+      addedNodes.push(node);
+      restoreDetails(node);
+      findToc(node);
+    }));
+    // A following node means the parser has closed the nav and its list is complete.
+    if (tocPanel && addedNodes.some((node) => !tocPanel.contains(node)
+      && (tocPanel.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING))) restoreToc();
   });
   detailsObserver.observe(document.documentElement, { childList: true, subtree: true });
-  document.addEventListener("DOMContentLoaded", () => detailsObserver.disconnect(), { once: true });
+  document.addEventListener("DOMContentLoaded", () => {
+    restoreToc();
+    detailsObserver.disconnect();
+  }, { once: true });
 })();

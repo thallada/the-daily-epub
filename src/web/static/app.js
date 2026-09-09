@@ -132,9 +132,19 @@ if (tocPanel) {
   const tocStatus = document.querySelector("[data-toc-status]");
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const largeScreen = window.matchMedia("(min-width: 64rem)");
+  const saveScroll = () => {
+    if (!largeScreen.matches || !tocPanel.dataset.tocIssue) return;
+    try {
+      sessionStorage.setItem("toc-scroll", `${tocPanel.dataset.tocIssue}\n${tocPanel.scrollTop}`);
+    } catch (_) {}
+  };
+  window.addEventListener("pagehide", saveScroll);
+  tocPanel.addEventListener("click", (event) => {
+    if (event.target.closest?.("a")) saveScroll();
+  });
 
   // Long issues overflow the sidebar; scroll just enough to show where we are.
-  const revealCurrent = () => {
+  const revealCurrent = (behavior = "smooth") => {
     const current = tocPanel.querySelector(".toc-link[aria-current]");
     if (!current || tocPanel.scrollHeight <= tocPanel.clientHeight) return;
     const stickyHeader = tocPanel.querySelector(":scope > div");
@@ -147,7 +157,7 @@ if (tocPanel) {
     const visibleBottom = tocPanel.scrollTop + tocPanel.clientHeight - revealMargin;
     if (top >= visibleTop && top + currentRect.height <= visibleBottom) return;
     const target = Math.max(0, top - Math.max(topMargin, (tocPanel.clientHeight - currentRect.height) / 2));
-    tocPanel.scrollTo({ top: target, behavior: reducedMotion.matches ? "auto" : "smooth" });
+    tocPanel.scrollTo({ top: target, behavior: reducedMotion.matches ? "auto" : behavior });
   };
   const sizeOpenPanel = () => {
     if (tocPanel.dataset.open !== "true" || largeScreen.matches || !tocBar) return;
@@ -168,7 +178,7 @@ if (tocPanel) {
     }
   };
   setOpen(false);
-  revealCurrent();
+  revealCurrent("auto");
   if (tocToggle) {
     tocToggle.addEventListener("click", () => setOpen(tocPanel.dataset.open !== "true"));
     document.addEventListener("click", (event) => {
@@ -196,7 +206,7 @@ if (tocPanel) {
     });
   };
   if (currentLink) markPassed(currentLink);
-  const setCurrent = (link) => {
+  const setCurrent = (link, behavior = "smooth") => {
     if (!link || (link === currentLink && link.getAttribute("aria-current") === "location")) return;
     tocLinks.forEach((candidate) => candidate.removeAttribute("aria-current"));
     markPassed(link);
@@ -216,7 +226,7 @@ if (tocPanel) {
       delete bar.dataset.live;
       bar.value = position;
     });
-    revealCurrent();
+    revealCurrent(behavior);
   };
 
   const tocEntries = Array.from(document.querySelectorAll("[data-toc-entry]")).map((entry) => ({
@@ -225,6 +235,7 @@ if (tocPanel) {
   })).filter(({ link }) => link);
   if (tocEntries.length) {
     let queued = false;
+    let firstPaint = true;
     const paintCurrent = () => {
       queued = false;
       const threshold = (tocBar ? tocBar.offsetHeight : 0) + window.innerHeight / 3;
@@ -232,7 +243,8 @@ if (tocPanel) {
       tocEntries.forEach(({ entry, link }) => {
         if (entry.getBoundingClientRect().top <= threshold) next = link;
       });
-      setCurrent(next);
+      setCurrent(next, firstPaint ? "auto" : "smooth");
+      firstPaint = false;
     };
     const scheduleCurrent = () => {
       if (queued) return;

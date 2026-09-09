@@ -8,7 +8,7 @@
     <span class="shrink-0 font-sans text-xs tabular-nums text-muted" data-toc-count{% if toc.position == 0 %} hidden{% endif %}>{{ toc.position }} / {{ toc.total }}</span>
     <progress class="toc-progress absolute inset-x-0 -bottom-px" data-toc-progress value="{{ toc.position }}" max="{{ toc.total }}" aria-hidden="true"></progress>
   </div>
-  <nav id="toc" data-toc-panel class="absolute inset-x-0 top-full z-30 overflow-y-auto overscroll-contain border-b border-rule bg-paper pb-7 pl-4 pr-6 pt-2 shadow-[0_18px_32px_-26px_rgb(0_0_0_/_0.6)] sm:pl-6 sm:pr-8 lg:sticky lg:inset-x-auto lg:top-6 lg:z-auto lg:mt-12 lg:max-h-[calc(100dvh-3rem)] lg:border-0 lg:pb-10 lg:pl-0 lg:pr-3 lg:pt-0 lg:shadow-none" aria-label="Contents">
+  <nav id="toc" data-toc-panel data-toc-issue="{{ toc.issue_href }}" class="absolute inset-x-0 top-full z-30 overflow-y-auto overscroll-contain border-b border-rule bg-paper pb-7 pl-4 pr-6 pt-2 shadow-[0_18px_32px_-26px_rgb(0_0_0_/_0.6)] sm:pl-6 sm:pr-8 lg:sticky lg:inset-x-auto lg:top-6 lg:z-auto lg:mt-12 lg:max-h-[calc(100dvh-3rem)] lg:border-0 lg:pb-10 lg:pl-0 lg:pr-3 lg:pt-0 lg:shadow-none" aria-label="Contents">
     <div class="hidden lg:sticky lg:top-0 lg:z-10 lg:block lg:bg-paper lg:pb-3">
       <a class="block font-sans text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-muted no-underline hover:text-ink" href="{{ toc.issue_href }}">No. {{ toc.issue_number }} <span class="text-rule" aria-hidden="true">·</span> {{ toc.short_date }}</a>
       <p class="mt-2 font-sans text-[0.72rem] text-ink-2" data-toc-status>{% if toc.position > 0 %}Chapter {{ toc.position }} of {{ toc.total }}{% else %}Front page{% endif %}</p>
