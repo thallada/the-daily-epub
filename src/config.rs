@@ -122,6 +122,9 @@ impl Default for Config {
 #[serde(deny_unknown_fields, default)]
 pub struct MinifluxConfig {
     pub base_url: String,
+    /// Where a browser reaches the Miniflux web UI, for links in the dashboard;
+    /// defaults to `base_url`.
+    pub public_url: Option<String>,
     /// `X-Auth-Token`; supply via `DAILY_EPUB_MINIFLUX__API_KEY`.
     pub api_key: Option<String>,
     /// Page size for `GET /v1/entries` (Miniflux caps this at 250).
@@ -132,9 +135,26 @@ impl Default for MinifluxConfig {
     fn default() -> Self {
         Self {
             base_url: "http://127.0.0.1:8082".into(),
+            public_url: None,
             api_key: None,
             page_limit: 250,
         }
+    }
+}
+
+impl MinifluxConfig {
+    /// Browser-facing base URL without trailing slashes.
+    pub fn public_url(&self) -> &str {
+        self.public_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or(&self.base_url)
+            .trim_end_matches('/')
+    }
+
+    /// Browser-facing URL for one feed's entries.
+    pub fn feed_url(&self, feed_id: i64) -> String {
+        format!("{}/feed/{feed_id}/entries", self.public_url())
     }
 }
 
@@ -1471,6 +1491,46 @@ mod tests {
         assert!(c.mail.from.is_empty());
         assert!(c.mail.notify_to.is_none());
         c.validate().unwrap();
+    }
+
+    #[test]
+    fn miniflux_public_url_defaults_to_base_url() {
+        let miniflux = MinifluxConfig {
+            base_url: "http://127.0.0.1:8082/".into(),
+            ..MinifluxConfig::default()
+        };
+
+        assert_eq!(miniflux.public_url(), "http://127.0.0.1:8082");
+
+        let blank = MinifluxConfig {
+            base_url: "https://api.example.com/".into(),
+            public_url: Some("  ".into()),
+            ..MinifluxConfig::default()
+        };
+        assert_eq!(blank.public_url(), "https://api.example.com");
+    }
+
+    #[test]
+    fn explicit_miniflux_public_url_wins_and_trims_trailing_slashes() {
+        let miniflux = MinifluxConfig {
+            public_url: Some("https://miniflux.example.com///".into()),
+            ..MinifluxConfig::default()
+        };
+
+        assert_eq!(miniflux.public_url(), "https://miniflux.example.com");
+    }
+
+    #[test]
+    fn miniflux_feed_url_points_to_the_web_ui_entries_route() {
+        let miniflux = MinifluxConfig {
+            public_url: Some("https://miniflux.example.com/".into()),
+            ..MinifluxConfig::default()
+        };
+
+        assert_eq!(
+            miniflux.feed_url(77),
+            "https://miniflux.example.com/feed/77/entries"
+        );
     }
 
     #[test]

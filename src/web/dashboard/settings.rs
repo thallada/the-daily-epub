@@ -218,6 +218,7 @@ pub const RESTART_REQUIRED: &[&str] = &[
 /// Optional keys that `Config::default()` leaves unset (and therefore do not
 /// appear when the defaults are serialized), with the kind they take.
 const OPTIONAL_KEYS: &[(&str, FieldKind)] = &[
+    ("miniflux.public_url", FieldKind::Text),
     ("miniflux.api_key", FieldKind::Secret),
     ("providers.*.api_key", FieldKind::Secret),
     ("providers.*.effort", FieldKind::Text),
@@ -296,6 +297,7 @@ pub const SETTINGS_HELP: &[(&str, &str)] = &[
     ("profile_path", "Hand-maintained reader profile, loaded every run."),
     ("interests_opml", "Scour interests OPML merged with the profile interests."),
     ("miniflux.base_url", "Miniflux root (no /v1)."),
+    ("miniflux.public_url", "Browser-facing Miniflux web UI URL for dashboard links. Defaults to miniflux.base_url."),
     ("miniflux.api_key", "X-Auth-Token for Miniflux. Required; environment only."),
     ("miniflux.page_limit", "Entries per page for GET /v1/entries; Miniflux caps this at 250."),
     ("llm.bulk", "The [providers.*] name that runs triage, deep assessment and every fallback. Empty means no bulk provider (those stages are skipped)."),

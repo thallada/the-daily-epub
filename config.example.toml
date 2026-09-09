@@ -30,6 +30,8 @@ interests_opml = "data/scour-interests.opml"
 
 [miniflux]
 base_url = "http://127.0.0.1:8082"
+# Browser-facing Miniflux web UI URL; defaults to base_url.
+# public_url = "https://miniflux.example.com"
 # api_key via DAILY_EPUB_MINIFLUX__API_KEY env
 page_limit = 250
 
