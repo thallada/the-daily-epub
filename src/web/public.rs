@@ -6,7 +6,7 @@ use axum_login::tower_sessions::Session;
 use jiff::civil::Date;
 
 use crate::server::AppState;
-use crate::types::{Issue, SocialSource, domain};
+use crate::types::{Issue, SocialSource};
 use crate::web::issue::{self, Download};
 use crate::web::session::{AuthSession, Viewer};
 use crate::web::{Html, Page, WebError};
@@ -49,7 +49,7 @@ pub struct PublicEntry {
     pub url: String,
     pub author: Option<String>,
     pub source: String,
-    pub domain: String,
+    pub publication: Option<String>,
     pub reading_minutes: i64,
     pub word_count: i64,
     pub summary: Option<String>,
@@ -116,7 +116,7 @@ impl From<&Issue> for PublicIssue {
                                 url: article.canonical_url.clone(),
                                 author: article.author.clone(),
                                 source: article.feed_title.clone(),
-                                domain: domain(&article.canonical_url).unwrap_or_default(),
+                                publication: article.publication_label(),
                                 reading_minutes: article.reading_minutes(),
                                 word_count: article.word_count,
                                 summary: pick
@@ -426,6 +426,10 @@ mod tests {
     fn public_issue_shows_summaries_and_why_but_no_bodies() {
         let source = crate::epub::fixtures::issue();
         let public = PublicIssue::from(&source);
+        assert_eq!(
+            public.sections[0].entries[0].publication.as_deref(),
+            Some("example.com")
+        );
         let html = IssuePublicTemplate {
             page: Page::new("Test issue", None, "latest"),
             issue: public,

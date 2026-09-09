@@ -12,12 +12,14 @@ use jiff::civil::Date;
 use serde::Deserialize;
 use sqlx::Row;
 
+use crate::config::Config;
 use crate::db::Db;
 use crate::epub::chapters;
 use crate::pipeline::display_date;
 use crate::server::AppState;
 use crate::types::{
-    ArticleId, BehindThePaper, Colophon, Edition, Editorial, Issue, IssueMeta, Lineup, Models, Pick,
+    Article, ArticleId, BehindThePaper, Colophon, Edition, Editorial, Issue, IssueMeta, Lineup,
+    Models, Pick,
 };
 use crate::web::rate::{self, RatingWidget};
 use crate::web::session::{AuthSession, Viewer};
@@ -850,12 +852,31 @@ fn issue_toc(view: &IssueView, current: TocPosition) -> Toc {
     }
 }
 
+/// The "Feed · Publication" lead of an article's meta line.
+#[derive(Debug)]
+struct Source {
+    feed_title: String,
+    feed_href: Option<String>,
+    publication: Option<String>,
+}
+
+impl Source {
+    fn new(article: &Article, config: &Config, is_admin: bool) -> Self {
+        Self {
+            feed_title: article.feed_title.clone(),
+            feed_href: (is_admin && article.feed_id > 0)
+                .then(|| config.miniflux.feed_url(article.feed_id)),
+            publication: article.publication_label(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct FullEntry {
     title: String,
     href: String,
     dashboard_href: String,
-    source: String,
+    source: Source,
     reading_minutes: i64,
     is_lead: bool,
     summary: String,
@@ -926,6 +947,7 @@ struct ArticleTemplate {
     title: String,
     source_url: String,
     byline: Option<String>,
+    source: Source,
     meta_line: String,
     why: Option<String>,
     social_line: Option<String>,
@@ -979,6 +1001,7 @@ pub async fn render_full(
 ) -> Result<Response, WebError> {
     let date = view.issue.meta.date;
     let is_admin = viewer.role == crate::web::users::Role::Admin;
+    let config = state.config();
     let current = if is_admin {
         rate::current_for_issue(state, date).await?
     } else {
@@ -998,7 +1021,7 @@ pub async fn render_full(
                     title: pick.article.title.clone(),
                     href: article_href(date, pick.article.id),
                     dashboard_href: format!("/dashboard/articles/{}", pick.article.id),
-                    source: pick.article.feed_title.clone(),
+                    source: Source::new(&pick.article, &config, is_admin),
                     reading_minutes: pick.article.reading_minutes(),
                     is_lead: pick.is_lead,
                     summary: summary_for(&view.issue, pick)
@@ -1090,6 +1113,8 @@ pub async fn article(
             href: article_href(date, next.article.id),
         });
     let article = &pick.article;
+    let is_admin = viewer.role == crate::web::users::Role::Admin;
+    let config = state.config();
     let active_nav = if view.is_latest { "latest" } else { "archive" };
     let mut page = Page::new(article.title.clone(), Some(viewer.clone()), active_nav);
     page.flash = take_flash(&session).await?;
@@ -1099,9 +1124,9 @@ pub async fn article(
         title: article.title.clone(),
         source_url: article.canonical_url.clone(),
         byline: article.author.as_ref().map(|author| format!("By {author}")),
+        source: Source::new(article, &config, is_admin),
         meta_line: format!(
-            "{} · {} words · ~{} min read",
-            article.feed_title,
+            "{} words · ~{} min read",
             thousands(article.word_count),
             article.reading_minutes()
         ),
@@ -1117,7 +1142,7 @@ pub async fn article(
             .map(|discussion| crate::comments::render_xhtml(discussion, &article.title)),
         read_online_url: article.url.clone(),
         dashboard_href: format!("/dashboard/articles/{}", article.id),
-        rating: (viewer.role == crate::web::users::Role::Admin).then(|| {
+        rating: is_admin.then(|| {
             RatingWidget::for_issue(
                 article.id,
                 date,
@@ -2045,6 +2070,53 @@ mod tests {
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert!(response_text(missing).await.contains("Not found"));
+    }
+
+    #[tokio::test]
+    async fn article_feed_links_to_miniflux_for_admins_only() {
+        let (_dir, db, source) = seeded_issue(true).await;
+        crate::web::users::add(&db, "admin", "correct horse battery", true)
+            .await
+            .unwrap();
+        crate::web::users::add(&db, "reader", "correct horse battery", false)
+            .await
+            .unwrap();
+        let mut config = crate::config::Config::default();
+        config.miniflux.public_url = Some("https://miniflux.example/".into());
+        let app = crate::server::router(crate::server::AppState::new(db, config, None));
+        let admin_cookie = login_cookie(&app, "admin", "correct horse battery").await;
+        let reader_cookie = login_cookie(&app, "reader", "correct horse battery").await;
+        let article = &source.lineup.picks[0].article;
+        let article_uri = format!("/issues/{}/articles/{}", source.meta.date, article.id);
+        let feed_href = format!("https://miniflux.example/feed/{}/entries", article.feed_id);
+
+        let admin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&article_uri)
+                    .header(header::COOKIE, admin_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let admin = response_text(admin).await;
+        assert!(admin.contains(&format!("href=\"{feed_href}\"")));
+
+        let reader = app
+            .oneshot(
+                Request::builder()
+                    .uri(article_uri)
+                    .header(header::COOKIE, reader_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reader = response_text(reader).await;
+        assert!(reader.contains(&article.feed_title));
+        assert!(!reader.contains(&feed_href));
     }
 
     #[tokio::test]

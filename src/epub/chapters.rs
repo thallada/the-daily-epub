@@ -11,7 +11,7 @@ use crate::comments;
 use crate::html::{text_escape, to_xhtml};
 use crate::images;
 use crate::types::{
-    BehindThePaper, Edition, ImageAsset, Issue, NearMiss, Pick, SocialRef, Vote,
+    Article, BehindThePaper, Edition, ImageAsset, Issue, NearMiss, Pick, SocialRef, Vote,
     WORLD_BRIEFING_SECTION,
 };
 use crate::world;
@@ -363,6 +363,13 @@ pub fn section_names(issue: &Issue) -> Vec<String> {
     names
 }
 
+fn source_line(article: &Article) -> String {
+    match article.publication_label() {
+        Some(publication) => format!("{} · {publication}", article.feed_title),
+        None => article.feed_title.clone(),
+    }
+}
+
 /// "In This Issue": per section, each article's title, source, reading time and
 /// summary, linked to its chapter (§3.10).
 pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
@@ -375,7 +382,7 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
             .map(|pick| IndexEntry {
                 href: article_href(pick),
                 title: pick.article.title.clone(),
-                source: pick.article.feed_title.clone(),
+                source: source_line(&pick.article),
                 reading_minutes: pick.article.reading_minutes(),
                 summary: summary_for(issue, pick).unwrap_or_default().to_string(),
                 why: pick.why.clone(),
@@ -437,7 +444,7 @@ pub fn render_article(
     hmac_secret: Option<&str>,
 ) -> Result<Chapter, EpubError> {
     let article = &pick.article;
-    let mut meta_parts = vec![article.feed_title.clone()];
+    let mut meta_parts = vec![source_line(article)];
     if let Some(date) = published_display(pick) {
         meta_parts.push(date);
     }
@@ -877,6 +884,44 @@ mod tests {
         // Titles are escaped (askama emits numeric references), never injected raw.
         assert!(chapter.xhtml.contains("A Niche Delight &#38; Other Tales"));
         assert_xml_ok(&chapter.xhtml);
+    }
+
+    #[test]
+    fn article_sources_include_distinct_publications_without_repeating_the_feed() {
+        let mut issue = issue();
+        issue.lineup.picks[0].article.publication = Some("Example Journal".into());
+        issue.lineup.picks[1].article.publication = Some("Example Feed".into());
+
+        let index = render_in_this_issue(&issue).unwrap();
+        assert!(
+            index
+                .xhtml
+                .contains("Example Feed · Example Journal &#183; 6 min read")
+        );
+        assert!(!index.xhtml.contains("Example Feed · Example Feed"));
+
+        let article = render_article(
+            &issue,
+            &issue.lineup.picks[0],
+            &[],
+            Edition::Standard,
+            "https://daily.hallada.net",
+            None,
+        )
+        .unwrap();
+        assert!(article.xhtml.contains("Example Feed · Example Journal"));
+
+        let matching = render_article(
+            &issue,
+            &issue.lineup.picks[1],
+            &[],
+            Edition::Standard,
+            "https://daily.hallada.net",
+            None,
+        )
+        .unwrap();
+        assert!(matching.xhtml.contains("Example Feed"));
+        assert!(!matching.xhtml.contains("Example Feed · Example Feed"));
     }
 
     #[test]
