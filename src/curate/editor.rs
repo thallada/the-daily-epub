@@ -172,6 +172,7 @@ fn render_candidate(candidate: &Candidate) -> String {
                 "loved" => "LOVED",
                 "good" => "GOOD",
                 "not_for_me" | "down" => "NOT FOR ME",
+                "slop" => "AI SLOP",
                 other => other,
             };
             format!("{label} \"{}\" ({:.2})", neighbour.title, neighbour.cos)

@@ -45,6 +45,7 @@ fn web_label(label: Option<&str>) -> &str {
         Some("not_for_me" | "down") => "down",
         Some("loved") => "loved",
         Some("good") => "good",
+        Some("slop") => "slop",
         Some("cleared") => "cleared",
         _ => "",
     }
@@ -122,12 +123,12 @@ pub async fn post(
     let viewer = auth.user().await.ok_or_else(|| WebError::Unauthenticated {
         next: "/rate".into(),
     })?;
-    if state.db.get_article(input.article_id).await?.is_none() {
+    let Some(article) = state.db.get_article(input.article_id).await? else {
         return Err(WebError::BadRequest(format!(
             "article {} does not exist",
             input.article_id
         )));
-    }
+    };
 
     let issue_date = match input
         .issue_date
@@ -147,27 +148,24 @@ pub async fn post(
         }
     };
     let config = state.config();
-    let (event_label, value, response_label, flash_label) = match input.label.as_str() {
-        "loved" => (
-            "loved",
-            Vote::Loved.value(&config.curation.feedback),
-            "loved",
-            "Loved it",
+    let (event_label, value, response_label, flash_text) = match input.label.as_str() {
+        "cleared" => ("cleared", 0.0, "cleared", "Rated: Cleared".to_string()),
+        "slop" => (
+            "slop",
+            Vote::Slop.value(&config.curation.feedback),
+            "slop",
+            crate::rate::slop_message(article.author.as_deref()),
         ),
-        "good" => (
-            "good",
-            Vote::Good.value(&config.curation.feedback),
-            "good",
-            "Good",
-        ),
-        "down" => (
-            "not_for_me",
-            Vote::NotForMe.value(&config.curation.feedback),
-            "down",
-            "Not for me",
-        ),
-        "cleared" => ("cleared", 0.0, "cleared", "Cleared"),
-        _ => return Err(WebError::BadRequest("invalid rating label".into())),
+        widget => {
+            let vote = Vote::parse(widget)
+                .ok_or_else(|| WebError::BadRequest("invalid rating label".into()))?;
+            (
+                vote.event_label(),
+                vote.value(&config.curation.feedback),
+                vote.as_str(),
+                format!("Rated: {}", vote.display()),
+            )
+        }
     };
     let note = input
         .note
@@ -207,7 +205,7 @@ pub async fn post(
             "flash",
             Flash {
                 kind: "success".into(),
-                text: format!("Rated: {flash_label}"),
+                text: flash_text,
             },
         )
         .await
@@ -223,6 +221,7 @@ mod tests {
     #[test]
     fn database_and_widget_labels_are_mapped_explicitly() {
         assert_eq!(web_label(Some("not_for_me")), "down");
+        assert_eq!(web_label(Some("slop")), "slop");
         assert_eq!(web_label(Some("cleared")), "cleared");
         assert_eq!(web_label(None), "");
     }

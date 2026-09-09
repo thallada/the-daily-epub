@@ -132,6 +132,7 @@ sections = [
 loved_value = 1.0
 good_value = 0.35
 not_for_me_value = -1.0
+slop_value = -1.0                    # AI slop: a full negative; the author penalty is below
 verdicts_in_prompt = 60
 
 # Every weight, quota, gate and threshold of the personalized ranker. The
@@ -150,6 +151,7 @@ knn_floor = 8
 knn_full = 25
 feed_floor = 15
 feed_full = 40
+slop_author_penalty = 0.75           # blend and utility × 0.25 for authors with an AI slop verdict
 semantic_min_words = 300
 exploration_slots = 5
 embedding_retention_days = 120       # `features prune`: unrated, unpublished vectors

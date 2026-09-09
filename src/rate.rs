@@ -1,5 +1,18 @@
 //! Shared construction of explicit rating events.
 
+/// The confirmation shown after an *AI slop* verdict: whether the author
+/// penalty can apply depends on the article having an author at all (§9.3).
+pub fn slop_message(author: Option<&str>) -> String {
+    match author.map(str::trim).filter(|author| !author.is_empty()) {
+        Some(author) => {
+            format!("Recorded: AI slop — thanks. Future articles by {author} will rank much lower.")
+        }
+        None => "Recorded: AI slop — thanks. This article has no known author, so only the \
+                 usual negative rating applies."
+            .to_string(),
+    }
+}
+
 use crate::config::Config;
 use crate::db::{Db, DbError};
 use crate::types::{ArticleId, RatingEvent, Vote};
@@ -15,12 +28,7 @@ pub async fn record_explicit(
     note: Option<String>,
 ) -> Result<i64, DbError> {
     let (label, value) = match vote {
-        Some(Vote::Loved) => ("loved", Vote::Loved.value(&config.curation.feedback)),
-        Some(Vote::Good) => ("good", Vote::Good.value(&config.curation.feedback)),
-        Some(Vote::NotForMe) => (
-            "not_for_me",
-            Vote::NotForMe.value(&config.curation.feedback),
-        ),
+        Some(vote) => (vote.event_label(), vote.value(&config.curation.feedback)),
         None => ("cleared", 0.0),
     };
     db.append_rating_event(&RatingEvent {

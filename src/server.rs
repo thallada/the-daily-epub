@@ -377,11 +377,7 @@ async fn handle_rating(
         }
     };
 
-    let label = match vote {
-        Vote::Loved => "loved",
-        Vote::Good => "good",
-        Vote::NotForMe => "not_for_me",
-    };
+    let label = vote.event_label();
     let event = RatingEvent {
         id: 0,
         user_id: None,
@@ -408,11 +404,12 @@ async fn handle_rating(
     );
 
     let message = match vote {
-        Vote::Loved => "Recorded: Loved it — thanks.",
-        Vote::Good => "Recorded: Good — thanks.",
-        Vote::NotForMe => "Recorded: Not for me — thanks.",
+        Vote::Loved => "Recorded: Loved it — thanks.".to_string(),
+        Vote::Good => "Recorded: Good — thanks.".to_string(),
+        Vote::NotForMe => "Recorded: Not for me — thanks.".to_string(),
+        Vote::Slop => crate::rate::slop_message(article.author.as_deref()),
     };
-    confirmation_page(StatusCode::OK, message, &config, date, article_id, vote)
+    confirmation_page(StatusCode::OK, &message, &config, date, article_id, vote)
 }
 
 /// `GET /opds/daily.xml` — both EPUB editions of the last issues, newest first,
@@ -644,23 +641,20 @@ fn confirmation_page(
     let Some(secret) = config.server.hmac_secret.as_deref() else {
         return page(status, message, None);
     };
-    let choices = [
-        (Vote::Loved, "Loved it"),
-        (Vote::Good, "Good"),
-        (Vote::NotForMe, "Not for me"),
-    ]
-    .into_iter()
-    .filter(|(vote, _)| *vote != selected)
-    .map(|(vote, label)| {
-        let url = rating_url(&config.server.public_url, secret, date, article_id, vote);
-        format!(
-            "<a href=\"{}\">[ {} ]</a>",
-            escape_attr(&url),
-            escape(label)
-        )
-    })
-    .collect::<Vec<_>>()
-    .join(" &nbsp; ");
+    let choices = [Vote::Loved, Vote::Good, Vote::NotForMe, Vote::Slop]
+        .into_iter()
+        .filter(|vote| *vote != selected)
+        .map(|vote| (vote, vote.display()))
+        .map(|(vote, label)| {
+            let url = rating_url(&config.server.public_url, secret, date, article_id, vote);
+            format!(
+                "<a href=\"{}\">[ {} ]</a>",
+                escape_attr(&url),
+                escape(label)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" &nbsp; ");
     let issue_url = format!(
         "{}/issues/{date}",
         config.server.public_url.trim_end_matches('/')

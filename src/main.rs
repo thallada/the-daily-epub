@@ -196,6 +196,7 @@ enum RatingListLabel {
     Loved,
     Good,
     Down,
+    Slop,
     Cleared,
 }
 
@@ -205,6 +206,7 @@ impl RatingListLabel {
             Self::Loved => "loved",
             Self::Good => "good",
             Self::Down => "not_for_me",
+            Self::Slop => "slop",
             Self::Cleared => "cleared",
         }
     }
@@ -215,6 +217,8 @@ enum RatingSetLabel {
     Loved,
     Good,
     Down,
+    /// AI slop: a full negative, and the author's future articles rank much lower.
+    Slop,
 }
 
 impl RatingSetLabel {
@@ -223,6 +227,7 @@ impl RatingSetLabel {
             Self::Loved => Vote::Loved,
             Self::Good => Vote::Good,
             Self::Down => Vote::NotForMe,
+            Self::Slop => Vote::Slop,
         }
     }
 }

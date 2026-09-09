@@ -162,6 +162,7 @@ fn verdict_label(label: &str) -> &str {
         "loved" => "LOVED",
         "good" => "GOOD",
         "not_for_me" => "NOT FOR ME",
+        "slop" => "AI SLOP",
         other => other,
     }
 }

@@ -129,6 +129,9 @@ pub struct SignalsJson {
     pub exploration: bool,
     #[serde(default)]
     pub auto_include: bool,
+    /// The author had a current *AI slop* verdict at run time (§9.3).
+    #[serde(default)]
+    pub slop_author: bool,
     #[serde(default)]
     pub notes: Vec<String>,
 }
@@ -177,6 +180,7 @@ pub fn serialize_signals(signals: &Signals, auto_include: bool) -> String {
         neighbours: signals.neighbours.clone(),
         exploration: false,
         auto_include,
+        slop_author: signals.slop_author,
         notes: signals.notes.clone(),
     })
     .unwrap_or_else(|_| "{}".into())
@@ -400,11 +404,11 @@ pub async fn render_explain(db: &Db, row: &ExplainRow) -> Result<String, sqlx::E
                 );
             }
         }
-        if signals.exploration || signals.auto_include {
+        if signals.exploration || signals.auto_include || signals.slop_author {
             let _ = writeln!(
                 out,
-                "flags: exploration={} auto_include={}",
-                signals.exploration, signals.auto_include
+                "flags: exploration={} auto_include={} slop_author={}",
+                signals.exploration, signals.auto_include, signals.slop_author
             );
         }
         for note in &signals.notes {

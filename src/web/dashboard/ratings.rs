@@ -244,6 +244,7 @@ fn event_label(widget: &str) -> Option<&'static str> {
         "loved" => Some("loved"),
         "good" => Some("good"),
         "down" => Some("not_for_me"),
+        "slop" => Some("slop"),
         "cleared" => Some("cleared"),
         _ => None,
     }
@@ -255,6 +256,7 @@ fn widget_label(label: &str) -> (&'static str, &'static str) {
         "loved" => ("loved", "Loved it"),
         "good" => ("good", "Good"),
         "not_for_me" | "down" => ("down", "Not for me"),
+        "slop" => ("slop", "AI slop"),
         "cleared" => ("cleared", "Cleared"),
         _ => ("", "Unknown"),
     }
@@ -412,6 +414,8 @@ struct HowValues {
     loved: String,
     good: String,
     not_for_me: String,
+    slop: String,
+    slop_author_penalty: String,
     verdicts_in_prompt: usize,
     rebuild_interval_days: i64,
     max_ratings_in_rebuild: usize,
@@ -435,6 +439,8 @@ impl HowValues {
             loved: format!("{:+.2}", feedback.loved_value),
             good: format!("{:+.2}", feedback.good_value),
             not_for_me: format!("{:+.2}", feedback.not_for_me_value),
+            slop: format!("{:+.2}", feedback.slop_value),
+            slop_author_penalty: format!("{:.0}%", ranking.slop_author_penalty * 100.0),
             verdicts_in_prompt: feedback.verdicts_in_prompt,
             rebuild_interval_days: REBUILD_INTERVAL_DAYS,
             max_ratings_in_rebuild: MAX_RATINGS_IN_REBUILD,
@@ -681,7 +687,7 @@ async fn queue_import(
         set_flash(&session, "error", message).await?;
         return Ok(Redirect::to("/dashboard/ratings#imports").into_response());
     }
-    if !matches!(label.as_str(), "loved" | "good" | "not_for_me") {
+    if !matches!(label.as_str(), "loved" | "good" | "not_for_me" | "slop") {
         set_flash(&session, "error", "Choose a valid verdict.".into()).await?;
         return Ok(Redirect::to("/dashboard/ratings#imports").into_response());
     }

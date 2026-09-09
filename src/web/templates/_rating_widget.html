@@ -7,6 +7,7 @@
     <button type="submit" name="label" value="loved" data-label="loved"{% if widget.current == "loved" %} class="active" aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>Loved it</button>
     <button type="submit" name="label" value="good" data-label="good"{% if widget.current == "good" %} class="active" aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>Good</button>
     <button type="submit" name="label" value="down" data-label="down"{% if widget.current == "down" %} class="active" aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>Not for me</button>
+    <button type="submit" name="label" value="slop" data-label="slop" title="Report as AI slop: a strong Not for me, and future articles by this author rank much lower"{% if widget.current == "slop" %} class="active" aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>AI slop</button>
     <button class="clear{% if widget.current == "cleared" %} active{% endif %}" type="submit" name="label" value="cleared" data-label="cleared"{% if widget.current == "cleared" %} aria-pressed="true"{% else %} aria-pressed="false"{% endif %}><span class="rating-clear-label">clear</span><span class="rating-cleared-label">cleared</span></button>
   </span>
 {% if widget.show_note %}<label class="rating-note"><span class="rating-note-label">Note</span><input name="note" placeholder="Add a note…"></label>{% endif %}

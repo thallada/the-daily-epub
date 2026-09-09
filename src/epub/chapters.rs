@@ -70,6 +70,7 @@ struct RatingLinks {
     loved_url: String,
     good_url: String,
     not_for_me_url: String,
+    slop_url: String,
 }
 
 #[derive(Template)]
@@ -458,6 +459,7 @@ pub fn render_article(
                 article.id,
                 Vote::NotForMe,
             ),
+            slop_url: rating_url(public_url, secret, issue.meta.date, article.id, Vote::Slop),
         }),
         _ => None,
     };

@@ -30,7 +30,7 @@
         <p class="understood">{{ line }}</p>
 {% endif %}
 {% if let Some(links) = rating %}
-        <p class="rating">Was this a good pick? &#160; <a href="{{ links.loved_url }}">[ Loved it ]</a> &#160; <a href="{{ links.good_url }}">[ Good ]</a> &#160; <a href="{{ links.not_for_me_url }}">[ Not for me ]</a> &#160;&#160;&#160; <a href="{{ read_online_url }}">Read online &#8599;</a></p>
+        <p class="rating">Was this a good pick? &#160; <a href="{{ links.loved_url }}">[ Loved it ]</a> &#160; <a href="{{ links.good_url }}">[ Good ]</a> &#160; <a href="{{ links.not_for_me_url }}">[ Not for me ]</a> &#160; <a href="{{ links.slop_url }}">[ AI slop ]</a> &#160;&#160;&#160; <a href="{{ read_online_url }}">Read online &#8599;</a></p>
 {% else %}
         <p class="read-online"><a href="{{ read_online_url }}">Read online &#8599;</a></p>
 {% endif %}

@@ -468,6 +468,10 @@ pub struct RankingConfig {
     pub knn_full: usize,
     pub feed_floor: usize,
     pub feed_full: usize,
+    /// Fraction of the preliminary blend and the utility removed from any
+    /// candidate whose author has a current *AI slop* verdict (§9.3). `1.0`
+    /// zeroes such candidates; `0.0` disables the penalty.
+    pub slop_author_penalty: f64,
     pub semantic_min_words: i64,
     pub exploration_slots: usize,
     pub embedding_retention_days: i64,
@@ -492,6 +496,7 @@ impl Default for RankingConfig {
             knn_full: 25,
             feed_floor: 15,
             feed_full: 40,
+            slop_author_penalty: 0.75,
             semantic_min_words: 300,
             exploration_slots: 5,
             embedding_retention_days: 120,
@@ -603,6 +608,9 @@ pub struct FeedbackConfig {
     pub loved_value: f64,
     pub good_value: f64,
     pub not_for_me_value: f64,
+    /// Weight of an *AI slop* verdict. The author penalty is separate
+    /// (`ranking.slop_author_penalty`).
+    pub slop_value: f64,
     pub verdicts_in_prompt: usize,
 }
 
@@ -612,6 +620,7 @@ impl Default for FeedbackConfig {
             loved_value: 1.0,
             good_value: 0.35,
             not_for_me_value: -1.0,
+            slop_value: -1.0,
             verdicts_in_prompt: 60,
         }
     }
@@ -1180,6 +1189,11 @@ impl Config {
                 "curation.ranking *_full must be > *_floor >= 0".into(),
             ));
         }
+        if !(0.0..=1.0).contains(&ranking.slop_author_penalty) {
+            return Err(ConfigError::Invalid(
+                "curation.ranking.slop_author_penalty must be between 0 and 1".into(),
+            ));
+        }
         if !(0.0..=1.0).contains(&ranking.diversity.cluster_threshold) {
             return Err(ConfigError::Invalid(
                 "curation.ranking.diversity.cluster_threshold must be between 0 and 1".into(),
@@ -1438,6 +1452,8 @@ mod tests {
         assert_eq!(c.curation.recent_rejection_floor, 3.0);
         assert_eq!(c.profile_path, PathBuf::from("data/profile.md"));
         assert_eq!(c.curation.feedback.good_value, 0.35);
+        assert_eq!(c.curation.feedback.slop_value, -1.0);
+        assert_eq!(c.curation.ranking.slop_author_penalty, 0.75);
         assert_eq!(c.curation.feedback.verdicts_in_prompt, 60);
         assert_eq!(c.xtc.format, XtcFormat::Xtch);
         assert_eq!(c.curation.sections.len(), 8);

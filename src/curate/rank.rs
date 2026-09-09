@@ -13,7 +13,8 @@ pub struct RankSummary {
     pub clusters: usize,
 }
 
-/// Re-normalize cheap signals over the deep set and calculate utility on 0–100.
+/// Re-normalize cheap signals over the deep set and calculate utility on 0–100,
+/// scaled by the slop-author factor (§9.3).
 pub fn calculate_utility(candidates: &mut [Candidate], configured: &UtilityWeights) {
     let indices = (0..candidates.len()).collect::<Vec<_>>();
     calculate_utility_for(candidates, &indices, configured);
@@ -88,7 +89,8 @@ fn calculate_utility_for(
                 .iter()
                 .map(|(_, weight, value)| weight / total * value)
                 .sum::<f64>()
-                * 100.0,
+                * 100.0
+                * candidate.signals.slop_factor(),
         );
     }
 }
@@ -343,6 +345,23 @@ mod tests {
             (a.signals.weights["knn"] / a.signals.weights["quality"] - (0.15 * 0.5) / 0.40).abs()
                 < 1e-9
         );
+    }
+
+    #[test]
+    fn slop_authors_keep_their_weights_but_lose_most_of_their_utility() {
+        let mut reported = candidate(1, 8.0);
+        let mut other = candidate(2, 8.0);
+        reported.signals.slop_author = true;
+        reported.signals.slop_penalty = 0.75;
+        other.signals.slop_author = false;
+        other.signals.slop_penalty = 0.75;
+        let mut values = vec![reported, other];
+        calculate_utility(&mut values, &UtilityWeights::default());
+        let [reported, other] = values.as_slice() else {
+            panic!("two values")
+        };
+        assert_eq!(reported.signals.weights, other.signals.weights);
+        assert!((reported.utility.unwrap() - other.utility.unwrap() * 0.25).abs() < 1e-9);
     }
 
     #[test]

@@ -15,7 +15,8 @@ publishes the lot over its own OPDS catalog — which doubles as a
 [BookOrbit](https://github.com/thallada/bookorbit) watched folder if you run one.
 Each article chapter ends with a one-line note of what the pipeline made of the
 piece (topic, format, depth, and the reader interests it matched) and Loved it /
-Good / Not for me links that feed back into tomorrow's curation; a short *Behind
+Good / Not for me / AI slop links that feed back into tomorrow's curation (an AI
+slop report also cuts every future article by that author); a short *Behind
 the paper* chapter before the colophon says what the run considered, how the
 deep set was admitted, whether the learned signals were active, the ten
 highest-utility near misses, and what it all cost.
@@ -125,7 +126,7 @@ is current.
 daily-epub generate [--date YYYY-MM-DD] [--dry-run] [--out DIR] [--max-articles N] [--skip-llm] [--skip-embeddings] [--rescore]
 daily-epub serve                # public site, private dashboard, OPDS, ratings, downloads
 daily-epub profile rebuild      # regenerate learned profile adjustments
-daily-epub ratings list [--days 90] [--label loved|good|down|cleared]
+daily-epub ratings list [--days 90] [--label loved|good|down|slop|cleared]
 daily-epub ratings set --article 42 --label loved --note "excellent"
 daily-epub ratings clear --url https://example.com/article
 daily-epub explain --date YYYY-MM-DD (--article ID | --url URL) [--run-id N]
@@ -403,6 +404,7 @@ prints what resolved.
 | `curation.feedback.loved_value` | `1.0` | Weight for a Loved it verdict. |
 | `curation.feedback.good_value` | `0.35` | Weight for a Good verdict. |
 | `curation.feedback.not_for_me_value` | `-1.0` | Weight for a Not for me verdict. |
+| `curation.feedback.slop_value` | `-1.0` | Weight for an AI slop verdict; the author penalty is `curation.ranking.slop_author_penalty`. |
 | `curation.feedback.verdicts_in_prompt` | `60` | Recent explicit verdicts included in the system prompt. |
 | `curation.recent_rejection_days` | `7` | Churn window for recent low triage/deep assessments. |
 | `curation.recent_rejection_floor` | `3.0` | Scores below this floor are excluded during the churn window (except auto-includes). |
@@ -448,7 +450,10 @@ gated: `knn` (rated-neighbour preference) ramps from `knn_floor` (8) to
 `feed_floor` (15) to `feed_full` (40) attributable ratings; below the floor the
 signal is absent. Ratings decay with `rating_half_life_days` (60) over
 `rating_lookback_days` (180); `neighbour_k` (5) neighbours per side and
-`negative_coefficient` (0.75) shape the signal. `triage_max` (800),
+`negative_coefficient` (0.75) shape the signal. `slop_author_penalty` (0.75)
+is the fraction of the blend and utility removed from every candidate whose
+author currently carries an AI slop verdict, on any feed and with no age
+limit. `triage_max` (800),
 `deep_keep` (120), `shortlist_keep` (60), `assessment_reuse_days` (3),
 `semantic_min_words` (300), `exploration_slots` (5), `[curation.ranking.quotas]`
 (`triage` 60 · `interest` 20 · `knn` 20), `[curation.ranking.weights.utility]`
@@ -854,7 +859,7 @@ curl -s https://daily.hallada.net/healthz
 curl -s https://daily.hallada.net/opds/daily.xml | head
 curl -s https://daily.hallada.net/issues.json | jq '.[0]'
 
-# 7. Feedback loop: tap Loved it / Good / Not for me in KOReader, then
+# 7. Feedback loop: tap Loved it / Good / Not for me / AI slop in KOReader, then
 sqlite3 /var/lib/daily-epub/daily-epub.db 'select * from rating_events order by event_at desc;'
 
 # 8. Watch cost and quality for a week

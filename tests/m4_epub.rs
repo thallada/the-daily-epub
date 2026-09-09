@@ -340,10 +340,17 @@ fn rating_links_carry_the_spec_token() {
     let loved = build::rating_token("integration-secret", date, 1, Vote::Loved);
     let good = build::rating_token("integration-secret", date, 1, Vote::Good);
     let down = build::rating_token("integration-secret", date, 1, Vote::NotForMe);
+    let slop = build::rating_token("integration-secret", date, 1, Vote::Slop);
     assert_eq!(loved.len(), 16);
     assert_ne!(loved, good);
     assert_ne!(good, down);
-    for (segment, token) in [("loved", loved), ("good", good), ("down", down)] {
+    assert_ne!(down, slop);
+    for (segment, token) in [
+        ("loved", loved),
+        ("good", good),
+        ("down", down),
+        ("slop", slop),
+    ] {
         assert!(chapter.xhtml.contains(&format!(
             "https://daily.hallada.net/r/2026-08-15/1/{segment}?t={token}"
         )));
@@ -351,6 +358,7 @@ fn rating_links_carry_the_spec_token() {
     assert!(chapter.xhtml.contains("[ Loved it ]"));
     assert!(chapter.xhtml.contains("[ Good ]"));
     assert!(chapter.xhtml.contains("[ Not for me ]"));
+    assert!(chapter.xhtml.contains("[ AI slop ]"));
 }
 
 #[test]

@@ -65,7 +65,7 @@ pub struct ArticlesQuery {
     pub page: Option<u32>,
 }
 
-const RATED: [&str; 6] = ["any", "loved", "good", "down", "cleared", "none"];
+const RATED: [&str; 7] = ["any", "loved", "good", "down", "slop", "cleared", "none"];
 const PUBLISHED: [&str; 2] = ["yes", "no"];
 
 const ARTICLE_SORTS: [(&str, &str); 7] = [
@@ -152,7 +152,7 @@ impl ArticleFilters {
         match self.rated.as_deref() {
             Some("any") => sql.push_str(" AND x.rating IS NOT NULL AND x.rating != 'cleared'"),
             Some("none") => sql.push_str(" AND x.rating IS NULL"),
-            Some(label @ ("loved" | "good" | "cleared")) => {
+            Some(label @ ("loved" | "good" | "slop" | "cleared")) => {
                 sql.push_str(" AND x.rating = ?");
                 binds.push(Bind::Text(label.to_string()));
             }

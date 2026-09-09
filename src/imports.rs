@@ -132,6 +132,7 @@ fn vote(label: &str) -> Result<Vote> {
         "loved" => Ok(Vote::Loved),
         "good" => Ok(Vote::Good),
         "not_for_me" => Ok(Vote::NotForMe),
+        "slop" => Ok(Vote::Slop),
         other => anyhow::bail!("invalid rating label {other:?}"),
     }
 }

@@ -719,6 +719,33 @@ impl Db {
         self.latest_explicit_ratings(lookback_days, true).await
     }
 
+    /// Raw authors of every article whose current explicit verdict is `slop`,
+    /// regardless of age: a reported author stays penalized until the verdict is
+    /// changed or cleared (§9.3). Articles without an author contribute nothing.
+    pub async fn slop_authors(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "WITH ranked AS (
+                 SELECT re.article_id, re.label,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY re.article_id
+                            ORDER BY re.event_at DESC, re.id DESC
+                        ) AS event_rank
+                 FROM rating_events re
+                 WHERE re.kind = 'explicit'
+             )
+             SELECT DISTINCT COALESCE(a.author, e.author) AS author
+             FROM ranked r
+             JOIN articles a ON a.id = r.article_id
+             LEFT JOIN entries e ON e.id = a.best_entry_id
+             WHERE r.event_rank = 1 AND r.label = 'slop'
+               AND COALESCE(a.author, e.author) IS NOT NULL
+             ORDER BY author",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     async fn latest_explicit_ratings(
         &self,
         lookback_days: i64,
@@ -1549,6 +1576,67 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(sources, ["cli", "cli", "bookorbit", "cli"]);
+    }
+
+    #[tokio::test]
+    async fn slop_authors_follow_the_latest_verdict_and_fall_back_to_the_entry_author() {
+        let (_dir, db) = temp_db().await;
+        db.upsert_entry(&sample_entry(1)).await.unwrap();
+        db.upsert_entry(&sample_entry(2)).await.unwrap();
+        let mut page_author = Article {
+            id: 0,
+            canonical_url: "https://example.com/1".into(),
+            title: "Story 1".into(),
+            best_entry_id: 1,
+            content_html: "<p>body</p>".into(),
+            word_count: 900,
+            excerpt_only: false,
+            image_count: 0,
+            sources: vec![],
+            first_seen: ts("2026-08-15T05:30:00Z"),
+            url: "https://example.com/1".into(),
+            author: Some("Page Writer".into()),
+            feed_id: 7,
+            feed_title: "Hacker News".into(),
+            category: None,
+            published_at: None,
+            comments_url: None,
+            image_urls: vec![],
+            social: vec![],
+            extract_method: ExtractMethod::Miniflux,
+        };
+        let first = db.upsert_article(&page_author).await.unwrap();
+        page_author.canonical_url = "https://example.com/2".into();
+        page_author.url = "https://example.com/2".into();
+        page_author.best_entry_id = 2;
+        page_author.author = None;
+        let second = db.upsert_article(&page_author).await.unwrap();
+        let event = |article_id: i64, label: &str, at: &str| RatingEvent {
+            id: 0,
+            user_id: None,
+            article_id,
+            issue_date: None,
+            kind: "explicit".into(),
+            source: "cli".into(),
+            label: label.into(),
+            value: -1.0,
+            note: None,
+            event_at: ts(at),
+        };
+        assert!(db.slop_authors().await.unwrap().is_empty());
+        // Ancient verdicts still count: there is no lookback.
+        db.append_rating_event(&event(first, "slop", "2020-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        db.append_rating_event(&event(second, "slop", "2026-08-15T12:00:00Z"))
+            .await
+            .unwrap();
+        assert_eq!(db.slop_authors().await.unwrap(), ["Page Writer", "someone"]);
+        // A later verdict on the same article replaces the slop one.
+        db.append_rating_event(&event(second, "cleared", "2026-08-15T13:00:00Z"))
+            .await
+            .unwrap();
+        assert_eq!(db.slop_authors().await.unwrap(), ["Page Writer"]);
     }
 
     #[tokio::test]

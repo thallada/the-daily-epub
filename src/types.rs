@@ -685,6 +685,10 @@ pub enum Vote {
     Good,
     #[serde(rename = "down")]
     NotForMe,
+    /// The article reads as AI-generated filler. A full negative, and every
+    /// later article by the same author is heavily penalized (§9.3).
+    #[serde(rename = "slop")]
+    Slop,
 }
 
 impl Vote {
@@ -694,6 +698,27 @@ impl Vote {
             Vote::Loved => "loved",
             Vote::Good => "good",
             Vote::NotForMe => "down",
+            Vote::Slop => "slop",
+        }
+    }
+
+    /// The `rating_events.label` this vote is stored under.
+    pub fn event_label(self) -> &'static str {
+        match self {
+            Vote::Loved => "loved",
+            Vote::Good => "good",
+            Vote::NotForMe => "not_for_me",
+            Vote::Slop => "slop",
+        }
+    }
+
+    /// The reader-facing name of the verdict.
+    pub fn display(self) -> &'static str {
+        match self {
+            Vote::Loved => "Loved it",
+            Vote::Good => "Good",
+            Vote::NotForMe => "Not for me",
+            Vote::Slop => "AI slop",
         }
     }
 
@@ -702,6 +727,7 @@ impl Vote {
             "loved" | "up" => Some(Vote::Loved),
             "good" => Some(Vote::Good),
             "down" => Some(Vote::NotForMe),
+            "slop" => Some(Vote::Slop),
             _ => None,
         }
     }
@@ -711,6 +737,7 @@ impl Vote {
             Vote::Loved => cfg.loved_value,
             Vote::Good => cfg.good_value,
             Vote::NotForMe => cfg.not_for_me_value,
+            Vote::Slop => cfg.slop_value,
         }
     }
 }
@@ -870,6 +897,12 @@ mod tests {
         assert_eq!(Vote::parse("up"), Some(Vote::Loved));
         assert_eq!(Vote::parse("good"), Some(Vote::Good));
         assert_eq!(Vote::parse("down"), Some(Vote::NotForMe));
+        assert_eq!(Vote::parse("slop"), Some(Vote::Slop));
+        assert_eq!(Vote::Slop.as_str(), "slop");
+        assert_eq!(Vote::Slop.event_label(), "slop");
+        assert_eq!(Vote::NotForMe.event_label(), "not_for_me");
+        assert_eq!(Vote::Slop.value(&feedback), -1.0);
+        assert_eq!(serde_json::to_string(&Vote::Slop).unwrap(), "\"slop\"");
         assert_eq!(Vote::Loved.as_str(), "loved");
         assert_eq!(Vote::Good.as_str(), "good");
         assert_eq!(Vote::NotForMe.as_str(), "down");

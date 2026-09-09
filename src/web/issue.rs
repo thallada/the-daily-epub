@@ -2769,6 +2769,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slop_verdict_is_stored_under_its_own_label_and_names_the_author() {
+        let (_dir, db, source) = seeded_issue(true).await;
+        let article_id = source.lineup.picks[0].article.id;
+        sqlx::query("UPDATE articles SET author = ? WHERE id = ?")
+            .bind("Content Farm")
+            .bind(article_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        crate::web::users::add(&db, "admin", "correct horse battery", true)
+            .await
+            .unwrap();
+        let app = crate::server::router(crate::server::AppState::new(
+            db.clone(),
+            crate::config::Config::default(),
+            None,
+        ));
+        let admin_cookie = login_cookie(&app, "admin", "correct horse battery").await;
+
+        let json = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/rate")
+                    .header(header::COOKIE, &admin_cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json")
+                    .header("sec-fetch-site", "same-origin")
+                    .body(Body::from(
+                        json!({"article_id": article_id, "label": "slop"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&response_text(json).await).unwrap();
+        assert_eq!(body["label"], "slop");
+        let stored = sqlx::query("SELECT label, value FROM rating_events ORDER BY id DESC LIMIT 1")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(stored.get::<String, _>("label"), "slop");
+        assert_eq!(stored.get::<f64, _>("value"), -1.0);
+        assert_eq!(db.slop_authors().await.unwrap(), ["Content Farm"]);
+
+        let redirected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/rate")
+                    .header(header::COOKIE, &admin_cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header("sec-fetch-site", "same-origin")
+                    .body(Body::from(format!(
+                        "article_id={article_id}&label=slop&next=%2Fissues%2F{}",
+                        source.meta.date
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redirected.status(), StatusCode::SEE_OTHER);
+        let page = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{}", source.meta.date))
+                    .header(header::COOKIE, &admin_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = response_text(page).await;
+        assert!(html.contains("Future articles by Content Farm will rank much lower"));
+        assert!(html.contains(r#"data-label="slop" title="Report as AI slop"#));
+        assert!(html.contains(r#"value="slop" data-label="slop" title="Report as AI slop: a strong Not for me, and future articles by this author rank much lower" class="active" aria-pressed="true""#));
+    }
+
+    #[tokio::test]
     async fn toc_numbers_chapters_across_sections_and_tracks_the_reader() {
         let (_dir, db, source) = seeded_issue(true).await;
         let view = load(&db, &crate::config::Config::default(), source.meta.date)

@@ -257,6 +257,7 @@ pub fn widget_label(label: Option<&str>) -> &'static str {
         Some("not_for_me" | "down") => "down",
         Some("loved") => "loved",
         Some("good") => "good",
+        Some("slop") => "slop",
         Some("cleared") => "cleared",
         _ => "",
     }
@@ -297,6 +298,7 @@ pub struct SignalsView {
     pub neighbours: Vec<NeighbourLine>,
     pub exploration: bool,
     pub auto_include: bool,
+    pub slop_author: bool,
     pub notes: Vec<String>,
     /// A thin hygiene row (`{}`) or unparseable JSON: nothing to show.
     pub empty: bool,
@@ -357,6 +359,7 @@ impl SignalsView {
                 .collect(),
             exploration: signals.exploration,
             auto_include: signals.auto_include,
+            slop_author: signals.slop_author,
             notes: signals.notes.clone(),
             empty,
         }

@@ -72,11 +72,29 @@ pub struct Signals {
     pub notes: Vec<String>,
     /// Preliminary blend on a 0–100 scale; `None` when nothing is present.
     pub preliminary: Option<f64>,
+    /// The author has a current *AI slop* verdict (§9.3).
+    #[serde(default)]
+    pub slop_author: bool,
     /// Gate ramps applied to the learned signals' weights (§9.2, §9.3).
     #[serde(skip)]
     pub knn_gate: f64,
     #[serde(skip)]
     pub feed_gate: f64,
+    /// `ranking.slop_author_penalty`, applied when `slop_author` is set.
+    #[serde(skip)]
+    pub slop_penalty: f64,
+}
+
+impl Signals {
+    /// The multiplier the slop-author penalty applies to the blend and the
+    /// utility: `1 − penalty` for a reported author, `1` otherwise (§9.3).
+    pub fn slop_factor(&self) -> f64 {
+        if self.slop_author {
+            (1.0 - self.slop_penalty).clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
 }
 
 impl Signals {
@@ -161,6 +179,9 @@ pub struct PreferenceState {
     pub examples: Vec<RatedExample>,
     feed_rates: HashMap<FeedId, FeedRate>,
     author_rates: HashMap<String, FeedRate>,
+    /// Normalized keys of authors with a current *AI slop* verdict (§9.3).
+    slop_authors: HashSet<String>,
+    pub slop_author_penalty: f64,
     pub attributable_feed_ratings: usize,
     pub knn_gate: f64,
     pub feed_gate: f64,
@@ -183,8 +204,34 @@ impl PreferenceState {
             examples,
             feed_rates,
             author_rates,
+            slop_authors: HashSet::new(),
+            slop_author_penalty: ranking.slop_author_penalty,
             attributable_feed_ratings,
         }
+    }
+
+    /// Register the authors whose current verdict is *AI slop*; keys are
+    /// normalized like [`normalize_author`] and empty ones are dropped.
+    pub fn with_slop_authors<I, S>(mut self, authors: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.slop_authors = authors
+            .into_iter()
+            .filter_map(|author| normalize_author(Some(author.as_ref())))
+            .collect();
+        self
+    }
+
+    /// Whether the article's author has a current *AI slop* verdict (§9.3).
+    pub fn is_slop_author(&self, article: &Article) -> bool {
+        normalize_author(article.author.as_deref())
+            .is_some_and(|author| self.slop_authors.contains(&author))
+    }
+
+    pub fn slop_author_count(&self) -> usize {
+        self.slop_authors.len()
     }
 
     /// Load `db::current_ratings(rating_lookback_days)` joined to
@@ -227,7 +274,8 @@ impl PreferenceState {
                 aggregator_only,
             });
         }
-        Ok(Self::build(examples, ranking))
+        let slop_authors = db.slop_authors().await?;
+        Ok(Self::build(examples, ranking).with_slop_authors(slop_authors))
     }
 
     pub fn summary(&self) -> PreferenceSummary {
@@ -253,11 +301,14 @@ impl PreferenceState {
             rated_with_embeddings = self.examples.len(),
             knn_gate = self.knn_gate,
             feed_gate = self.feed_gate,
-            "preference: {} rated articles with embeddings → knn gate {:.2}; feed gate {:.1} {}",
+            slop_authors = self.slop_authors.len(),
+            "preference: {} rated articles with embeddings → knn gate {:.2}; feed gate {:.1} {}; {} slop authors (penalty {:.2})",
             self.examples.len(),
             self.knn_gate,
             self.feed_gate,
-            feed_detail
+            feed_detail,
+            self.slop_authors.len(),
+            self.slop_author_penalty
         );
     }
 
@@ -540,6 +591,14 @@ pub fn compute(
                 signals.neighbours = neighbours;
             }
             signals.feed = preference.feed(article);
+            if preference.is_slop_author(article) {
+                signals.slop_author = true;
+                signals.slop_penalty = preference.slop_author_penalty;
+                signals.notes.push(format!(
+                    "author reported as AI slop: blend and utility × {:.2}",
+                    signals.slop_factor()
+                ));
+            }
             if preference.knn_gate > 0.0 {
                 signals.notes.push(format!(
                     "knn gate {:.2} (n={} rated with embeddings)",
@@ -615,7 +674,8 @@ pub fn normalize(signals: &mut [&mut Signals]) {
 }
 
 /// The preliminary blend of §12.4 on a 0–100 scale: present-and-active
-/// signals only, learned weights multiplied by their gate, renormalized to 1.
+/// signals only, learned weights multiplied by their gate, renormalized to 1,
+/// then scaled by the slop-author factor (§9.3).
 pub fn preliminary_blend(signals: &mut Signals, configured: &PreliminaryWeights) -> Option<f64> {
     let candidates = [
         ("interest", configured.interest, 1.0),
@@ -646,7 +706,8 @@ pub fn preliminary_blend(signals: &mut Signals, configured: &PreliminaryWeights)
         .iter()
         .map(|(_, weight, norm)| weight / total * norm)
         .sum::<f64>()
-        * 100.0;
+        * 100.0
+        * signals.slop_factor();
     signals.preliminary = Some(blend);
     Some(blend)
 }
@@ -962,6 +1023,63 @@ mod tests {
         assert_eq!(state.feed_credit(10), Some((0.0, 0.25)));
         assert_eq!(state.author_credit(""), None);
         assert!((state.feed(&article(2, &[10])).unwrap() - 1.0 / 2.25).abs() < 1e-9);
+    }
+
+    // --- §9.3 slop authors ---
+
+    #[test]
+    fn slop_authors_are_normalized_and_scale_the_preliminary_blend() {
+        let state = PreferenceState::build(Vec::new(), &ranking()).with_slop_authors([
+            "  Content   FARM ",
+            "",
+            "   ",
+        ]);
+        assert_eq!(state.slop_author_count(), 1);
+        let mut reported = article(1, &[10]);
+        reported.author = Some("content farm".into());
+        let mut other = article(2, &[10]);
+        other.author = Some("real writer".into());
+        let anonymous = article(3, &[10]);
+        assert!(state.is_slop_author(&reported));
+        assert!(!state.is_slop_author(&other));
+        assert!(!state.is_slop_author(&anonymous));
+
+        let articles = vec![reported, other, anonymous];
+        let computed = compute(
+            &articles,
+            &HashMap::new(),
+            &HashMap::new(),
+            &state,
+            &ranking(),
+        );
+        let reported = &computed[&1];
+        let other = &computed[&2];
+        assert!(reported.slop_author);
+        assert!(!other.slop_author);
+        // Identical heuristic/social inputs: the only difference is the factor.
+        assert!((reported.preliminary.unwrap() - other.preliminary.unwrap() * 0.25).abs() < 1e-9);
+        assert!(
+            reported
+                .notes
+                .iter()
+                .any(|note| note.contains("author reported as AI slop"))
+        );
+        assert!(!other.notes.iter().any(|note| note.contains("AI slop")));
+    }
+
+    #[test]
+    fn slop_factor_is_neutral_without_a_report_and_clamped_with_one() {
+        let mut signals = Signals {
+            slop_penalty: 0.75,
+            ..Signals::default()
+        };
+        assert_eq!(signals.slop_factor(), 1.0);
+        signals.slop_author = true;
+        assert!((signals.slop_factor() - 0.25).abs() < 1e-9);
+        signals.slop_penalty = 1.0;
+        assert_eq!(signals.slop_factor(), 0.0);
+        signals.slop_penalty = 0.0;
+        assert_eq!(signals.slop_factor(), 1.0);
     }
 
     #[test]

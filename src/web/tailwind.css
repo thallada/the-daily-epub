@@ -151,7 +151,7 @@
   .badge { @apply inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 font-sans text-xs font-medium leading-5 tabular-nums; color:var(--ink-2); background:color-mix(in oklab, var(--ink) 8%, transparent); }
   .badge.selected, .badge.loved, .badge.ok { color:var(--loved); background:color-mix(in oklab, var(--loved) 14%, transparent); }
   .badge.good, .badge.assessed, .badge.triaged, .badge.degraded { color:var(--good); background:color-mix(in oklab, var(--good) 14%, transparent); }
-  .badge.down, .badge.excluded, .badge.failed, .badge.dry_run { color:var(--down); background:color-mix(in oklab, var(--down) 14%, transparent); }
+  .badge.down, .badge.slop, .badge.excluded, .badge.failed, .badge.dry_run { color:var(--down); background:color-mix(in oklab, var(--down) 14%, transparent); }
   .badge.shortlisted, .badge.admitted, .badge.eligible, .badge.cleared, .badge.reason, .badge.running, .badge.requested { color:var(--muted); background:color-mix(in oklab, var(--muted) 14%, transparent); }
   .badge.restart, .badge.warn { color:var(--warn); background:color-mix(in oklab, var(--warn) 16%, transparent); }
 
@@ -196,7 +196,7 @@
   .rating button[data-label]:not(.clear) { @apply -ml-px rounded-none border-rule bg-transparent px-2 py-1 text-ink-2 first:ml-0 first:rounded-l-sm last:rounded-r-sm hover:z-10 hover:border-ink hover:bg-paper-2 hover:text-ink; }
   .rating button.active[data-label="loved"] { @apply z-10 border-loved text-loved; background:color-mix(in oklab, var(--loved) 14%, transparent); }
   .rating button.active[data-label="good"] { @apply z-10 border-good text-good; background:color-mix(in oklab, var(--good) 14%, transparent); }
-  .rating button.active[data-label="down"] { @apply z-10 border-down text-down; background:color-mix(in oklab, var(--down) 14%, transparent); }
+  .rating button.active[data-label="down"], .rating button.active[data-label="slop"] { @apply z-10 border-down text-down; background:color-mix(in oklab, var(--down) 14%, transparent); }
   .rating button.clear { @apply invisible ml-1.5 border-0 bg-transparent px-1 text-muted underline decoration-rule underline-offset-4 hover:text-ink; }
   .rating:has(button[data-label]:not(.clear).active) button.clear, .rating button.clear.active { @apply visible; }
   .rating button.clear.active { @apply no-underline; }
@@ -288,7 +288,7 @@
   td .rating-note-label { @apply sr-only; }
   td .rating-note input { @apply text-xs; }
   /* the ratings table's verdict cell: one column, buttons then note, nothing wraps */
-  .rating-cell .rating { @apply grid w-[15rem] grid-cols-1 gap-y-1.5; }
+  .rating-cell .rating { @apply grid w-[18rem] grid-cols-1 gap-y-1.5; }
   .rating-cell .rating-actions { @apply flex w-full min-h-0 items-center; }
   .rating-cell .rating button.clear { @apply ml-auto; }
 
