@@ -138,12 +138,13 @@ if (tocPanel) {
     const current = tocPanel.querySelector(".toc-link[aria-current]");
     if (!current || tocPanel.scrollHeight <= tocPanel.clientHeight) return;
     const stickyHeader = tocPanel.querySelector(":scope > div");
-    const topMargin = (stickyHeader && stickyHeader.offsetHeight > 0 ? stickyHeader.offsetHeight : 0) + 24;
+    const revealMargin = 1.5 * parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const topMargin = (stickyHeader && stickyHeader.offsetHeight > 0 ? stickyHeader.offsetHeight : 0) + revealMargin;
     const panelRect = tocPanel.getBoundingClientRect();
     const currentRect = current.getBoundingClientRect();
     const top = tocPanel.scrollTop + currentRect.top - panelRect.top;
     const visibleTop = tocPanel.scrollTop + topMargin;
-    const visibleBottom = tocPanel.scrollTop + tocPanel.clientHeight - 24;
+    const visibleBottom = tocPanel.scrollTop + tocPanel.clientHeight - revealMargin;
     if (top >= visibleTop && top + currentRect.height <= visibleBottom) return;
     const target = Math.max(0, top - Math.max(topMargin, (tocPanel.clientHeight - currentRect.height) / 2));
     tocPanel.scrollTo({ top: target, behavior: reducedMotion.matches ? "auto" : "smooth" });

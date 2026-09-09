@@ -42,7 +42,7 @@
 <p class="text-sm"><a href="/dashboard/jobs">All jobs</a></p>
 </section>
 {% if !config_warnings.is_empty() %}<section class="card"><h2>Config on disk</h2>
-<ul class="warnings error list-disc pl-5">{% for line in config_warnings %}<li>{{ line }}</li>{% endfor %}</ul>
+<ul class="warnings error list-disc pl-5 [overflow-wrap:anywhere]">{% for line in config_warnings %}<li>{{ line }}</li>{% endfor %}</ul>
 <p class="text-sm"><a href="/dashboard/settings">Settings</a></p>
 </section>{% endif %}
 </div>

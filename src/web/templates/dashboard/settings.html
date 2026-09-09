@@ -9,8 +9,8 @@
 <form method="post" action="/dashboard/settings" class="settings-form" id="settings-form">
 {% for group in groups %}<section class="card scroll-mt-4" id="{{ group.id }}">
 <div>
-<p class="page-eyebrow font-mono normal-case tracking-normal">{{ group.id }}</p>
-<h2 class="mt-0.5">{{ group.title }}</h2>
+<p class="page-eyebrow font-mono normal-case tracking-normal [overflow-wrap:anywhere]">{{ group.id }}</p>
+<h2 class="mt-0.5 [overflow-wrap:anywhere]">{{ group.title }}</h2>
 </div>
 {% match group.provider %}{% when Some with (provider) %}<p class="meta text-xs">Key: <code>{{ crate::config::ProviderConfig::api_key_env_var(provider.name) }}</code> in the env file. {% if provider.removable() %}Not named by any <code>[llm]</code> role. <button type="submit" form="remove-{{ provider.name }}" class="danger">Remove provider</button>{% else if provider.built_in %}Built in: declared by the defaults, so it can be edited and left unreferenced but not removed.{% else %}Named by <code>llm.{{ provider.roles() }}</code>; reassign the role before removing it.{% endif %}</p>{% when None %}{% endmatch %}
 {% if group.is_weights() %}<p class="meta text-xs">Weights need not sum to 1; they are renormalized over the signals present for each article.</p>{% endif %}

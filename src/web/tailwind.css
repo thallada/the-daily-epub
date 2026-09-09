@@ -114,7 +114,8 @@
 
 @layer base {
   [hidden] { display:none !important; }
-  html { @apply bg-paper text-ink antialiased; }
+  /* Match the site's preferred 110% browser-zoom reading scale by default. */
+  html { font-size:110%; @apply bg-paper text-ink antialiased; }
   body { @apply m-0 min-h-screen bg-paper font-serif text-[1.0625rem] leading-[1.65] text-ink; font-optical-sizing:auto; }
   ::selection { background:color-mix(in oklab, var(--accent) 24%, transparent); }
   a { @apply text-accent decoration-rule underline-offset-4 transition-colors duration-150 hover:text-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper; }
