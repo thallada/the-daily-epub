@@ -160,7 +160,14 @@ impl Article {
         let publication = self
             .publication
             .clone()
-            .or_else(|| domain(&self.canonical_url))?;
+            // Covers rows stored before Scour wrappers were unwrapped.
+            .or_else(|| {
+                domain(
+                    crate::dedupe::canonical_url(&self.canonical_url)
+                        .as_deref()
+                        .unwrap_or(&self.canonical_url),
+                )
+            })?;
         (!publication
             .trim()
             .eq_ignore_ascii_case(self.feed_title.trim()))
@@ -911,6 +918,14 @@ mod tests {
     #[test]
     fn publication_label_falls_back_to_the_domain_without_www() {
         let article = publication_article();
+        assert_eq!(article.publication_label().as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn publication_label_unwraps_stored_scour_urls() {
+        let mut article = publication_article();
+        article.canonical_url =
+            "https://scour.ing/r/rss/https%3A%2F%2Fwww.example.com%2Fpost".into();
         assert_eq!(article.publication_label().as_deref(), Some("example.com"));
     }
 

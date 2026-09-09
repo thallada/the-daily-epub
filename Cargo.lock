@@ -905,6 +905,7 @@ dependencies = [
  "lettre",
  "libc",
  "password-auth",
+ "percent-encoding",
  "rand 0.10.2",
  "reqwest",
  "resvg",

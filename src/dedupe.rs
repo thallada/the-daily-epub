@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use jiff::Timestamp;
+use percent_encoding::percent_decode_str;
 use url::Url;
 
 use crate::types::{Article, Entry, ExtractMethod, SourceKind, SourceRef};
@@ -109,6 +110,16 @@ fn is_tracking_param(key: &str) -> bool {
 /// The real destination behind a known redirector, if any (§3.2).
 fn redirect_target(url: &Url) -> Option<String> {
     let host = url.host_str()?.to_ascii_lowercase();
+    if matches!(host.as_str(), "scour.ing" | "www.scour.ing")
+        && let Some(encoded) = url.path().strip_prefix("/r/rss/")
+    {
+        let target = percent_decode_str(encoded).decode_utf8().ok()?.into_owned();
+        let target_url = Url::parse(&target).ok()?;
+        if matches!(target_url.scheme(), "http" | "https") && target_url.host_str().is_some() {
+            return Some(target);
+        }
+        return None;
+    }
     let is_google_news = host == "news.google.com" || host.ends_with(".news.google.com");
     let is_google_redirect = host == "news.url.google.com"
         || ((host == "www.google.com" || host == "google.com") && url.path() == "/url");
@@ -489,6 +500,21 @@ mod tests {
             (
                 "https://www.google.com/url?q=https://example.com/real&sa=D",
                 Some("https://example.com/real"),
+            ),
+            // Scour RSS redirectors encode the real URL in the path
+            (
+                "https://scour.ing/r/rss/https%3A%2F%2Frmzlb.github.io%2Fnotifyd%2Farticles%2Fpostgres-queue-what-skip-locked-does-not-give-you.html",
+                Some(
+                    "https://rmzlb.github.io/notifyd/articles/postgres-queue-what-skip-locked-does-not-give-you.html",
+                ),
+            ),
+            (
+                "https://www.scour.ing/r/rss/https%3A%2F%2Fexample.com%2Fpost%3Fid%3D7%26utm_source%3Dscour%26utm_medium%3Drss",
+                Some("https://example.com/post?id=7"),
+            ),
+            (
+                "https://scour.ing/@tyler/interests/Kernel%20Development",
+                Some("https://scour.ing/@tyler/interests/Kernel%20Development"),
             ),
             // non-http schemes and junk
             ("mailto:tyler@hallada.net", None),
