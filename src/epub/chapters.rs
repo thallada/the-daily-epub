@@ -370,6 +370,14 @@ fn source_line(article: &Article) -> String {
     }
 }
 
+/// The index's meta lead: the author, when known, ahead of [`source_line`].
+fn index_source_line(article: &Article) -> String {
+    match article.author_label() {
+        Some(author) => format!("{author} · {}", source_line(article)),
+        None => source_line(article),
+    }
+}
+
 /// "In This Issue": per section, each article's title, source, reading time and
 /// summary, linked to its chapter (§3.10).
 pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
@@ -382,7 +390,7 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
             .map(|pick| IndexEntry {
                 href: article_href(pick),
                 title: pick.article.title.clone(),
-                source: source_line(&pick.article),
+                source: index_source_line(&pick.article),
                 reading_minutes: pick.article.reading_minutes(),
                 summary: summary_for(issue, pick).unwrap_or_default().to_string(),
                 why: pick.why.clone(),
@@ -891,14 +899,16 @@ mod tests {
         let mut issue = issue();
         issue.lineup.picks[0].article.publication = Some("Example Journal".into());
         issue.lineup.picks[1].article.publication = Some("Example Feed".into());
+        issue.lineup.picks[1].article.author = Some("example feed".into());
 
         let index = render_in_this_issue(&issue).unwrap();
         assert!(
             index
                 .xhtml
-                .contains("Example Feed · Example Journal &#183; 6 min read")
+                .contains("A. Writer · Example Feed · Example Journal &#183; 6 min read")
         );
         assert!(!index.xhtml.contains("Example Feed · Example Feed"));
+        assert!(!index.xhtml.contains("example feed · Example Feed"));
 
         let article = render_article(
             &issue,

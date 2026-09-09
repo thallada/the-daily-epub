@@ -876,6 +876,7 @@ struct FullEntry {
     title: String,
     href: String,
     dashboard_href: String,
+    author: Option<String>,
     source: Source,
     reading_minutes: i64,
     is_lead: bool,
@@ -1021,6 +1022,7 @@ pub async fn render_full(
                     title: pick.article.title.clone(),
                     href: article_href(date, pick.article.id),
                     dashboard_href: format!("/dashboard/articles/{}", pick.article.id),
+                    author: pick.article.author_label(),
                     source: Source::new(&pick.article, &config, is_admin),
                     reading_minutes: pick.article.reading_minutes(),
                     is_lead: pick.is_lead,
@@ -1946,6 +1948,13 @@ mod tests {
     #[tokio::test]
     async fn signed_in_full_issue_article_world_and_behind_render_private_content() {
         let (_dir, db, source) = seeded_issue(true).await;
+        let matching_author = &source.lineup.picks[1].article;
+        sqlx::query("UPDATE articles SET author = ? WHERE id = ?")
+            .bind(format!(" {} ", matching_author.feed_title.to_lowercase()))
+            .bind(matching_author.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
         crate::web::users::add(&db, "reader", "correct horse battery", false)
             .await
             .unwrap();
@@ -1993,6 +2002,8 @@ mod tests {
         assert!(issue.contains("A short abstract for the second piece"));
         assert!(issue.contains("Why it"));
         assert!(issue.contains("Interests: Filesystems, Rust"));
+        assert!(issue.contains("A. Writer · Example Feed"));
+        assert!(!issue.contains("example feed · Example Feed"));
         assert!(issue.contains("World Briefing"));
         assert!(issue.contains("Behind the paper"));
         assert!(!issue.contains("Was this a good pick?"));
