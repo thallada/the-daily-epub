@@ -88,7 +88,7 @@ struct FeedRow {
     /// timestamps sit in the cell's tooltip.
     seen: String,
     decided_at: String,
-    /// `{miniflux.base_url}/feeds/{id}` for a candidate we subscribed to.
+    /// The Miniflux web UI page for a candidate we subscribed to.
     miniflux_href: Option<String>,
 }
 
@@ -157,10 +157,9 @@ async fn index(
         None => load_evidence(db, &config, &candidates).await?,
     };
     let titles = article_titles(db, &candidates).await?;
-    let base_url = config.miniflux.base_url.trim_end_matches('/').to_string();
     let rows: Vec<FeedRow> = candidates
         .iter()
-        .map(|candidate| row(candidate, &evidence, &titles, &config, &base_url))
+        .map(|candidate| row(candidate, &evidence, &titles, &config))
         .collect();
 
     // The picker is only ever used by the candidate view, so only it pays for
@@ -381,7 +380,6 @@ fn row(
     evidence: &HashMap<ArticleId, ArticleEvidence>,
     titles: &HashMap<ArticleId, String>,
     config: &Config,
-    base_url: &str,
 ) -> FeedRow {
     let mut scored = evidence_of(candidate, evidence);
     let score = discovery::score(&scored);
@@ -433,7 +431,7 @@ fn row(
         decided_at: fmt_stored_time(candidate.decided_at.as_deref(), config),
         miniflux_href: candidate
             .miniflux_feed_id
-            .map(|feed_id| format!("{base_url}/feeds/{feed_id}")),
+            .map(|feed_id| config.miniflux.feed_url(feed_id)),
     }
 }
 
@@ -610,7 +608,7 @@ mod tests {
         assert!(body.contains("Added Strong Blog."), "{body}");
         let added =
             response_text(get(&app, "/dashboard/feeds?status=added", Some(&admin)).await).await;
-        assert!(added.contains("/feeds/77"), "{added}");
+        assert!(added.contains("/feed/77/entries"), "{added}");
     }
 
     #[tokio::test]
