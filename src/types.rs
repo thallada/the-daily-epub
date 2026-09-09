@@ -174,6 +174,13 @@ impl Article {
         .then_some(publication)
     }
 
+    /// The trimmed author, unless empty or identical to the feed name.
+    pub fn author_label(&self) -> Option<String> {
+        let author = self.author.as_deref()?.trim();
+        (!author.is_empty() && !author.eq_ignore_ascii_case(self.feed_title.trim()))
+            .then(|| author.to_string())
+    }
+
     /// Stable EPUB chapter id used by TOC and rating links (implementation notes §12).
     pub fn chapter_id(&self) -> String {
         format!("art-{}", self.best_entry_id)
@@ -942,6 +949,19 @@ mod tests {
         let mut article = publication_article();
         article.feed_title = " EXAMPLE.com ".into();
         assert_eq!(article.publication_label(), None);
+    }
+
+    #[test]
+    fn author_label_trims_and_omits_empty_or_matching_authors() {
+        let mut article = publication_article();
+        article.author = Some("  Jane Doe  ".into());
+        assert_eq!(article.author_label().as_deref(), Some("Jane Doe"));
+
+        article.author = Some("  ".into());
+        assert_eq!(article.author_label(), None);
+
+        article.author = Some("  a FEED ".into());
+        assert_eq!(article.author_label(), None);
     }
 
     #[test]

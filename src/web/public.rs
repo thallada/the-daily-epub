@@ -114,7 +114,7 @@ impl From<&Issue> for PublicIssue {
                             PublicEntry {
                                 title: article.title.clone(),
                                 url: article.canonical_url.clone(),
-                                author: article.author.clone(),
+                                author: article.author_label(),
                                 source: article.feed_title.clone(),
                                 publication: article.publication_label(),
                                 reading_minutes: article.reading_minutes(),
