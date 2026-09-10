@@ -9,7 +9,8 @@ use serde::Deserialize;
 use super::llm::{LlmClient, LlmError, Llms};
 use super::{escape_html, prompt_text, text_to_paragraphs, truncate_tokens, truncate_words};
 use crate::config::{EditorialConfig, SummaryModel};
-use crate::types::{ArticleId, Editorial, Lineup, Pick};
+use crate::extract::EXCERPT_NOTE;
+use crate::types::{Article, ArticleId, Editorial, Lineup, Pick};
 
 pub const FALLBACK_SUMMARY_WORDS: usize = 45;
 
@@ -34,10 +35,17 @@ DO NOT
 reader as \"you\".
 - Open with \"This article…\", \"The author…\", \"In this post…\", or repeat the \
 headline's words.
-- Invent facts, names, numbers or conclusions that are not in the text. If the \
-text is a truncated excerpt, summarize only what is there and say it is an \
-excerpt.
+- Invent facts, names, numbers or conclusions that are not in the text.
 - Recommend, rate or editorialize — that is the front page's job.
+- Label the abstract. Never append \"(Excerpt.)\", \"(Summary.)\" or any note \
+about the text you were given.
+
+PARTIAL TEXT
+- Text marked \"truncated for length\" is the opening of a longer piece that the \
+reader gets in full. Write the abstract from what is there, with no caveat.
+- Text marked \"opening excerpt only\" is all the paper has of a piece that \
+lives behind the link. Summarize what the opening establishes, and end with one \
+plain clause that only the opening was available — not a parenthetical.
 
 Return JSON exactly: {\"summary\": \"<two or three sentences>\"}";
 
@@ -68,19 +76,46 @@ struct SummaryResponse {
     summary: String,
 }
 
-fn summary_prompt(title: &str, body_html: &str, input_tokens: usize) -> String {
-    let body = truncate_tokens(&prompt_text(body_html), input_tokens);
+/// How much of the piece the summarizer is looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummarySource {
+    /// The extracted article body (possibly cut to the token budget).
+    FullText,
+    /// Only the feed's teaser was available (paywall, stub, fetch failure).
+    ExcerptOnly,
+}
+
+impl SummarySource {
+    pub fn for_article(article: &Article) -> Self {
+        if article.excerpt_only {
+            Self::ExcerptOnly
+        } else {
+            Self::FullText
+        }
+    }
+}
+
+fn summary_prompt(
+    title: &str,
+    body_html: &str,
+    source: SummarySource,
+    input_tokens: usize,
+) -> String {
+    // The extractor's reader-facing note must not reach the model: it mirrors it.
+    let text = prompt_text(body_html).replace(EXCERPT_NOTE, "");
+    let body = truncate_tokens(text.trim(), input_tokens);
+    let label = match (source, body.ends_with('…')) {
+        (SummarySource::ExcerptOnly, _) => " (opening excerpt only)",
+        (SummarySource::FullText, true) => " (truncated for length)",
+        (SummarySource::FullText, false) => "",
+    };
     let mut prompt = String::with_capacity(body.len() + SUMMARY_INSTRUCTIONS.len() + 256);
     prompt.push_str(SUMMARY_INSTRUCTIONS);
     let _ = write!(
         prompt,
         "\n\nHEADLINE: {}\n\nARTICLE TEXT{}:\n{}\n",
         title.trim(),
-        if body.ends_with('…') {
-            " (truncated for length)"
-        } else {
-            ""
-        },
+        label,
         if body.is_empty() {
             "(no body text was extracted; summarize from the headline alone and say the full text was unavailable)"
         } else {
@@ -90,16 +125,41 @@ fn summary_prompt(title: &str, body_html: &str, input_tokens: usize) -> String {
     prompt
 }
 
+/// Drop a trailing label such as `(Excerpt.)` or `(Excerpt only.)` that a
+/// model appends despite the instructions. Only a short parenthetical that
+/// starts with "excerpt" or "summary" is removed; real sentences stay.
+pub fn strip_trailing_label(summary: &str) -> &str {
+    let trimmed = summary.trim_end();
+    let Some(open) = trimmed.rfind('(') else {
+        return trimmed;
+    };
+    let tail = &trimmed[open..];
+    let inner = tail
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim()
+        .to_ascii_lowercase();
+    let is_label = tail.ends_with(')')
+        && inner.len() <= 24
+        && (inner.starts_with("excerpt") || inner.starts_with("summary"));
+    if is_label {
+        trimmed[..open].trim_end()
+    } else {
+        trimmed
+    }
+}
+
 pub async fn summarize_article(
     llm: &LlmClient,
     title: &str,
     body_html: &str,
+    source: SummarySource,
     input_tokens: usize,
     temperature: f32,
 ) -> Result<String, LlmError> {
-    let prompt = summary_prompt(title, body_html, input_tokens);
+    let prompt = summary_prompt(title, body_html, source, input_tokens);
     let response: SummaryResponse = llm.complete_json(&prompt, temperature).await?;
-    let summary = response.summary.trim().to_string();
+    let summary = strip_trailing_label(&response.summary).to_string();
     if summary.is_empty() {
         return Err(LlmError::empty_response(llm.provider()));
     }
@@ -134,6 +194,7 @@ async fn summarize_pick(
         primary,
         &pick.article.title,
         &pick.article.content_html,
+        SummarySource::for_article(&pick.article),
         config.summary_input_tokens,
         temperature,
     )
@@ -150,6 +211,7 @@ async fn summarize_pick(
                 fallback,
                 &pick.article.title,
                 &pick.article.content_html,
+                SummarySource::for_article(&pick.article),
                 config.summary_input_tokens,
                 temperature,
             )
@@ -459,9 +521,16 @@ mod tests {
         );
         let llm = mock("deepseek", Arc::clone(&backend), 2.0);
         let body = format!("<p>{}</p>", "word ".repeat(20_000));
-        let summary = summarize_article(&llm, "Migrating 40TB", &body, 3_000, 0.8)
-            .await
-            .expect("summary");
+        let summary = summarize_article(
+            &llm,
+            "Migrating 40TB",
+            &body,
+            SummarySource::FullText,
+            3_000,
+            0.8,
+        )
+        .await
+        .expect("summary");
         assert!(summary.starts_with("A team moves 40TB"));
 
         let prompt = &backend.prompts()[0].user;
@@ -470,6 +539,80 @@ mod tests {
         assert!(prompt.contains("(truncated for length)"));
         // 3k tokens ≈ 12k characters of body, not the full 100k.
         assert!(prompt.len() < 16_000, "prompt was {} bytes", prompt.len());
+    }
+
+    #[tokio::test]
+    async fn excerpt_only_bodies_are_labelled_and_the_reader_note_is_dropped() {
+        let backend = Arc::new(MockBackend::new());
+        backend.push(
+            r#"{"summary": "The opening sets up a failover that went wrong; only the opening was available."}"#,
+            TokenUsage::default(),
+        );
+        let llm = mock("deepseek", Arc::clone(&backend), 2.0);
+        let body = format!("<p>A teaser paragraph.</p><p>{EXCERPT_NOTE}</p>");
+        summarize_article(
+            &llm,
+            "Failover",
+            &body,
+            SummarySource::ExcerptOnly,
+            3_000,
+            0.8,
+        )
+        .await
+        .expect("summary");
+
+        let prompt = &backend.prompts()[0].user;
+        assert!(prompt.contains("ARTICLE TEXT (opening excerpt only):\nA teaser paragraph."));
+        assert!(!prompt.contains("(truncated for length)"));
+        assert!(
+            !prompt.contains(EXCERPT_NOTE),
+            "the reader-facing note leaked into the prompt"
+        );
+    }
+
+    #[test]
+    fn instructions_forbid_labelling_and_distinguish_truncation_from_excerpts() {
+        assert!(!SUMMARY_INSTRUCTIONS.contains("say it is an excerpt"));
+        assert!(SUMMARY_INSTRUCTIONS.contains("Never append \"(Excerpt.)\""));
+        assert!(SUMMARY_INSTRUCTIONS.contains("truncated for length"));
+        assert!(SUMMARY_INSTRUCTIONS.contains("opening excerpt only"));
+    }
+
+    #[tokio::test]
+    async fn a_trailing_excerpt_label_is_scrubbed_from_the_summary() {
+        let backend = Arc::new(MockBackend::new());
+        backend.push(
+            r#"{"summary": "A team moves 40TB off Postgres. (Excerpt.)"}"#,
+            TokenUsage::default(),
+        );
+        let llm = mock("deepseek", Arc::clone(&backend), 2.0);
+        let summary = summarize_article(
+            &llm,
+            "Migrating 40TB",
+            "<p>body</p>",
+            SummarySource::FullText,
+            3_000,
+            0.8,
+        )
+        .await
+        .expect("summary");
+        assert_eq!(summary, "A team moves 40TB off Postgres.");
+    }
+
+    #[test]
+    fn strip_trailing_label_only_removes_short_labels() {
+        assert_eq!(strip_trailing_label("Done. (Excerpt.)"), "Done.");
+        assert_eq!(strip_trailing_label("Done. (Excerpt only.) "), "Done.");
+        assert_eq!(strip_trailing_label("Done.(summary)"), "Done.");
+        assert_eq!(
+            strip_trailing_label("A 40TB (roughly) migration."),
+            "A 40TB (roughly) migration."
+        );
+        assert_eq!(
+            strip_trailing_label("Ships the tool (a Rust CLI)."),
+            "Ships the tool (a Rust CLI)."
+        );
+        assert_eq!(strip_trailing_label("No label here."), "No label here.");
     }
 
     #[tokio::test]
