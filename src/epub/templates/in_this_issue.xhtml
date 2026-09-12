@@ -10,14 +10,21 @@
         <li class="index-entry">
           <p class="index-title"><a href="{{ entry.href }}">{{ entry.title }}</a></p>
           <p class="index-meta">{{ entry.source }} &#183; {{ entry.reading_minutes }} min read</p>
+{% if entry.understanding.kicker.is_some() || entry.understanding.topics.is_some() %}
+          <p class="rubric">{% if let Some(kicker) = entry.understanding.kicker %}<span class="kicker">{{ kicker }}</span>{% if let Some(topics) = entry.understanding.topics %} &#160; {{ topics }}{% endif %}{% else %}{% if let Some(topics) = entry.understanding.topics %}{{ topics }}{% endif %}{% endif %}</p>
+{% endif %}
+{% if entry.why.is_some() || entry.understanding.interests.is_some() %}
+          <div class="index-why">
+{% if let Some(text) = entry.why %}
+            <p class="why-line"><em>Why it&#39;s here: {{ text }}</em></p>
+{% endif %}
+{% if let Some(interests) = entry.understanding.interests %}
+            <p class="why-matches">Matches: {{ interests }}</p>
+{% endif %}
+          </div>
+{% endif %}
 {% if !entry.summary.is_empty() %}
           <p class="index-summary">{{ entry.summary }}</p>
-{% endif %}
-{% if let Some(text) = entry.why %}
-          <p class="index-why"><em>Why it&#39;s here: {{ text }}</em></p>
-{% endif %}
-{% if let Some(line) = entry.understanding %}
-          <p class="index-understood">{{ line }}</p>
 {% endif %}
         </li>
 {% endfor %}

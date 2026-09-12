@@ -78,8 +78,7 @@ img {
 .stats,
 .meta,
 .social,
-.understood,
-.index-understood,
+.rubric,
 .index-meta,
 .discussion-note,
 .attribution,
@@ -87,8 +86,29 @@ img {
   font-size: 0.85em;
 }
 
-.understood {
-  margin: 0 0 0.5em 0;
+.rubric {
+  margin: 0;
+  color: #444444;
+}
+
+.kicker {
+  font-variant: small-caps;
+}
+
+.why,
+.index-why {
+  margin: 0.2em 0 0 0;
+  font-size: 0.9em;
+}
+
+.why-line {
+  margin: 0;
+}
+
+.why-matches {
+  margin: 0;
+  font-size: 0.85em;
+  color: #444444;
 }
 
 .dateline,
@@ -128,8 +148,7 @@ ul.index-list {
 
 .index-title,
 .index-meta,
-.index-summary,
-.index-understood {
+.index-summary {
   margin: 0;
 }
 
@@ -197,5 +216,3 @@ p.comment-line {
 .fact-line {
   margin: 0 0 0.35em 0;
 }
-
-.why, .index-why { font-size: 0.9em; font-style: italic; }
