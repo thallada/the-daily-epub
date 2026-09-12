@@ -43,7 +43,7 @@ struct IndexEntry {
     reading_minutes: i64,
     summary: String,
     why: Option<String>,
-    understanding: Option<String>,
+    understanding: Understanding,
 }
 
 struct IndexSection {
@@ -81,7 +81,7 @@ struct ArticleChapter {
     byline: Option<String>,
     meta_line: String,
     social_line: Option<String>,
-    understanding: Option<String>,
+    understanding: Understanding,
     why: Option<String>,
     summary: Option<String>,
     excerpt_only: bool,
@@ -209,67 +209,61 @@ fn facet_label(token: &str) -> Option<String> {
         "boston_new_england" => "Boston & New England",
         "outdoors_lifestyle" => "Outdoors & lifestyle",
         "history" => "History",
-        "reported_news" => "reported news",
-        "analysis_essay" => "analysis essay",
-        "how_to_technical" => "how-to",
-        "first_hand_account" => "first-hand account",
-        "announcement_roundup" => "announcement",
-        "code_repository" => "code repository",
-        "documentation_reference" => "documentation",
-        "tool_or_product_page" => "product page",
-        "discussion_thread" => "discussion thread",
-        "paper_or_report" => "paper or report",
-        "interview_or_transcript" => "interview",
-        "video_or_podcast" => "video or podcast",
-        "fiction_or_humor" => "fiction or humor",
-        "brief" => "brief",
-        "standard" => "standard depth",
-        "deep" => "in depth",
-        "nontechnical" => "non-technical",
-        "light" => "lightly technical",
-        "intermediate" => "moderately technical",
-        "advanced" => "highly technical",
+        "reported_news" => "Reported",
+        "analysis_essay" => "Analysis",
+        "how_to_technical" => "How-to",
+        "first_hand_account" => "First person",
+        "announcement_roundup" => "Announcement",
+        "code_repository" => "Code",
+        "documentation_reference" => "Documentation",
+        "tool_or_product_page" => "Product page",
+        "discussion_thread" => "Discussion",
+        "paper_or_report" => "Paper",
+        "interview_or_transcript" => "Interview",
+        "video_or_podcast" => "Video or podcast",
+        "fiction_or_humor" => "Fiction & humor",
         "other" => return None,
         unknown => return Some(unknown.replace('_', " ")),
     };
     Some(label.to_string())
 }
 
-/// One muted line saying what the pipeline understood about an article: the
-/// deep-assessment facets, the extracted topics and the best-matching reader
-/// interests. `None` when there is nothing to say (no deep read, no interests).
-pub fn understanding_line(pick: &Pick) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(deep) = &pick.llm {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Understanding {
+    pub kicker: Option<String>,
+    pub topics: Option<String>,
+    pub interests: Option<String>,
+}
+
+/// Reader-facing assessment details, split so templates can give each part the
+/// same editorial hierarchy across web and EPUB surfaces.
+pub fn understanding(pick: &Pick) -> Understanding {
+    let (kicker, topics) = pick.llm.as_ref().map_or((None, None), |deep| {
         let facets = &deep.facets;
-        for token in [
-            facets.topic_group.as_deref(),
-            facets.format.as_deref(),
-            facets.depth.as_deref(),
-            facets.technicality.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if let Some(label) = facet_label(token).filter(|label| !label.is_empty()) {
-                parts.push(label);
-            }
-        }
-        if let Some(topics) = &facets.specific_topics {
+        let kicker = [facets.topic_group.as_deref(), facets.format.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter_map(facet_label)
+            .filter(|label| !label.is_empty())
+            .collect::<Vec<_>>();
+        let kicker = (!kicker.is_empty()).then(|| kicker.join(" \u{00b7} "));
+        let topics = facets.specific_topics.as_ref().and_then(|topics| {
             let topics = topics
                 .iter()
                 .map(|topic| topic.trim())
                 .filter(|topic| !topic.is_empty())
                 .collect::<Vec<_>>();
-            if !topics.is_empty() {
-                parts.push(format!("Topics: {}", topics.join(", ")));
-            }
-        }
+            (!topics.is_empty()).then(|| topics.join(" \u{00b7} "))
+        });
+        (kicker, topics)
+    });
+    let interests = (!pick.top_interests.is_empty()).then(|| pick.top_interests.join(" \u{00b7} "));
+
+    Understanding {
+        kicker,
+        topics,
+        interests,
     }
-    if !pick.top_interests.is_empty() {
-        parts.push(format!("Interests: {}", pick.top_interests.join(", ")));
-    }
-    (!parts.is_empty()).then(|| parts.join(" \u{00b7} "))
 }
 
 fn article_href(pick: &Pick) -> String {
@@ -394,7 +388,7 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
                 reading_minutes: pick.article.reading_minutes(),
                 summary: summary_for(issue, pick).unwrap_or_default().to_string(),
                 why: pick.why.clone(),
-                understanding: understanding_line(pick),
+                understanding: understanding(pick),
             })
             .collect();
         sections.push(IndexSection { name, entries });
@@ -409,7 +403,7 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
                 reading_minutes: 3,
                 summary: "The day's events, as recorded by the Current Events portal.".into(),
                 why: None,
-                understanding: None,
+                understanding: Understanding::default(),
             }],
         });
     }
@@ -485,7 +479,7 @@ pub fn render_article(
         byline: article.author.as_ref().map(|a| format!("By {a}")),
         meta_line: meta_parts.join(" \u{00b7} "),
         social_line: social_line(&article.social),
-        understanding: understanding_line(pick),
+        understanding: understanding(pick),
         why: pick.why.clone(),
         summary: summary_for(issue, pick).map(str::to_string),
         excerpt_only: article.excerpt_only,
@@ -810,35 +804,43 @@ mod tests {
     }
 
     #[test]
-    fn understanding_line_includes_facets_topics_and_interests() {
+    fn understanding_includes_kicker_topics_and_interests() {
         let issue = issue();
         assert_eq!(
-            understanding_line(&issue.lineup.picks[0]).as_deref(),
-            Some(
-                "Software engineering · analysis essay · in depth · highly technical · Topics: copy-on-write, ZFS · Interests: Filesystems, Rust"
-            )
+            understanding(&issue.lineup.picks[0]),
+            Understanding {
+                kicker: Some("Software engineering · Analysis".into()),
+                topics: Some("copy-on-write · ZFS".into()),
+                interests: Some("Filesystems · Rust".into()),
+            }
         );
     }
 
     #[test]
-    fn understanding_line_is_none_without_a_deep_read_or_interests() {
+    fn understanding_is_empty_without_a_deep_read_or_interests() {
         let issue = issue();
-        assert!(understanding_line(&issue.lineup.picks[1]).is_none());
+        assert_eq!(
+            understanding(&issue.lineup.picks[1]),
+            Understanding::default()
+        );
     }
 
     #[test]
-    fn understanding_line_can_contain_only_interests() {
+    fn understanding_can_contain_only_interests() {
         let issue = issue();
         let mut pick = issue.lineup.picks[1].clone();
         pick.top_interests = vec!["Rust".into()];
         assert_eq!(
-            understanding_line(&pick).as_deref(),
-            Some("Interests: Rust")
+            understanding(&pick),
+            Understanding {
+                interests: Some("Rust".into()),
+                ..Understanding::default()
+            }
         );
     }
 
     #[test]
-    fn understanding_line_skips_other_topic_group() {
+    fn understanding_skips_other_topic_group() {
         let issue = issue();
         let mut pick = issue.lineup.picks[0].clone();
         pick.llm.as_mut().unwrap().facets = crate::types::Facets {
@@ -846,7 +848,7 @@ mod tests {
             ..crate::types::Facets::default()
         };
         pick.top_interests.clear();
-        assert!(understanding_line(&pick).is_none());
+        assert_eq!(understanding(&pick), Understanding::default());
     }
 
     #[test]
@@ -883,12 +885,10 @@ mod tests {
         assert!(chapter.xhtml.contains("6 min read"));
         assert!(chapter.xhtml.contains("What it argues"));
         assert!(chapter.xhtml.contains("A short abstract"));
-        // The lead's understanding line is on the index; the second pick has none.
-        assert_eq!(
-            chapter.xhtml.matches("class=\"index-understood\"").count(),
-            1
-        );
-        assert!(chapter.xhtml.contains("Interests: Filesystems, Rust"));
+        // The lead's rubric and matches are on the index; the second pick has neither.
+        assert_eq!(chapter.xhtml.matches("class=\"rubric\"").count(), 1);
+        assert!(chapter.xhtml.contains("Software engineering · Analysis"));
+        assert!(chapter.xhtml.contains("Matches: Filesystems · Rust"));
         // Titles are escaped (askama emits numeric references), never injected raw.
         assert!(chapter.xhtml.contains("A Niche Delight &#38; Other Tales"));
         assert_xml_ok(&chapter.xhtml);
@@ -958,10 +958,22 @@ mod tests {
         assert!(chapter.xhtml.contains("/r/2026-08-15/1/down?t="));
         assert!(chapter.xhtml.contains("Read online"));
         assert!(chapter.xhtml.contains("href=\"disc-1001.xhtml\""));
-        assert!(chapter.xhtml.contains("class=\"understood\""));
-        assert!(chapter.xhtml.contains(
-            "Software engineering · analysis essay · in depth · highly technical · Topics: copy-on-write, ZFS · Interests: Filesystems, Rust"
-        ));
+        assert!(chapter.xhtml.contains("class=\"rubric\""));
+        assert!(chapter.xhtml.contains("Software engineering · Analysis"));
+        assert!(chapter.xhtml.contains("copy-on-write · ZFS"));
+        assert!(chapter.xhtml.contains("Matches: Filesystems · Rust"));
+        let rubric_position = chapter.xhtml.find("class=\"rubric\"").unwrap();
+        let summary_position = chapter.xhtml.find("class=\"summary\"").unwrap();
+        let social_position = chapter.xhtml.find("class=\"social\"").unwrap();
+        assert!(rubric_position < summary_position);
+        assert!(summary_position < social_position);
+        let footer = chapter
+            .xhtml
+            .split_once("<div class=\"article-footer\">")
+            .unwrap()
+            .1;
+        assert!(!footer.contains("class=\"rubric\""));
+        assert!(!footer.contains("Matches:"));
         let second = render_article(
             &issue,
             &issue.lineup.picks[1],
@@ -971,7 +983,7 @@ mod tests {
             Some("s3cret"),
         )
         .unwrap();
-        assert!(!second.xhtml.contains("class=\"understood\""));
+        assert!(!second.xhtml.contains("class=\"rubric\""));
         // The un-downloaded image degrades to a placeholder.
         assert!(
             chapter

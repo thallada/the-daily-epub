@@ -882,7 +882,7 @@ struct FullEntry {
     is_lead: bool,
     summary: String,
     why: Option<String>,
-    understanding: Option<String>,
+    understanding: chapters::Understanding,
     rating: Option<RatingWidget>,
 }
 
@@ -952,7 +952,7 @@ struct ArticleTemplate {
     meta_line: String,
     why: Option<String>,
     social_line: Option<String>,
-    understanding: Option<String>,
+    understanding: chapters::Understanding,
     summary: Option<String>,
     excerpt_only: bool,
     body_html: String,
@@ -1030,7 +1030,7 @@ pub async fn render_full(
                         .unwrap_or_default()
                         .to_string(),
                     why: pick.why.clone(),
-                    understanding: chapters::understanding_line(pick),
+                    understanding: chapters::understanding(pick),
                     rating: is_admin.then(|| {
                         RatingWidget::for_issue(
                             pick.article.id,
@@ -1134,7 +1134,7 @@ pub async fn article(
         ),
         why: pick.why.clone(),
         social_line: chapters::social_line(&article.social),
-        understanding: chapters::understanding_line(pick),
+        understanding: chapters::understanding(pick),
         summary: summary_for(&view.issue, pick).map(str::to_string),
         excerpt_only: article.excerpt_only,
         body_html: prepare_body(&article.content_html),
@@ -2001,7 +2001,9 @@ mod tests {
         assert!(issue.contains("What it argues"));
         assert!(issue.contains("A short abstract for the second piece"));
         assert!(issue.contains("Why it"));
-        assert!(issue.contains("Interests: Filesystems, Rust"));
+        assert!(issue.contains("Software engineering · Analysis"));
+        assert!(issue.contains("copy-on-write · ZFS"));
+        assert!(issue.contains("Matches: Filesystems · Rust"));
         assert!(issue.contains("A. Writer · Example Feed"));
         assert!(!issue.contains("example feed · Example Feed"));
         assert!(issue.contains("World Briefing"));
@@ -2031,6 +2033,15 @@ mod tests {
         assert!(article.contains("The write path is the interesting part"));
         assert!(article.contains("loading=\"lazy\""));
         assert!(article.contains("referrerpolicy=\"no-referrer\""));
+        let rubric_position = article.find("Software engineering · Analysis").unwrap();
+        let why_position = article.find("Why it's here").unwrap();
+        let summary_position = article
+            .find("What it argues, and why it is worth the time.")
+            .unwrap();
+        let social_position = article.find("342 on HN").unwrap();
+        assert!(rubric_position < why_position);
+        assert!(why_position < summary_position);
+        assert!(summary_position < social_position);
         assert!(article.contains("A Niche Delight"));
         assert!(article.contains("rel=\"next\""));
         assert!(!article.contains(&dashboard_href));

@@ -154,14 +154,26 @@ hr.rule {
   font-variant: small-caps;
 }
 
-.understood, .index-understood {
-  margin: 0 0 0.75em 0;
+.rubric {
+  margin: 0.2em 0 0 0;
   font-size: 0.8em;
   color: #444444;
 }
 
-.index-understood {
-  margin: 0.2em 0 0 0;
+.why,
+.index-why {
+  margin: 0.35em 0 0 0;
+  font-size: 0.9em;
+}
+
+.why-line {
+  margin: 0;
+}
+
+.why-matches {
+  margin: 0.1em 0 0 0;
+  font-size: 0.85em;
+  color: #444444;
 }
 
 .summary {
@@ -306,5 +318,3 @@ blockquote.comment blockquote.comment {
 .fact-line {
   margin: 0 0 0.35em 0;
 }
-
-.why, .index-why { font-size: 0.9em; font-style: italic; }

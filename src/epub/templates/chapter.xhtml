@@ -7,14 +7,24 @@
         <p class="byline">{{ line }}</p>
 {% endif %}
         <p class="meta">{{ meta_line }}</p>
-{% if let Some(text) = why %}
-        <p class="why"><em>Why it&#39;s here: {{ text }}</em></p>
+{% if understanding.kicker.is_some() || understanding.topics.is_some() %}
+        <p class="rubric">{% if let Some(kicker) = understanding.kicker %}<span class="kicker">{{ kicker }}</span>{% if let Some(topics) = understanding.topics %} &#160; {{ topics }}{% endif %}{% else %}{% if let Some(topics) = understanding.topics %}{{ topics }}{% endif %}{% endif %}</p>
 {% endif %}
-{% if let Some(line) = social_line %}
-        <p class="social">{{ line }}</p>
+{% if why.is_some() || understanding.interests.is_some() %}
+        <div class="why">
+{% if let Some(text) = why %}
+          <p class="why-line"><em>Why it&#39;s here: {{ text }}</em></p>
+{% endif %}
+{% if let Some(interests) = understanding.interests %}
+          <p class="why-matches">Matches: {{ interests }}</p>
+{% endif %}
+        </div>
 {% endif %}
 {% if let Some(text) = summary %}
         <p class="summary">{{ text }}</p>
+{% endif %}
+{% if let Some(line) = social_line %}
+        <p class="social">{{ line }}</p>
 {% endif %}
 {% if excerpt_only %}
         <p class="notice">(excerpt only &#8212; read online)</p>
@@ -26,9 +36,6 @@
       </div>
       <hr class="rule"/>
       <div class="article-footer">
-{% if let Some(line) = understanding %}
-        <p class="understood">{{ line }}</p>
-{% endif %}
 {% if let Some(links) = rating %}
         <p class="rating">Was this a good pick? &#160; <a href="{{ links.loved_url }}">[ Loved it ]</a> &#160; <a href="{{ links.good_url }}">[ Good ]</a> &#160; <a href="{{ links.not_for_me_url }}">[ Not for me ]</a> &#160; <a href="{{ links.slop_url }}">[ AI slop ]</a> &#160;&#160;&#160; <a href="{{ read_online_url }}">Read online &#8599;</a></p>
 {% else %}

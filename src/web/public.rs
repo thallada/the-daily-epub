@@ -54,7 +54,7 @@ pub struct PublicEntry {
     pub word_count: i64,
     pub summary: Option<String>,
     pub why: Option<String>,
-    pub understanding: Option<String>,
+    pub understanding: crate::epub::chapters::Understanding,
     pub comment_links: Vec<CommentLink>,
     pub is_lead: bool,
 }
@@ -133,7 +133,7 @@ impl From<&Issue> for PublicIssue {
                                     .filter(|summary| !summary.is_empty())
                                     .map(str::to_string),
                                 why: pick.why.clone(),
-                                understanding: crate::epub::chapters::understanding_line(pick),
+                                understanding: crate::epub::chapters::understanding(pick),
                                 comment_links,
                                 is_lead: pick.is_lead,
                             }
@@ -444,7 +444,18 @@ mod tests {
         assert!(html.contains("A short abstract for the second piece."));
         assert!(html.contains("The systems story with enough operational detail to matter"));
         assert!(html.contains("A small-scene delight outside the usual technical orbit"));
-        assert!(html.contains("Interests: Filesystems, Rust"));
+        assert!(html.contains("Software engineering · Analysis"));
+        assert!(html.contains("copy-on-write · ZFS"));
+        assert!(html.contains("Matches: Filesystems · Rust"));
+        let rubric_position = html.find("Software engineering · Analysis").unwrap();
+        let why_position = html.find("Why it's here").unwrap();
+        let summary_position = html
+            .find("What it argues, and why it is worth the time.")
+            .unwrap();
+        let comments_position = html.find(">Hacker News:").unwrap();
+        assert!(rubric_position < why_position);
+        assert!(why_position < summary_position);
+        assert!(summary_position < comments_position);
         for private in [
             "Two stories today",
             "Body of",
