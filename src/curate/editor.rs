@@ -39,9 +39,15 @@ RULES
 6. Never select two articles that tell the same story.
 7. SIZE: aim for about {soft_target}; never more than {hard_max}; there is NO minimum.
    If only nine pieces deserve the reader's morning, publish nine. Never pad.
-8. For every pick write "why": at most 14 words, specific to this article and this
-   reader, in the second person is fine ("the Postgres failover story you'd argue with").
-   It is printed under the headline.
+8. For every pick write "why": at most 14 words. It is printed under the headline
+   as "Why it's here", above the summary, with the matched interests listed right
+   beneath it. So it must NOT describe the piece (the summary does that) and must
+   NOT just list interests (already shown). Say why THIS reader gets THIS piece
+   today: the itch it scratches, the rated piece it rhymes with, the argument he
+   will want to pick, the gap in today's paper it fills, or the exploration bet it
+   is. Second person is fine.
+   Bad:  "A candid Rust query engine post-mortem showing why io_uring lost to mmap."
+   Good: "The io_uring-versus-mmap verdict you'd want before touching your own engine."
 
 EDITORIAL JUDGEMENT
 - Depth over coverage. Drop anything you would not defend to him in person.
