@@ -3,7 +3,6 @@
 //! Every run rebuilds one byte-stable prompt from the hand-maintained profile,
 //! standing interests, stored weekly adjustments, and current explicit verdicts.
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -13,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::llm::LlmClient;
 use crate::db::{Db, KV_PROFILE_VERSION, KV_TASTE_PROFILE};
+use crate::interests;
 use crate::types::{Facets, RatedArticle, TasteProfile};
 
 pub const REBUILD_INTERVAL_DAYS: i64 = 7;
@@ -29,49 +29,8 @@ pub const NO_LEARNED_ADJUSTMENTS: &str = "No reader ratings have been collected 
 const EDITOR_IN_CHIEF_FRAMING: &str = "You are the editor-in-chief of *The Daily EPUB*, a personal morning newspaper assembled every day for exactly one reader. Everything you are asked to do — score, select, place, summarize, introduce — serves his taste, not a general audience's. When a judgement call is close, re-read this profile and decide the way he would.";
 
 // ---------------------------------------------------------------------------
-// Interest and profile-file parsing
+// Profile-file parsing
 // ---------------------------------------------------------------------------
-
-pub fn parse_interests(opml_path: &Path) -> anyhow::Result<Vec<String>> {
-    let raw = std::fs::read_to_string(opml_path)
-        .with_context(|| format!("reading the interests OPML at {}", opml_path.display()))?;
-    let interests = parse_interests_str(&raw);
-    if interests.is_empty() {
-        anyhow::bail!(
-            "no <outline text=\"…\"> interests found in {}",
-            opml_path.display()
-        );
-    }
-    tracing::debug!(count = interests.len(), "parsed scour interests");
-    Ok(interests)
-}
-
-pub fn parse_interests_str(raw: &str) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for chunk in raw.split("text=\"").skip(1) {
-        let Some((value, _)) = chunk.split_once('"') else {
-            continue;
-        };
-        let name = xml_unescape(value).trim().to_string();
-        if !name.is_empty() && seen.insert(name.to_lowercase()) {
-            out.push(name);
-        }
-    }
-    out
-}
-
-fn xml_unescape(s: &str) -> String {
-    if !s.contains('&') {
-        return s.to_string();
-    }
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileFile {
@@ -116,7 +75,7 @@ pub fn load_profile(path: &Path) -> anyhow::Result<ProfileFile> {
     match std::fs::read_to_string(path) {
         Ok(raw) => Ok(parse_profile_str(&raw)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tracing::warn!(path = %path.display(), "profile file is missing; using OPML interests only");
+            tracing::warn!(path = %path.display(), "profile file is missing; using empty profile prose");
             Ok(ProfileFile {
                 body: String::new(),
                 interests: Vec::new(),
@@ -128,30 +87,7 @@ pub fn load_profile(path: &Path) -> anyhow::Result<ProfileFile> {
     }
 }
 
-/// Load the exact standing-interest union used in the system prompt.
-pub fn load_standing_interests(
-    opml_path: &Path,
-    profile_path: &Path,
-) -> anyhow::Result<Vec<String>> {
-    let opml = parse_interests(opml_path)?;
-    let profile = load_profile(profile_path)?;
-    Ok(union_interests(opml, profile.interests))
-}
-
-fn union_interests(opml: Vec<String>, profile: Vec<String>) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for interest in opml.into_iter().chain(profile) {
-        let interest = interest.trim();
-        if !interest.is_empty() && seen.insert(interest.to_lowercase()) {
-            out.push(interest.to_string());
-        }
-    }
-    out
-}
-
 pub mod themes;
-pub use themes::group_into_themes;
 
 // ---------------------------------------------------------------------------
 // Prompt assembly
@@ -174,7 +110,7 @@ fn one_line(text: &str) -> String {
 /// Assemble sections in the exact cache-friendly order required by §8.4.
 pub fn build(
     profile_body: &str,
-    interests: &[String],
+    grouped: &[(String, Vec<String>)],
     learned_adjustments: &str,
     ratings: &[RatedArticle],
     verdict_limit: usize,
@@ -193,8 +129,8 @@ pub fn build(
 
     doc.push_str("## Standing interests\n\n");
     doc.push_str("These are his subscribed interest topics, grouped. They raise the floor for a match, but never cap the paper: an outstanding article on none of these still belongs.\n\n");
-    for (theme, members) in group_into_themes(interests) {
-        let _ = writeln!(doc, "- **{}**: {}", theme, members.join(", "));
+    for (category, members) in grouped {
+        let _ = writeln!(doc, "- **{}**: {}", category, members.join(", "));
     }
 
     doc.push_str("\n## Learned adjustments (rebuilt weekly from ratings)\n\n");
@@ -272,26 +208,27 @@ async fn store_version(db: &Db, version: i64, built_at: Timestamp) -> anyhow::Re
 
 async fn prompt_inputs(
     db: &Db,
-    opml_path: &Path,
     profile_path: &Path,
-) -> anyhow::Result<(ProfileFile, Vec<String>, Vec<RatedArticle>, String)> {
-    let opml = parse_interests(opml_path)?;
+) -> anyhow::Result<(
+    ProfileFile,
+    Vec<(String, Vec<String>)>,
+    Vec<RatedArticle>,
+    String,
+)> {
     let profile = load_profile(profile_path)?;
-    let interests = union_interests(opml, profile.interests.clone());
+    let grouped = interests::grouped(db).await?;
     let ratings = db.current_ratings(RATINGS_LOOKBACK_DAYS).await?;
     let learned = db.kv_get(KV_LEARNED_ADJUSTMENTS).await?.unwrap_or_default();
-    Ok((profile, interests, ratings, learned))
+    Ok((profile, grouped, ratings, learned))
 }
 
 /// Rebuild the complete system prompt from its live inputs on every run.
 pub async fn load_or_build(
     db: &Db,
-    opml_path: &Path,
     profile_path: &Path,
     verdict_limit: usize,
 ) -> anyhow::Result<TasteProfile> {
-    let (profile_file, interests, ratings, learned) =
-        prompt_inputs(db, opml_path, profile_path).await?;
+    let (profile_file, grouped, ratings, learned) = prompt_inputs(db, profile_path).await?;
     let (version, built_at) = match stored_version(db).await? {
         Some(stored) => stored,
         None => {
@@ -303,7 +240,7 @@ pub async fn load_or_build(
     let profile = TasteProfile {
         text: build(
             &profile_file.body,
-            &interests,
+            &grouped,
             &learned,
             &ratings,
             verdict_limit,
@@ -315,7 +252,10 @@ pub async fn load_or_build(
     db.kv_set(KV_TASTE_PROFILE, &profile.text).await?;
     tracing::debug!(
         version,
-        interests = interests.len(),
+        interests = grouped
+            .iter()
+            .map(|(_, members)| members.len())
+            .sum::<usize>(),
         verdicts = ratings.len().min(verdict_limit),
         chars = profile.text.len(),
         "rebuilt the taste profile prompt"
@@ -334,7 +274,6 @@ pub async fn is_stale(db: &Db) -> anyhow::Result<bool> {
 pub async fn weekly_rebuild_if_due(
     db: &Db,
     llm: &LlmClient,
-    opml_path: &Path,
     profile_path: &Path,
     verdict_limit: usize,
 ) -> anyhow::Result<Option<TasteProfile>> {
@@ -346,9 +285,7 @@ pub async fn weekly_rebuild_if_due(
         return Ok(None);
     }
     tracing::info!("taste profile is over a week old; rebuilding learned adjustments");
-    Ok(Some(
-        rebuild(db, llm, opml_path, profile_path, verdict_limit).await?,
-    ))
+    Ok(Some(rebuild(db, llm, profile_path, verdict_limit).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -429,15 +366,12 @@ pub fn build_rebuild_prompt(ratings: &[RatedArticle]) -> String {
 pub async fn rebuild(
     db: &Db,
     llm: &LlmClient,
-    opml_path: &Path,
     profile_path: &Path,
     verdict_limit: usize,
 ) -> anyhow::Result<TasteProfile> {
-    // Read the prompt inputs first: a rebuild that dies on a missing OPML must
-    // stay due and must not have spent a model call getting there.
-    let opml = parse_interests(opml_path)?;
+    // Read the prompt inputs before spending a model call.
     let profile_file = load_profile(profile_path)?;
-    let interests = union_interests(opml, profile_file.interests.clone());
+    let grouped = interests::grouped(db).await?;
     let ratings = db.current_ratings(RATINGS_LOOKBACK_DAYS).await?;
     let previous = db.kv_get(KV_LEARNED_ADJUSTMENTS).await?.unwrap_or_default();
     let learned = if ratings.is_empty() {
@@ -473,7 +407,7 @@ pub async fn rebuild(
     let profile = TasteProfile {
         text: build(
             &profile_file.body,
-            &interests,
+            &grouped,
             &learned,
             &ratings,
             verdict_limit,
@@ -495,18 +429,15 @@ pub async fn rebuild(
 mod tests {
     use super::*;
 
-    const OPML_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/data/scour-interests.opml");
     const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/data/profile.md");
 
     #[test]
-    fn profile_interests_are_removed_and_union_case_insensitively() {
+    fn profile_interests_are_removed_for_the_importer() {
         let parsed = parse_profile_str(
             "# P\n\n## Interests\n- Rust\nBoston Tech\n- rust\n\n## Notes\nKeep this.\n",
         );
         assert_eq!(parsed.body, "# P\n\n## Notes\nKeep this.\n");
         assert_eq!(parsed.interests, ["Rust", "Boston Tech", "rust"]);
-        let union = union_interests(vec!["rust".into(), "E-Ink".into()], parsed.interests);
-        assert_eq!(union, ["rust", "E-Ink", "Boston Tech"]);
     }
 
     #[test]
@@ -526,7 +457,7 @@ mod tests {
         };
         let prompt = build(
             "# Reader profile\n\nProfile prose.",
-            &["Rust".into()],
+            &[("Software".into(), vec!["Rust".into(), "SQLite".into()])],
             "- Adjust.",
             &[rating],
             60,
@@ -539,17 +470,16 @@ mod tests {
         assert!(
             framing < profile && profile < interests && interests < learned && learned < verdicts
         );
+        assert!(prompt.contains("- **Software**: Rust, SQLite"));
         assert!(prompt.contains("NOT FOR ME | A title | A feed | A summary with whitespace."));
     }
 
     #[test]
-    fn shipped_profile_and_opml_parse() {
+    fn shipped_profile_parses() {
         let profile = load_profile(Path::new(PROFILE_PATH)).unwrap();
         assert!(profile.body.contains("## Who he is"));
         assert!(!profile.body.contains("## Interests"));
         assert!(profile.interests.is_empty());
-        let interests = parse_interests(Path::new(OPML_PATH)).unwrap();
-        assert!(interests.iter().any(|interest| interest == "Rust"));
     }
 
     #[test]
@@ -594,19 +524,21 @@ mod tests {
         let db = Db::open_and_migrate(&dir.path().join("profile.db"))
             .await
             .unwrap();
-        let opml = dir.path().join("interests.opml");
         let profile_path = dir.path().join("profile.md");
-        std::fs::write(&opml, r#"<outline text="Rust"/>"#).unwrap();
+        interests::add(&db, "Rust", Some("Software"), Timestamp::now())
+            .await
+            .unwrap();
         std::fs::write(
             &profile_path,
             "# Reader profile\n\nOriginal prose.\n\n## Interests\n- Custom Topic\n",
         )
         .unwrap();
 
-        let first = load_or_build(&db, &opml, &profile_path, 60).await.unwrap();
+        let first = load_or_build(&db, &profile_path, 60).await.unwrap();
         assert_eq!(first.version, 1);
         assert!(first.text.contains("Original prose."));
-        assert!(first.text.contains("Custom Topic"));
+        assert!(first.text.contains("- **Software**: Rust"));
+        assert!(!first.text.contains("Custom Topic"));
         assert!(!first.text.contains("## Interests"));
 
         std::fs::write(
@@ -614,11 +546,11 @@ mod tests {
             "# Reader profile\n\nChanged prose.\n\n## Interests\n- Another Topic\n",
         )
         .unwrap();
-        let second = load_or_build(&db, &opml, &profile_path, 60).await.unwrap();
+        let second = load_or_build(&db, &profile_path, 60).await.unwrap();
         assert_eq!(second.version, first.version);
         assert_eq!(second.built_at, first.built_at);
         assert!(second.text.contains("Changed prose."));
-        assert!(second.text.contains("Another Topic"));
+        assert!(!second.text.contains("Another Topic"));
         assert!(!second.text.contains("Original prose."));
 
         let missing = load_profile(&dir.path().join("missing.md")).unwrap();
@@ -637,11 +569,12 @@ mod tests {
         let db = Db::open_and_migrate(&dir.path().join("profile.db"))
             .await
             .unwrap();
-        let opml = dir.path().join("interests.opml");
         let profile_path = dir.path().join("profile.md");
-        std::fs::write(&opml, r#"<outline text="Rust"/>"#).unwrap();
+        interests::add(&db, "Rust", Some("Software"), Timestamp::now())
+            .await
+            .unwrap();
         std::fs::write(&profile_path, "# Reader profile\n\nLikes depth.\n").unwrap();
-        let initial = load_or_build(&db, &opml, &profile_path, 60).await.unwrap();
+        let initial = load_or_build(&db, &profile_path, 60).await.unwrap();
         assert_eq!(initial.version, 1);
 
         sqlx::query(
@@ -677,7 +610,7 @@ mod tests {
             UsageMeter::for_provider(&ProviderConfig::deepseek()),
             backend.clone(),
         );
-        let rebuilt = rebuild(&db, &llm, &opml, &profile_path, 60).await.unwrap();
+        let rebuilt = rebuild(&db, &llm, &profile_path, 60).await.unwrap();
         assert_eq!(rebuilt.version, 2);
         assert!(rebuilt.text.contains("Rank first-hand reports higher."));
         assert!(
@@ -700,16 +633,16 @@ mod tests {
         let db = Db::open_and_migrate(&dir.path().join("profile.db"))
             .await
             .unwrap();
-        let opml = dir.path().join("interests.opml");
         let profile_path = dir.path().join("profile.md");
-        std::fs::write(&opml, r#"<outline text="Rust"/>"#).unwrap();
+        interests::add(&db, "Rust", Some("Software"), Timestamp::now())
+            .await
+            .unwrap();
         std::fs::write(&profile_path, "# Reader profile\n\nLikes depth.\n").unwrap();
-        let initial = load_or_build(&db, &opml, &profile_path, 60).await.unwrap();
+        let initial = load_or_build(&db, &profile_path, 60).await.unwrap();
         assert_eq!(initial.version, 1);
 
-        // The OPML goes missing the way a relative path does under a service
-        // whose working directory is not the checkout.
-        std::fs::remove_file(&opml).unwrap();
+        std::fs::remove_file(&profile_path).unwrap();
+        std::fs::create_dir(&profile_path).unwrap();
 
         let backend = Arc::new(MockBackend::new());
         let llm = LlmClient::with_backend(
@@ -718,10 +651,10 @@ mod tests {
             UsageMeter::for_provider(&ProviderConfig::deepseek()),
             backend.clone(),
         );
-        let error = rebuild(&db, &llm, &opml, &profile_path, 60)
+        let error = rebuild(&db, &llm, &profile_path, 60)
             .await
-            .expect_err("a missing OPML fails the rebuild");
-        assert!(format!("{error:#}").contains("reading the interests OPML"));
+            .expect_err("an unreadable profile fails the rebuild");
+        assert!(format!("{error:#}").contains("reading the reader profile"));
 
         // Still version 1, so the profile stays stale and the rebuild is retried.
         assert_eq!(stored_version(&db).await.unwrap().unwrap().0, 1);

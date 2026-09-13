@@ -21,6 +21,7 @@ use daily_epub::curate::assess::parse_deep_response;
 use daily_epub::curate::editor::parse_selection_response;
 use daily_epub::curate::editorial::BriefResponse;
 use daily_epub::curate::profile;
+use daily_epub::interests;
 
 fn repo(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -183,13 +184,14 @@ fn stage_c_fixture_parses_into_the_brief() {
     assert!(value.get("section_intros").is_none());
 }
 
-/// The taste profile is seeded from this file; a broken export would silently
-/// gut the system prompt (§3.6a).
+/// The importer relies on this file; a broken export would silently lose
+/// standing interests (§3.6a).
 #[test]
 fn scour_opml_still_yields_the_interest_list() {
-    let interests = profile::parse_interests(&repo("data/scour-interests.opml"))
-        .expect("the shipped OPML must parse");
-    let unique: BTreeSet<String> = interests.iter().map(|n| n.to_lowercase()).collect();
+    let raw = std::fs::read_to_string(repo("data/scour-interests.opml"))
+        .expect("the shipped OPML must be readable");
+    let names = interests::parse_opml(&raw);
+    let unique: BTreeSet<String> = names.iter().map(|n| n.to_lowercase()).collect();
 
     assert!(
         unique.len() > 180,
@@ -206,7 +208,7 @@ fn scour_opml_still_yields_the_interest_list() {
         assert!(unique.contains(expected), "{expected} disappeared");
     }
     assert!(
-        !interests.iter().any(|n| n.contains("token=")),
+        !names.iter().any(|n| n.contains("token=")),
         "interest names must not leak the Scour token"
     );
 
@@ -217,9 +219,10 @@ fn scour_opml_still_yields_the_interest_list() {
         "/data/profile.md"
     )))
     .expect("profile file");
+    let grouped = vec![("Imported interests".to_string(), names)];
     let document = profile::build(
         &profile_file.body,
-        &interests,
+        &grouped,
         profile::NO_LEARNED_ADJUSTMENTS,
         &[],
         60,

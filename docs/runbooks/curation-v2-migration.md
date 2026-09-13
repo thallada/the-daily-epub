@@ -9,7 +9,7 @@ What changes for the operator, in one paragraph: the binary is replaced; the SQL
 tables and drops `ratings`, `feed_priors` and `scores` (the migration copies your ratings first);
 `config.toml` loses a few keys and gains the `[llm]` / `[providers.*]` registry plus a
 `profile_path`; the env file gains two API keys and renames the DeepSeek one; a hand-maintained
-`profile.md` is installed next to the OPML; the systemd units are unchanged.
+`profile.md` is installed for the hand-maintained reader profile; the systemd units are unchanged.
 
 ## 0. Before touching the server
 
@@ -70,12 +70,13 @@ Everything you do not mention keeps its documented default, so the edit is small
 
 | Old key | Why |
 |---|---|
+| `interests_opml = …` (top level) | standing interests now live in SQLite; remove this before rollout because unknown keys fail startup |
 | `prefilter_keep = …` (top level) | replaced by `curation.ranking.deep_keep` (default 120) |
 | `max_daily_usd = …` (top level) | now per provider: `providers.deepseek.max_daily_usd` |
 | the whole `[deepseek]` table | becomes `[providers.deepseek]` + `[llm]` (see below) |
 | any `[anthropic]` table (only if you added one from an interim build) | becomes `[providers.anthropic]` |
 
-**Add** near the top, next to `interests_opml`:
+**Add** near the top:
 
 ```toml
 profile_path = "/var/lib/daily-epub/data/profile.md"
@@ -83,8 +84,7 @@ profile_path = "/var/lib/daily-epub/data/profile.md"
 
 Use an absolute path. The default is `data/profile.md` *relative to the working directory*, which
 under the unit is `/var/lib/daily-epub`, so the default would resolve to the same place, but an
-explicit path survives running one-off commands from another directory. Point
-`interests_opml` at an absolute path too if it is still relative.
+explicit path survives running one-off commands from another directory.
 
 **Add** the LLM registry. Carry over the `base_url`, `model` and `price_*` values from your old
 `[deepseek]` table if you had changed them; the values shown are the defaults.
@@ -165,11 +165,9 @@ Voyage dashboards: the in-app `max_daily_usd` meters are runaway guards, not acc
 ```sh
 sudo install -d -m0750 -o daily-epub -g daily-epub /var/lib/daily-epub/data
 sudo install -m0640 -o daily-epub -g daily-epub data/profile.md /var/lib/daily-epub/data/profile.md
-# if the OPML is not already there:
-sudo install -m0640 -o daily-epub -g daily-epub data/scour-interests.opml /var/lib/daily-epub/data/
 ```
 
-If the file is missing the run does not fail; it logs a warning and uses the OPML interests only,
+If the file is missing the run does not fail; it logs a warning and uses empty profile prose,
 which is a much worse prompt. `config check` in the next step tells you whether it was found.
 
 ## 6. Check the config as the service user

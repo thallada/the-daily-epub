@@ -99,8 +99,7 @@ enabled on every request to an `anthropic`-kind provider.
 | **Node.js 18+** and a clone of [`epub-to-xtc-converter`](https://github.com/bigbag/epub-to-xtc-converter) | XTC/XTCH output for the Xteink X4 | Optional (`xtc.enabled = false` turns it off). Needs `npm install` **inside `cli/`**, and a settings JSON naming a real TTF/OTF — see below. It has **no global npm bin** — it is invoked as `node <repo>/cli/index.js convert …`, which is why `xtc.command`/`xtc.args` are fully general. |
 | A reverse proxy for `daily.hallada.net` → `127.0.0.1:3499` | rating links must be reachable from e-readers on the internet | TLS via your existing setup. |
 
-`data/profile.md` is the hand-maintained reader profile; its optional interests are merged
-with `data/scour-interests.opml`. Both paths are configurable.
+`data/profile.md` is the hand-maintained reader profile; its path is configurable.
 
 ---
 
@@ -366,7 +365,6 @@ prints what resolved.
 | `database_path` | `/var/lib/daily-epub/daily-epub.db` | SQLite file; parent dirs are created. |
 | `out_dir` | `/var/lib/daily-epub/out` | Where `generate` writes artifacts before publishing. |
 | `profile_path` | `data/profile.md` | Hand-maintained reader profile, loaded every run. |
-| `interests_opml` | `data/scour-interests.opml` | Scour interests merged with the profile interests. |
 | `miniflux.base_url` | `http://127.0.0.1:8082` | Miniflux root (no `/v1`). |
 | `miniflux.api_key` | — | **`DAILY_EPUB_MINIFLUX__API_KEY`**. Required. |
 | `miniflux.page_limit` | `250` | Entries per page; Miniflux caps this at 250. |

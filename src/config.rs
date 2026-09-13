@@ -37,12 +37,9 @@ impl From<figment::Error> for ConfigError {
 /// Legacy/alternate env var for the rating-link HMAC key (spec §1).
 pub const ENV_SECRET_ALIAS: &str = "DAILY_EPUB_SECRET";
 
-/// Root configuration document (§3.14).
-///
-/// Unknown *top-level* keys are ignored on purpose: the prefix `DAILY_EPUB_` is
-/// shared with plain operator env vars such as [`ENV_SECRET_ALIAS`].
+/// Root configuration document; unknown keys fail so retired settings stay visible.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields, default)]
 pub struct Config {
     /// IANA tz used for day boundaries and `--date` (§3.14, notes §2).
     pub timezone: String,
@@ -65,8 +62,6 @@ pub struct Config {
     pub database_path: PathBuf,
     /// Default artifact output directory (overridden by `generate --out`).
     pub out_dir: PathBuf,
-    /// Scour interests OPML used to seed the taste profile (§3.6).
-    pub interests_opml: PathBuf,
     /// Hand-maintained reader profile loaded for every curation run (§8.2).
     pub profile_path: PathBuf,
 
@@ -99,7 +94,6 @@ impl Default for Config {
             world_briefing: true,
             database_path: PathBuf::from("/var/lib/daily-epub/daily-epub.db"),
             out_dir: PathBuf::from("/var/lib/daily-epub/out"),
-            interests_opml: PathBuf::from("data/scour-interests.opml"),
             profile_path: PathBuf::from("data/profile.md"),
             miniflux: MinifluxConfig::default(),
             llm: LlmConfig::default(),
@@ -942,7 +936,11 @@ impl Config {
                 fig = fig.merge(Toml::file(p));
             }
         }
-        Ok(fig.merge(Env::prefixed(ENV_PREFIX).split(ENV_SPLIT)))
+        Ok(fig.merge(
+            Env::prefixed(ENV_PREFIX)
+                .ignore(&["secret"])
+                .split(ENV_SPLIT),
+        ))
     }
 
     /// The file `load` reads: the explicit `--config` path, else `./config.toml`
@@ -1067,7 +1065,6 @@ impl Config {
         });
         lines.push(file_line("database_path", &self.database_path));
         lines.push(file_line("profile_path", &self.profile_path));
-        lines.push(file_line("interests_opml", &self.interests_opml));
         for (role, name) in self.llm.roles() {
             match self.providers.get(name) {
                 Some(provider) => lines.push(provider_line(&format!("llm.{role}"), name, provider)),
@@ -2031,7 +2028,7 @@ mod tests {
         for (key, default) in defaults.as_object().expect("config is a table") {
             let section = match key.as_str() {
                 "curation" | "llm" | "providers" | "voyage" | "editorial" => key,
-                "target_article_count" | "profile_path" | "interests_opml" => key,
+                "target_article_count" | "profile_path" => key,
                 _ => continue,
             };
             let documented = documented
