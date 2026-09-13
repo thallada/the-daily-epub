@@ -117,7 +117,7 @@ users-passwd *args:
 users *args:
     {{run}} users "$@"
 
-# Run one catalogue job in-process (generate, dry-run, profile-rebuild, features-backfill, backfill-social, features-prune, import-ratings).
+# Run one catalogue job in-process (generate, dry-run, profile-rebuild, features-backfill, backfill-social, features-prune, import-ratings, interests-categorize).
 job name:
     {{run}} job run {{name}}
 
