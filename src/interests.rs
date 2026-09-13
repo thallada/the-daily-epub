@@ -4,11 +4,16 @@
 //! the pipeline's shared records.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write as _;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use jiff::Timestamp;
+use serde::Deserialize;
 use sqlx::Row as _;
 
+use crate::config::Config;
+use crate::curate::llm::{LlmClient, Llms, provider_meters};
+use crate::curate::profile;
 use crate::curate::signals::TopInterest;
 use crate::db::{Db, fmt_ts};
 use crate::types::ArticleId;
@@ -234,29 +239,155 @@ pub async fn replace_matches(
     matches: &[(ArticleId, Vec<TopInterest>)],
     ids: &HashMap<String, i64>,
 ) -> Result<()> {
+    write_matches(db, run_id, matches, ids, true).await?;
+    Ok(())
+}
+
+/// Insert backfilled matches without disturbing rows a real run wrote.
+pub async fn insert_matches_if_absent(
+    db: &Db,
+    matches: &[(ArticleId, Vec<TopInterest>)],
+    ids: &HashMap<String, i64>,
+) -> Result<u64> {
+    write_matches(db, None, matches, ids, false).await
+}
+
+/// One transaction over the top interests of every article, either upserting
+/// (a run's own rows) or leaving whatever is already stored alone (a backfill).
+async fn write_matches(
+    db: &Db,
+    run_id: Option<i64>,
+    matches: &[(ArticleId, Vec<TopInterest>)],
+    ids: &HashMap<String, i64>,
+    replace: bool,
+) -> Result<u64> {
+    let sql = if replace {
+        "INSERT INTO article_interests (article_id, interest_id, cos, z, run_id)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(article_id, interest_id) DO UPDATE SET
+             cos = excluded.cos, z = excluded.z, run_id = excluded.run_id"
+    } else {
+        "INSERT OR IGNORE INTO article_interests (article_id, interest_id, cos, z, run_id)
+         VALUES (?, ?, ?, ?, ?)"
+    };
     let mut tx = db.pool().begin().await?;
+    let mut written = 0;
     for (article_id, top_interests) in matches {
         for top in top_interests {
             let Some(interest_id) = ids.get(&top.name) else {
                 continue;
             };
-            sqlx::query(
-                "INSERT INTO article_interests (article_id, interest_id, cos, z, run_id)
-                 VALUES (?, ?, ?, ?, ?)
-                 ON CONFLICT(article_id, interest_id) DO UPDATE SET
-                     cos = excluded.cos, z = excluded.z, run_id = excluded.run_id",
-            )
-            .bind(article_id)
-            .bind(interest_id)
-            .bind(top.cos)
-            .bind(top.z)
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
+            written += sqlx::query(sql)
+                .bind(article_id)
+                .bind(interest_id)
+                .bind(top.cos)
+                .bind(top.z)
+                .bind(run_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
         }
     }
     tx.commit().await?;
-    Ok(())
+    Ok(written)
+}
+
+const CATEGORIZE_PROMPT: &str = r#"TASK: file each new standing interest under one of the reader's interest categories.
+Existing categories (reuse these names verbatim): {categories}
+Create a new category only when none of the existing ones fits; a new category must be broad enough to hold several interests and named like the existing ones (two to five words, sentence case). Every interest gets exactly one category.
+New interests: {interests}
+Return JSON exactly: {"assignments":[{"interest":"…","category":"…"}]}"#;
+
+#[derive(Debug, Deserialize)]
+struct CategorizeResponse {
+    #[serde(default)]
+    assignments: Vec<CategoryAssignment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CategoryAssignment {
+    interest: String,
+    category: String,
+}
+
+/// File every currently uncategorized interest in one bulk-model call.
+pub async fn categorize(config: &Config, db: &Db) -> Result<String> {
+    let pending = uncategorized(db).await?;
+    if pending.is_empty() {
+        return Ok("nothing to categorize".into());
+    }
+    let taste = profile::load_or_build(
+        db,
+        &config.profile_path,
+        config.curation.feedback.verdicts_in_prompt,
+    )
+    .await?;
+    let llms = Llms::from_config(config, taste.text, &provider_meters(config));
+    let llm = llms
+        .bulk
+        .as_ref()
+        .or_else(|| llms.editor_or_bulk())
+        .context("no LLM provider is available for interest categorization")?;
+    categorize_with_llm(db, &pending, llm).await
+}
+
+async fn categorize_with_llm(db: &Db, pending: &[Interest], llm: &LlmClient) -> Result<String> {
+    let all = list(db).await?;
+    let categories = all
+        .iter()
+        .filter_map(|interest| interest.category.as_deref())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let names = pending
+        .iter()
+        .map(|interest| interest.name.as_str())
+        .collect::<Vec<_>>();
+    let prompt = CATEGORIZE_PROMPT
+        .replace("{categories}", &categories.join(", "))
+        .replace("{interests}", &format!("\n{}", names.join("\n")));
+    let response: CategorizeResponse = llm.complete_json(&prompt, 0.2).await?;
+
+    let pending_by_name = pending
+        .iter()
+        .map(|interest| (interest.name.to_lowercase(), interest))
+        .collect::<HashMap<_, _>>();
+    let existing_categories = categories
+        .iter()
+        .map(|category| category.to_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut assigned = BTreeSet::new();
+    let mut new_categories = BTreeSet::new();
+    let now = Timestamp::now();
+    for assignment in response.assignments {
+        let Some(interest) = pending_by_name.get(&assignment.interest.trim().to_lowercase()) else {
+            continue;
+        };
+        let category = assignment.category.trim();
+        if !(1..=60).contains(&category.chars().count()) || !assigned.insert(interest.id) {
+            continue;
+        }
+        set_category(db, interest.id, Some(category), now).await?;
+        if !existing_categories.contains(&category.to_lowercase()) {
+            new_categories.insert(category.to_string());
+        }
+    }
+
+    let mut message = format!(
+        "categorized {} ({} new categories:",
+        assigned.len(),
+        new_categories.len()
+    );
+    if !new_categories.is_empty() {
+        let _ = write!(
+            message,
+            " {}",
+            new_categories.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    message.push(')');
+    tracing::info!(%message);
+    Ok(message)
 }
 
 /// Stored matches for the requested articles.
@@ -582,5 +713,86 @@ mod tests {
     async fn empty_article_lookup_is_a_no_op() {
         let (_dir, db) = test_db().await;
         assert!(matches_for_articles(&db, &[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn categorizer_short_circuits_without_uncategorized_interests() {
+        let (_dir, db) = test_db().await;
+        add(
+            &db,
+            "Databases",
+            Some("Software"),
+            ts("2026-09-12T12:00:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            categorize(&Config::default(), &db).await.unwrap(),
+            "nothing to categorize"
+        );
+    }
+
+    #[tokio::test]
+    async fn categorizer_assigns_known_names_and_tracks_new_categories() {
+        use std::sync::Arc;
+
+        use crate::config::ProviderConfig;
+        use crate::curate::llm::{MockBackend, UsageMeter};
+        use crate::types::TokenUsage;
+
+        let (_dir, db) = test_db().await;
+        let now = ts("2026-09-12T12:00:00Z");
+        add(&db, "Databases", Some("Software"), now).await.unwrap();
+        add(&db, "Rust macros", None, now).await.unwrap();
+        add(&db, "Wheel-thrown pottery", None, now).await.unwrap();
+        let pending = uncategorized(&db).await.unwrap();
+
+        let backend = Arc::new(MockBackend::new());
+        backend.push(
+            r#"{"assignments":[
+                {"interest":"RUST MACROS","category":" Software "},
+                {"interest":"Wheel-thrown pottery","category":"Creative crafts"},
+                {"interest":"Not in the batch","category":"Made up"}
+            ]}"#,
+            TokenUsage::default(),
+        );
+        let llm = LlmClient::with_backend(
+            "mock",
+            "taste prompt".into(),
+            UsageMeter::for_provider(&ProviderConfig::deepseek()),
+            backend.clone(),
+        );
+
+        let message = categorize_with_llm(&db, &pending, &llm).await.unwrap();
+        assert_eq!(message, "categorized 2 (1 new categories: Creative crafts)");
+        let stored = list(&db).await.unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .find(|interest| interest.name == "Rust macros")
+                .and_then(|interest| interest.category.as_deref()),
+            Some("Software")
+        );
+        assert_eq!(
+            stored
+                .iter()
+                .find(|interest| interest.name == "Wheel-thrown pottery")
+                .and_then(|interest| interest.category.as_deref()),
+            Some("Creative crafts")
+        );
+        assert_eq!(backend.calls(), 1);
+        let request = &backend.prompts()[0];
+        assert_eq!(request.temperature, 0.2);
+        assert!(request.json);
+        assert!(
+            request
+                .user
+                .contains("Existing categories (reuse these names verbatim): Software")
+        );
+        assert!(
+            request
+                .user
+                .contains("New interests: \nRust macros\nWheel-thrown pottery")
+        );
     }
 }

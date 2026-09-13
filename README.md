@@ -135,6 +135,8 @@ daily-epub features backfill [--days 30] [--rated-only] [--all] [--yes]
 daily-epub features prune       # stale embeddings, old telemetry and assessments
 daily-epub backfill-social [--days 7]   # re-poll social scores for recent articles
 daily-epub feeds discover [--days 14] [--limit 50]  # seed feed candidates from recent aggregator articles
+daily-epub interests import [--opml PATH] [--profile PATH]  # one-time standing-interest import
+daily-epub interests backfill  # match compatible cached article embeddings to interests
 daily-epub db migrate           # run migrations (also automatic on every start)
 daily-epub config check         # validate the config, print the resolved roles, keys and paths
 daily-epub users add USER [--admin] [--password-stdin]
@@ -929,6 +931,7 @@ images/       article images    comments.rs   discussion chapters
   encode        re-encode       publish.rs    BookOrbit + XTC
   embed         into the page   server.rs     ratings, OPDS
 html.rs       markup helpers    db.rs         SQLite
+interests.rs  standing interests and stored article matches
 lock.rs       one writer at a time (flock on <database_path>.lock)
 ```
 
