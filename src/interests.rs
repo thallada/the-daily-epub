@@ -354,8 +354,8 @@ async fn categorize_with_llm(db: &Db, pending: &[Interest], llm: &LlmClient) -> 
         .collect::<HashMap<_, _>>();
     let existing_categories = categories
         .iter()
-        .map(|category| category.to_lowercase())
-        .collect::<BTreeSet<_>>();
+        .map(|category| (category.to_lowercase(), *category))
+        .collect::<HashMap<_, _>>();
     let mut assigned = BTreeSet::new();
     let mut new_categories = BTreeSet::new();
     let now = Timestamp::now();
@@ -367,10 +367,16 @@ async fn categorize_with_llm(db: &Db, pending: &[Interest], llm: &LlmClient) -> 
         if !(1..=60).contains(&category.chars().count()) || !assigned.insert(interest.id) {
             continue;
         }
+        // A model that answers "software" for an existing "Software" must not
+        // split the category.
+        let category = match existing_categories.get(&category.to_lowercase()) {
+            Some(existing) => existing,
+            None => {
+                new_categories.insert(category.to_string());
+                category
+            }
+        };
         set_category(db, interest.id, Some(category), now).await?;
-        if !existing_categories.contains(&category.to_lowercase()) {
-            new_categories.insert(category.to_string());
-        }
     }
 
     let mut message = format!(
@@ -750,7 +756,7 @@ mod tests {
         let backend = Arc::new(MockBackend::new());
         backend.push(
             r#"{"assignments":[
-                {"interest":"RUST MACROS","category":" Software "},
+                {"interest":"RUST MACROS","category":" software "},
                 {"interest":"Wheel-thrown pottery","category":"Creative crafts"},
                 {"interest":"Not in the batch","category":"Made up"}
             ]}"#,

@@ -214,7 +214,10 @@ sees complete issues and article chapters and can download available formats
 from a single download menu. An
 `admin` can additionally follow direct dashboard links from issue entries and
 article chapters, rate articles, and use every `/dashboard/*` page, including
-settings and jobs. Personalization is shared across accounts for now.
+settings and jobs. `/dashboard/interests` lists the standing interests with
+their LLM-assigned category and a rating-derived weight, adds or deletes them,
+and links every interest name in the UI to the articles it matched.
+Personalization is shared across accounts for now.
 
 Visitors can request an account with their preferred username at
 `/request-access`; admins review open requests on `/dashboard/users`. Approving
@@ -250,6 +253,7 @@ Set `server.jobs_enabled = false` to make starts unavailable.
 | `backfill-social` | Refresh recent social scores. |
 | `features-prune` | Remove stale embeddings and curation telemetry. |
 | `import-ratings` | Fetch, embed, and rate URLs queued from the Ratings page. |
+| `interests-categorize` | File uncategorized interests under categories with the bulk model. |
 
 The Ratings page accepts up to 500 historical article URLs at a time with one
 verdict and optional note. Imports run in the background and show per-URL
