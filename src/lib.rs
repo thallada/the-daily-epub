@@ -26,6 +26,7 @@ pub mod html;
 pub mod http;
 pub mod images;
 pub mod imports;
+pub mod interests;
 pub mod jobs;
 pub mod lock;
 pub mod mail;
