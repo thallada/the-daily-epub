@@ -69,6 +69,14 @@ pub struct Rates {
 
 const INTEREST_COLUMNS: &str = "id, name, category, created_at, categorized_at";
 
+/// Dashboard article search for one interest name.
+pub fn articles_href(name: &str) -> String {
+    format!(
+        "/dashboard/articles?interest={}",
+        crate::web::encode_component(name)
+    )
+}
+
 /// Parse an OPML export for the one-time interests importer.
 pub fn parse_opml(raw: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();

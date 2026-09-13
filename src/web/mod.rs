@@ -322,6 +322,7 @@ impl Page {
                     | "runs"
                     | "articles"
                     | "ratings"
+                    | "interests"
                     | "profile"
                     | "stats"
                     | "jobs"

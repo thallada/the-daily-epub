@@ -69,6 +69,12 @@ struct WhyArticle {
     title: String,
 }
 
+#[derive(Debug)]
+struct WhyInterest {
+    name: String,
+    href: String,
+}
+
 /// One table row.
 #[derive(Debug)]
 struct FeedRow {
@@ -79,7 +85,7 @@ struct FeedRow {
     /// The candidate's title, or its feed URL when it has none.
     label: String,
     host: String,
-    interests: Vec<String>,
+    interests: Vec<WhyInterest>,
     articles: Vec<WhyArticle>,
     article_count: usize,
     first_seen: String,
@@ -383,7 +389,13 @@ fn row(
 ) -> FeedRow {
     let mut scored = evidence_of(candidate, evidence);
     let score = discovery::score(&scored);
-    let interests = discovery::why(&scored);
+    let interests = discovery::why(&scored)
+        .into_iter()
+        .map(|name| WhyInterest {
+            href: crate::interests::articles_href(&name),
+            name,
+        })
+        .collect();
 
     // Best evidence first; the articles nothing is known about come last, in
     // title order.
