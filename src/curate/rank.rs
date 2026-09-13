@@ -62,6 +62,11 @@ fn calculate_utility_for(
             ("quality", configured.quality, 1.0),
             ("fit", configured.fit, 1.0),
             ("knn", configured.knn, candidate.signals.knn_gate),
+            (
+                "affinity",
+                configured.affinity,
+                candidate.signals.affinity_gate,
+            ),
             ("interest", configured.interest, 1.0),
             ("feed", configured.feed, candidate.signals.feed_gate),
             ("triage", configured.triage, 1.0),
@@ -342,7 +347,7 @@ mod tests {
         }
         assert!(!b.signals.weights.contains_key("interest"));
         assert!(
-            (a.signals.weights["knn"] / a.signals.weights["quality"] - (0.15 * 0.5) / 0.40).abs()
+            (a.signals.weights["knn"] / a.signals.weights["quality"] - (0.10 * 0.5) / 0.40).abs()
                 < 1e-9
         );
     }

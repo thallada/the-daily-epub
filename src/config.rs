@@ -488,6 +488,8 @@ pub struct RankingConfig {
     pub knn_full: usize,
     pub feed_floor: usize,
     pub feed_full: usize,
+    pub affinity_floor: usize,
+    pub affinity_full: usize,
     /// Fraction of the preliminary blend and the utility removed from any
     /// candidate whose author has a current *AI slop* verdict (§9.3). `1.0`
     /// zeroes such candidates; `0.0` disables the penalty.
@@ -516,6 +518,8 @@ impl Default for RankingConfig {
             knn_full: 25,
             feed_floor: 15,
             feed_full: 40,
+            affinity_floor: 15,
+            affinity_full: 40,
             slop_author_penalty: 0.75,
             semantic_min_words: 300,
             exploration_slots: 5,
@@ -558,6 +562,7 @@ pub struct RankingWeights {
 pub struct PreliminaryWeights {
     pub interest: f64,
     pub knn: f64,
+    pub affinity: f64,
     pub heuristic: f64,
     pub feed: f64,
     pub social: f64,
@@ -566,11 +571,12 @@ pub struct PreliminaryWeights {
 impl Default for PreliminaryWeights {
     fn default() -> Self {
         Self {
-            interest: 0.35,
+            interest: 0.30,
             knn: 0.25,
+            affinity: 0.10,
             heuristic: 0.20,
             feed: 0.10,
-            social: 0.10,
+            social: 0.05,
         }
     }
 }
@@ -581,6 +587,7 @@ pub struct UtilityWeights {
     pub quality: f64,
     pub fit: f64,
     pub knn: f64,
+    pub affinity: f64,
     pub interest: f64,
     pub feed: f64,
     pub triage: f64,
@@ -593,7 +600,8 @@ impl Default for UtilityWeights {
         Self {
             quality: 0.40,
             fit: 0.20,
-            knn: 0.15,
+            knn: 0.10,
+            affinity: 0.05,
             interest: 0.10,
             feed: 0.05,
             triage: 0.05,
@@ -1204,7 +1212,10 @@ impl Config {
                     .into(),
             ));
         }
-        if ranking.knn_full <= ranking.knn_floor || ranking.feed_full <= ranking.feed_floor {
+        if ranking.knn_full <= ranking.knn_floor
+            || ranking.feed_full <= ranking.feed_floor
+            || ranking.affinity_full <= ranking.affinity_floor
+        {
             return Err(ConfigError::Invalid(
                 "curation.ranking *_full must be > *_floor >= 0".into(),
             ));
@@ -1229,12 +1240,14 @@ impl Config {
         let weights = [
             preliminary.interest,
             preliminary.knn,
+            preliminary.affinity,
             preliminary.heuristic,
             preliminary.feed,
             preliminary.social,
             utility.quality,
             utility.fit,
             utility.knn,
+            utility.affinity,
             utility.interest,
             utility.feed,
             utility.triage,
@@ -2084,10 +2097,15 @@ mod tests {
         );
         assert_eq!((ranking.knn_floor, ranking.knn_full), (8, 25));
         assert_eq!((ranking.feed_floor, ranking.feed_full), (15, 40));
+        assert_eq!((ranking.affinity_floor, ranking.affinity_full), (15, 40));
         assert_eq!(ranking.rating_half_life_days, 60.0);
         assert_eq!(ranking.negative_coefficient, 0.75);
-        assert_eq!(ranking.weights.preliminary.interest, 0.35);
+        assert_eq!(ranking.weights.preliminary.interest, 0.30);
+        assert_eq!(ranking.weights.preliminary.affinity, 0.10);
+        assert_eq!(ranking.weights.preliminary.social, 0.05);
         assert_eq!(ranking.weights.utility.quality, 0.40);
+        assert_eq!(ranking.weights.utility.knn, 0.10);
+        assert_eq!(ranking.weights.utility.affinity, 0.05);
         assert_eq!(ranking.diversity.per_cluster_cap, 2);
         assert_eq!(ranking.embedding_retention_days, 120);
         assert_eq!(ranking.telemetry_retention_days, 180);
@@ -2104,6 +2122,9 @@ mod tests {
         assert!(bad.validate().is_err(), "weights are non-negative");
         let mut bad = Config::default();
         bad.curation.ranking.knn_full = bad.curation.ranking.knn_floor;
+        assert!(bad.validate().is_err(), "*_full must exceed *_floor");
+        let mut bad = Config::default();
+        bad.curation.ranking.affinity_full = bad.curation.ranking.affinity_floor;
         assert!(bad.validate().is_err(), "*_full must exceed *_floor");
         let mut bad = Config::default();
         bad.curation.ranking.shortlist_keep = bad.curation.ranking.deep_keep + 1;

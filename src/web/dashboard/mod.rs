@@ -58,10 +58,11 @@ pub fn router() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 /// Signal names in the order of curation plan §7.5.
-pub const SIGNAL_NAMES: [&str; 8] = [
+pub const SIGNAL_NAMES: [&str; 9] = [
     "interest",
     "knn",
     "feed",
+    "affinity",
     "social",
     "heuristic",
     "triage",

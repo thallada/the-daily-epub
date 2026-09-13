@@ -409,6 +409,12 @@ prints what resolved.
 | `curation.recent_rejection_days` | `7` | Churn window for recent low triage/deep assessments. |
 | `curation.recent_rejection_floor` | `3.0` | Scores below this floor are excluded during the churn window (except auto-includes). |
 | `curation.ranking.*` | see below | Every weight, quota, gate and threshold of the personalized ranker. |
+| `curation.ranking.affinity_floor` / `affinity_full` | `15` / `40` | Interest-attributable ratings where affinity starts and reaches full weight. |
+| `curation.ranking.weights.preliminary.affinity` | `0.10` | Rating-derived interest affinity in the preliminary blend. |
+| `curation.ranking.weights.preliminary.interest` | `0.30` | Interest similarity in the preliminary blend. |
+| `curation.ranking.weights.preliminary.social` | `0.05` | Social signal in the preliminary blend. |
+| `curation.ranking.weights.utility.affinity` | `0.05` | Rating-derived interest affinity in the utility score. |
+| `curation.ranking.weights.utility.knn` | `0.10` | Rated-neighbour preference in the utility score. |
 | `editorial.summary_model` | `editor` | Which `[llm]` role writes the per-article summaries: `editor` (with per-article bulk fallback) or `bulk`. |
 | `editorial.summary_input_tokens` | `3000` | Article text offered to the summary prompt. |
 | `publish.epub_dir` | `/srv/bookorbit/libraries/daily-epub` | Both EPUB editions land here by atomic copy, and this is the directory the OPDS feed lists. The editions are distinguished by a `(X4)` tag in **both** the filename and `dc:title` — libraries and OPDS clients list books by title, so the filename alone would make them look identical. Point a BookOrbit watched folder at it if you want its UI too. **Renamed from `bookorbit_dir`**; the old key is a hard config error. |
@@ -448,7 +454,9 @@ prints what resolved.
 gated: `knn` (rated-neighbour preference) ramps from `knn_floor` (8) to
 `knn_full` (25) rated articles with embeddings, `feed` (feed affinity) from
 `feed_floor` (15) to `feed_full` (40) attributable ratings; below the floor the
-signal is absent. Ratings decay with `rating_half_life_days` (60) over
+signal is absent. `affinity` (rating-derived interest affinity) likewise ramps
+from `affinity_floor` (15) to `affinity_full` (40) interest-attributable ratings.
+Ratings decay with `rating_half_life_days` (60) over
 `rating_lookback_days` (180); `neighbour_k` (5) neighbours per side and
 `negative_coefficient` (0.75) shape the signal. `slop_author_penalty` (0.75)
 is the fraction of the blend and utility removed from every candidate whose
@@ -457,13 +465,13 @@ limit. `triage_max` (800),
 `deep_keep` (120), `shortlist_keep` (60), `assessment_reuse_days` (3),
 `semantic_min_words` (300), `exploration_slots` (5), `[curation.ranking.quotas]`
 (`triage` 60 · `interest` 20 · `knn` 20), `[curation.ranking.weights.utility]`
-(`quality` 0.40 · `fit` 0.20 · `knn` 0.15 · `interest` 0.10 · `feed` 0.05 ·
+(`quality` 0.40 · `fit` 0.20 · `knn` 0.10 · `affinity` 0.05 · `interest` 0.10 · `feed` 0.05 ·
 `triage` 0.05 · `social` 0.03 · `heuristic` 0.02, over the signals present for
 each article of the deep set) and `[curation.ranking.diversity]`
 (`cluster_threshold` 0.85, `per_cluster_cap` 2, `utility_protected` 10) drive
 the LLM triage, deep assessment, utility ranking and diversification stages.
-`[curation.ranking.weights.preliminary]` (`interest` 0.35 · `knn` 0.25 ·
-`heuristic` 0.20 · `feed` 0.10 · `social` 0.10) blends the cheap signals; weights
+`[curation.ranking.weights.preliminary]` (`interest` 0.30 · `knn` 0.25 ·
+`affinity` 0.10 · `heuristic` 0.20 · `feed` 0.10 · `social` 0.05) blends the cheap signals; weights
 are renormalized over the signals present for each article, so they need not sum
 to 1. `embedding_retention_days` (120) and `telemetry_retention_days` (180) are
 what `features prune` enforces. Validation: weights non-negative; `deep_keep ≥
@@ -992,11 +1000,12 @@ From spec §7, plus what implementation turned up:
   ceiling; a protocol that is neither means another impl. Voyage AI embeddings
   sit behind the analogous `EmbeddingBackend` trait in `curate/embedding.rs`.
 - **Triage and union admission replace the heuristic gate.** Every eligible
-  article gets interest, rated-neighbour, feed-affinity, social and heuristic
-  signals, then DeepSeek reads its opening (up to `triage_max`). The deep set is
+  article gets interest, rated-neighbour, feed-affinity, interest-affinity,
+  social and heuristic signals, then DeepSeek reads its opening (up to
+  `triage_max`). The deep set is
   the union of triage, interest, neighbour, exploration, blend and auto-include
   retrievers. `explain` shows the assessment and `admitted_by`. Learned signals
-  stay absent until their gates open (8 and 15 ratings respectively).
+  stay absent until their gates open (8, 15, and 15 ratings respectively).
 - **Deep assessment and diversity are live.** DeepSeek reads a representative
   beginning/middle/end sample, separates editorial quality from reader fit, and
   records descriptive facets. Utility is normalized over the deep set; embedding

@@ -138,7 +138,7 @@ slop_value = -1.0                    # AI slop: a full negative; the author pena
 verdicts_in_prompt = 60
 
 # Every weight, quota, gate and threshold of the personalized ranker. The
-# learned signals (`knn`, `feed`) contribute nothing until their gates open:
+# learned signals (`knn`, `feed`, `affinity`) contribute nothing until their gates open:
 # the weight ramps linearly from `*_floor` to `*_full` rated articles.
 [curation.ranking]
 triage_max = 800                     # eligible articles the triage LLM reads
@@ -153,6 +153,8 @@ knn_floor = 8
 knn_full = 25
 feed_floor = 15
 feed_full = 40
+affinity_floor = 15
+affinity_full = 40
 slop_author_penalty = 0.75           # blend and utility × 0.25 for authors with an AI slop verdict
 semantic_min_words = 300
 exploration_slots = 5
@@ -166,16 +168,18 @@ knn = 20
 
 # Weights need not sum to 1; they are renormalized over the present signals.
 [curation.ranking.weights.preliminary]
-interest = 0.35
+interest = 0.30
 knn = 0.25
+affinity = 0.10
 heuristic = 0.20
 feed = 0.10
-social = 0.10
+social = 0.05
 
 [curation.ranking.weights.utility]
 quality = 0.40
 fit = 0.20
-knn = 0.15
+knn = 0.10
+affinity = 0.05
 interest = 0.10
 feed = 0.05
 triage = 0.05
