@@ -19,10 +19,11 @@ use crate::report::RunReport;
 use crate::types::{ArticleId, Candidate, NearMiss};
 
 /// Signal names rendered by `explain`, in the order of §7.5.
-const RENDERED_SIGNALS: [&str; 8] = [
+const RENDERED_SIGNALS: [&str; 9] = [
     "interest",
     "knn",
     "feed",
+    "affinity",
     "social",
     "heuristic",
     "triage",
@@ -159,6 +160,7 @@ pub fn serialize_signals(signals: &Signals, auto_include: bool) -> String {
         "interest_top1_cos",
         "knn",
         "feed",
+        "affinity",
         "social",
         "heuristic",
     ] {
@@ -1157,11 +1159,17 @@ mod tests {
         Signals {
             interest: Some(1.2),
             interest_top1_cos: Some(0.61),
+            affinity: Some(0.2),
             heuristic: Some(heuristic),
-            norm: BTreeMap::from([("heuristic".into(), norm), ("interest".into(), 0.9)]),
+            norm: BTreeMap::from([
+                ("affinity".into(), 0.7),
+                ("heuristic".into(), norm),
+                ("interest".into(), 0.9),
+            ]),
             weights: BTreeMap::from([
-                ("heuristic".into(), 0.2 / 0.55),
-                ("interest".into(), 0.35 / 0.55),
+                ("affinity".into(), 0.1 / 0.6),
+                ("heuristic".into(), 0.2 / 0.6),
+                ("interest".into(), 0.3 / 0.6),
             ]),
             top_interests: vec![TopInterest {
                 name: "Gaussian Splatting".into(),
@@ -1186,6 +1194,7 @@ mod tests {
         assert_eq!(parsed["v"], 1);
         assert_eq!(parsed["raw"]["heuristic"], 41.0);
         assert_eq!(parsed["raw"]["interest_top1_cos"], 0.61);
+        assert_eq!(parsed["raw"]["affinity"], 0.2);
         assert_eq!(parsed["present"]["heuristic"], true);
         assert_eq!(parsed["present"]["knn"], false);
         assert_eq!(parsed["present"]["quality"], false);
@@ -1385,7 +1394,11 @@ mod tests {
         );
         let squashed = text.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            squashed.contains("heuristic 41.000 · 0.550 · 0.364"),
+            squashed.contains("heuristic 41.000 · 0.550 · 0.333"),
+            "{text}"
+        );
+        assert!(
+            squashed.contains("affinity 0.200 · 0.700 · 0.167"),
             "{text}"
         );
         assert!(squashed.contains("knn absent"), "{text}");

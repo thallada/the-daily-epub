@@ -46,7 +46,7 @@ use crate::types::{
     Article, ArticleId, Artifact, BehindThePaper, Candidate, Colophon, Edition, Issue, IssueMeta,
     Lineup, Models, TokenUsage, reading_minutes,
 };
-use crate::{comments, dedupe, discovery, epub, http, miniflux, publish, social, world};
+use crate::{comments, dedupe, discovery, epub, http, interests, miniflux, publish, social, world};
 
 /// One `generate` invocation's inputs — the CLI flags, already parsed (§2).
 #[derive(Debug, Clone, Default)]
@@ -943,15 +943,22 @@ async fn prepare_features(
         }
     };
     report.counts.embedded = article_embeddings.len() as i64;
-    let interests =
-        match profile::load_standing_interests(&config.interests_opml, &config.profile_path) {
-            Ok(interests) => interests,
-            Err(error) => {
-                tracing::warn!(%error, "could not load standing interests for embeddings");
-                Vec::new()
-            }
-        };
-    let interest_embeddings = match service.interests(&interests).await {
+    let interest_rows = match interests::list(db).await {
+        Ok(interests) => interests,
+        Err(error) => {
+            tracing::warn!(%error, "could not load standing interests for embeddings");
+            Vec::new()
+        }
+    };
+    let interest_names = interest_rows
+        .iter()
+        .map(|interest| interest.name.clone())
+        .collect::<Vec<_>>();
+    let interest_ids = interest_rows
+        .into_iter()
+        .map(|interest| (interest.name, interest.id))
+        .collect::<HashMap<_, _>>();
+    let interest_embeddings = match service.interests(&interest_names).await {
         Ok(embeddings) => embeddings,
         Err(error) => {
             report.warn(format!("interest embedding stage degraded: {error}"));
@@ -1008,6 +1015,21 @@ async fn prepare_features(
         candidate.signals = computed
             .remove(&candidate.article.id)
             .unwrap_or_else(|| signals::Signals::baseline(&candidate.article));
+    }
+    let matches = candidates
+        .iter()
+        .filter(|candidate| !candidate.signals.top_interests.is_empty())
+        .map(|candidate| {
+            (
+                candidate.article.id,
+                candidate.signals.top_interests.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Err(error) =
+        interests::replace_matches(db, Some(ctx.run_id), &matches, &interest_ids).await
+    {
+        report.warn(format!("could not record interest matches: {error}"));
     }
     if let Err(error) = record_candidates(ctx, candidates).await {
         report.warn(format!("could not record eligible candidates: {error}"));
@@ -1138,7 +1160,6 @@ async fn build_llms(
 ) -> Llms {
     let profile = match profile::load_or_build(
         ctx.db,
-        &ctx.config.interests_opml,
         &ctx.config.profile_path,
         ctx.config.curation.feedback.verdicts_in_prompt,
     )
@@ -1161,6 +1182,39 @@ async fn build_llms(
     let make_clients = |prompt: String| Llms::from_config(ctx.config, prompt, meters);
 
     let mut llms = make_clients(profile.text);
+    // Categorizing regroups the prompt's standing interests, so the prompt is
+    // reloaded and the clients remade before anything uses them.
+    if !llms.is_empty() {
+        match interests::uncategorized(ctx.db).await {
+            Ok(pending) if !pending.is_empty() => {
+                match interests::categorize(ctx.config, ctx.db).await {
+                    Ok(message) => {
+                        tracing::info!(%message);
+                        match profile::load_or_build(
+                            ctx.db,
+                            &ctx.config.profile_path,
+                            ctx.config.curation.feedback.verdicts_in_prompt,
+                        )
+                        .await
+                        {
+                            Ok(regrouped) => {
+                                report.counts.verdicts_in_prompt = regrouped.verdicts as i64;
+                                llms = make_clients(regrouped.text);
+                            }
+                            Err(error) => report.warn(format!(
+                                "could not rebuild the taste prompt after categorizing: {error:#}"
+                            )),
+                        }
+                    }
+                    Err(error) => report.warn(format!("interest categorization failed: {error:#}")),
+                }
+            }
+            Ok(_) => {}
+            Err(error) => report.warn(format!(
+                "could not check for uncategorized interests: {error:#}"
+            )),
+        }
+    }
     let Some(rebuild_client) = llms.editor_or_bulk() else {
         report.warn("no LLM provider is available; curating heuristically");
         return llms;
@@ -1168,7 +1222,6 @@ async fn build_llms(
     match profile::weekly_rebuild_if_due(
         ctx.db,
         rebuild_client,
-        &ctx.config.interests_opml,
         &ctx.config.profile_path,
         ctx.config.curation.feedback.verdicts_in_prompt,
     )
@@ -1577,12 +1630,9 @@ mod tests {
         config.curation.blocked_domains = vec!["blocked.example".into()];
         config.voyage.output_dimension = 4;
         config.target_article_count = 1;
-        config.interests_opml = dir.path().join("interests.opml");
-        std::fs::write(
-            &config.interests_opml,
-            "<opml><body><outline text=\"Writerdeck\"/></body></opml>",
-        )
-        .unwrap();
+        interests::add(&db, "Writerdeck", Some("Publishing"), Timestamp::now())
+            .await
+            .unwrap();
         config.profile_path = dir.path().join("profile.md");
         std::fs::write(&config.profile_path, "# Reader profile\n").unwrap();
 
@@ -1708,6 +1758,7 @@ mod tests {
         assert!(report.voyage_tokens > 0);
         // One batch for the two articles, one for the interest.
         assert_eq!(backend.calls(), 2);
+        assert_eq!(backend.requests()[1].input, ["Writerdeck"]);
         let signals = &features
             .iter()
             .find(|candidate| candidate.article.id == a)
@@ -1723,6 +1774,19 @@ mod tests {
             "gates closed"
         );
         assert!(signals.preliminary.is_some());
+
+        let expected_matches = features
+            .iter()
+            .map(|candidate| candidate.signals.top_interests.len() as i64)
+            .sum::<i64>();
+        let stored_matches: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM article_interests WHERE run_id = ?")
+                .bind(h.run_id)
+                .fetch_one(h.db.pool())
+                .await
+                .unwrap();
+        assert!(expected_matches > 0);
+        assert_eq!(stored_matches, expected_matches);
 
         let rows = stage_rows(&h.db, h.run_id).await;
         assert_eq!(rows.len(), 4, "one row per considered article");

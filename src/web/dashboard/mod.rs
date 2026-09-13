@@ -11,6 +11,7 @@
 
 pub mod articles;
 pub mod feeds;
+pub mod interests;
 pub mod jobs;
 pub mod profile;
 pub mod ratings;
@@ -45,6 +46,7 @@ pub fn router() -> Router<AppState> {
         .merge(runs::routes())
         .merge(articles::routes())
         .merge(ratings::routes())
+        .merge(interests::routes())
         .merge(feeds::routes())
         .merge(profile::routes())
         .merge(settings::routes())
@@ -58,10 +60,11 @@ pub fn router() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 /// Signal names in the order of curation plan §7.5.
-pub const SIGNAL_NAMES: [&str; 8] = [
+pub const SIGNAL_NAMES: [&str; 9] = [
     "interest",
     "knn",
     "feed",
+    "affinity",
     "social",
     "heuristic",
     "triage",
@@ -276,6 +279,7 @@ pub struct SignalLine {
 #[derive(Debug, Clone)]
 pub struct InterestLine {
     pub name: String,
+    pub href: String,
     pub z: String,
     pub cos: String,
 }
@@ -343,6 +347,7 @@ impl SignalsView {
                 .iter()
                 .map(|interest| InterestLine {
                     name: interest.name.clone(),
+                    href: crate::interests::articles_href(&interest.name),
                     z: format!("{:.2}", interest.z),
                     cos: format!("{:.3}", interest.cos),
                 })
@@ -428,6 +433,8 @@ struct OverviewTemplate {
     ratings_total: i64,
     access_requests: i64,
     feed_candidates: i64,
+    interests_total: usize,
+    uncategorized_interests: usize,
     unrated: Vec<UnratedPick>,
     active_jobs: Vec<JobLine>,
     finished_jobs: Vec<JobLine>,
@@ -455,6 +462,14 @@ async fn overview(
             .await
             .map_err(db_err)?;
     let feed_candidates = crate::discovery::count(db, "candidate").await?;
+    let interests = crate::interests::list(db)
+        .await
+        .map_err(WebError::Internal)?;
+    let interests_total = interests.len();
+    let uncategorized_interests = interests
+        .iter()
+        .filter(|interest| interest.category.is_none())
+        .count();
     let unrated = unrated_picks(db).await?;
     let (active_jobs, finished_jobs) = jobs_summary(db, &config).await?;
     let sparklines = overview_sparklines(db).await?;
@@ -474,6 +489,8 @@ async fn overview(
         ratings_total,
         access_requests,
         feed_candidates,
+        interests_total,
+        uncategorized_interests,
         unrated,
         active_jobs,
         finished_jobs,
@@ -1225,6 +1242,8 @@ pub(crate) mod tests {
             "/dashboard/articles/1".to_string(),
             "/dashboard/ratings".to_string(),
             "/dashboard/ratings?tab=events".to_string(),
+            "/dashboard/interests".to_string(),
+            "/dashboard/interests?category=uncategorized&sort=name".to_string(),
             "/dashboard/profile".to_string(),
             "/dashboard/stats?days=14".to_string(),
             "/dashboard/settings".to_string(),

@@ -44,11 +44,13 @@ pub enum Job {
     FeaturesPrune,
     /// `import-ratings` → process ratings-dashboard URL imports.
     ImportRatings,
+    /// `interests-categorize` → file uncategorized standing interests.
+    InterestsCategorize,
 }
 
 impl Job {
     /// The catalogue in the order the Jobs page lists it.
-    pub const CATALOGUE: [Job; 7] = [
+    pub const CATALOGUE: [Job; 8] = [
         Job::Generate { date: None },
         Job::DryRun,
         Job::ProfileRebuild,
@@ -56,6 +58,7 @@ impl Job {
         Job::BackfillSocial,
         Job::FeaturesPrune,
         Job::ImportRatings,
+        Job::InterestsCategorize,
     ];
 
     /// `^[a-z0-9-]+$`: the only characters a job (and so a unit instance) name
@@ -81,6 +84,7 @@ impl Job {
             "backfill-social" => Some(Job::BackfillSocial),
             "features-prune" => Some(Job::FeaturesPrune),
             "import-ratings" => Some(Job::ImportRatings),
+            "interests-categorize" => Some(Job::InterestsCategorize),
             _ => {
                 let date = name.strip_prefix("generate-")?;
                 // Exactly `YYYY-MM-DD`; the round trip rejects `2026-9-3`.
@@ -100,6 +104,7 @@ impl Job {
             Job::BackfillSocial => "backfill-social".into(),
             Job::FeaturesPrune => "features-prune".into(),
             Job::ImportRatings => "import-ratings".into(),
+            Job::InterestsCategorize => "interests-categorize".into(),
         }
     }
 
@@ -128,6 +133,9 @@ impl Job {
                 "Drop stale embeddings, old candidate telemetry and old assessments per the retention config."
             }
             Job::ImportRatings => "Fetch, embed and rate the URLs queued from the Ratings page.",
+            Job::InterestsCategorize => {
+                "File uncategorized interests under categories with the bulk model, creating new ones only when needed."
+            }
         }
     }
 
@@ -139,7 +147,7 @@ impl Job {
             Job::ProfileRebuild => Some("profile rebuild"),
             Job::FeaturesBackfill => Some("features backfill"),
             Job::BackfillSocial => Some("backfill-social"),
-            Job::FeaturesPrune | Job::ImportRatings => None,
+            Job::FeaturesPrune | Job::ImportRatings | Job::InterestsCategorize => None,
         }
     }
 
@@ -459,6 +467,16 @@ mod tests {
             Job::ImportRatings.description(),
             "Fetch, embed and rate the URLs queued from the Ratings page."
         );
+        assert_eq!(
+            Job::parse("interests-categorize"),
+            Some(Job::InterestsCategorize)
+        );
+        assert_eq!(Job::InterestsCategorize.takes_lock(), None);
+        assert_eq!(
+            Job::InterestsCategorize.description(),
+            "File uncategorized interests under categories with the bulk model, creating new ones only when needed."
+        );
+        assert!(!Job::InterestsCategorize.dangerous());
         assert!(Job::parse("generate-2026-09-03").unwrap().dangerous());
         assert!(!Job::parse("dry-run").unwrap().dangerous());
     }

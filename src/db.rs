@@ -1689,6 +1689,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0013_interests.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let rows = sqlx::query(
             "SELECT article_id, issue_date, kind, source, label, value, event_at, user_id
@@ -1724,6 +1728,8 @@ mod tests {
             "interest_embeddings",
             "article_assessments",
             "candidate_runs",
+            "interests",
+            "article_interests",
             "users",
             "sessions",
             "config_changes",

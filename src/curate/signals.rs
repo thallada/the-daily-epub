@@ -14,11 +14,14 @@ use crate::config::{PreliminaryWeights, RankingConfig, VoyageConfig};
 use crate::curate::embedding::{dot, load_article_embeddings};
 use crate::curate::prefilter;
 use crate::db::Db;
+use crate::interests::{self, Rate};
 use crate::types::{Article, ArticleId, FeedId, SourceKind};
 
 /// Below this many embedded eligible articles the z-score is too noisy, so the
 /// interest signal falls back to the raw top-1 cosine (§9.1).
 pub const INTEREST_ZSCORE_MIN_ARTICLES: usize = 30;
+/// Weak top-three matches are omitted everywhere they are presented or credited.
+pub const MATCH_MIN_Z: f64 = 1.0;
 /// Standard-deviation floor for the per-interest z-score (§9.1).
 const ZSCORE_STD_FLOOR: f64 = 1e-3;
 /// How many interests and rated neighbours `signals_json` records (§7.5).
@@ -30,7 +33,8 @@ pub const AGGREGATOR_FEED_SHARE: f64 = 0.25;
 /// The signal names that go through the percentile normalizer, in the order
 /// they are rendered (§12.2). LLM scores (`triage`, `quality`, `fit`) are
 /// absolute and arrive in steps 4–5.
-pub const PERCENTILE_SIGNALS: [&str; 5] = ["interest", "knn", "feed", "social", "heuristic"];
+pub const PERCENTILE_SIGNALS: [&str; 6] =
+    ["interest", "knn", "feed", "affinity", "social", "heuristic"];
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TopInterest {
@@ -56,6 +60,7 @@ pub struct Signals {
     pub interest_top1_cos: Option<f64>,
     pub knn: Option<f64>,
     pub feed: Option<f64>,
+    pub affinity: Option<f64>,
     pub social: Option<f64>,
     pub heuristic: Option<f64>,
     /// Mid-rank percentiles of the present signals (§12.2).
@@ -80,6 +85,8 @@ pub struct Signals {
     pub knn_gate: f64,
     #[serde(skip)]
     pub feed_gate: f64,
+    #[serde(skip)]
+    pub affinity_gate: f64,
     /// `ranking.slop_author_penalty`, applied when `slop_author` is set.
     #[serde(skip)]
     pub slop_penalty: f64,
@@ -105,6 +112,7 @@ impl Signals {
             "interest_top1_cos" => self.interest_top1_cos,
             "knn" => self.knn,
             "feed" => self.feed,
+            "affinity" => self.affinity,
             "social" => self.social,
             "heuristic" => self.heuristic,
             _ => None,
@@ -130,8 +138,10 @@ impl Signals {
 pub struct PreferenceSummary {
     pub rated_with_embeddings: usize,
     pub attributable_feed_ratings: usize,
+    pub attributable_interest_ratings: usize,
     pub knn_gate: f64,
     pub feed_gate: f64,
+    pub affinity_gate: f64,
 }
 
 /// One rated article with an embedding: the unit of the preference state (§9.2).
@@ -179,12 +189,15 @@ pub struct PreferenceState {
     pub examples: Vec<RatedExample>,
     feed_rates: HashMap<FeedId, FeedRate>,
     author_rates: HashMap<String, FeedRate>,
+    interest_rates: HashMap<String, Rate>,
     /// Normalized keys of authors with a current *AI slop* verdict (§9.3).
     slop_authors: HashSet<String>,
     pub slop_author_penalty: f64,
     pub attributable_feed_ratings: usize,
+    pub attributable_interest_ratings: usize,
     pub knn_gate: f64,
     pub feed_gate: f64,
+    pub affinity_gate: f64,
 }
 
 impl PreferenceState {
@@ -204,10 +217,26 @@ impl PreferenceState {
             examples,
             feed_rates,
             author_rates,
+            interest_rates: HashMap::new(),
             slop_authors: HashSet::new(),
             slop_author_penalty: ranking.slop_author_penalty,
             attributable_feed_ratings,
+            attributable_interest_ratings: 0,
+            affinity_gate: 0.0,
         }
+    }
+
+    /// Register rating-derived interest rates after the embedding examples are built.
+    pub fn with_interest_rates(
+        mut self,
+        rates_by_name: HashMap<String, Rate>,
+        attributable: usize,
+        ranking: &RankingConfig,
+    ) -> Self {
+        self.interest_rates = rates_by_name;
+        self.attributable_interest_ratings = attributable;
+        self.affinity_gate = gate(attributable, ranking.affinity_floor, ranking.affinity_full);
+        self
     }
 
     /// Register the authors whose current verdict is *AI slop*; keys are
@@ -234,8 +263,7 @@ impl PreferenceState {
         self.slop_authors.len()
     }
 
-    /// Load `db::current_ratings(rating_lookback_days)` joined to
-    /// `article_embeddings`; ratings without an embedding are skipped (§9.2).
+    /// Load current ratings; only kNN/feed examples require an embedding.
     pub async fn load(
         db: &Db,
         voyage: &VoyageConfig,
@@ -249,7 +277,7 @@ impl PreferenceState {
             .collect::<Vec<_>>();
         let embeddings = load_article_embeddings(db, voyage, &ids).await?;
         let mut examples = Vec::new();
-        for rating in ratings {
+        for rating in &ratings {
             let Some(embedding) = embeddings.get(&rating.article_id).cloned() else {
                 continue;
             };
@@ -264,8 +292,8 @@ impl PreferenceState {
             let age_days = (now.as_second() - rating.event_at.as_second()).max(0) as f64 / 86_400.0;
             examples.push(RatedExample {
                 article_id: rating.article_id,
-                label: rating.label,
-                title: rating.title,
+                label: rating.label.clone(),
+                title: rating.title.clone(),
                 value: rating.value,
                 decay: decay(age_days, ranking.rating_half_life_days),
                 embedding,
@@ -274,16 +302,51 @@ impl PreferenceState {
                 aggregator_only,
             });
         }
+        let match_rows = interests::matches_for_articles(db, &ids).await?;
+        let rated = ratings
+            .iter()
+            .map(|rating| {
+                let age_days =
+                    (now.as_second() - rating.event_at.as_second()).max(0) as f64 / 86_400.0;
+                (
+                    rating.article_id,
+                    rating.value,
+                    decay(age_days, ranking.rating_half_life_days),
+                )
+            })
+            .collect::<Vec<_>>();
+        let matched = match_rows
+            .iter()
+            .map(|row| (row.article_id, row.interest_id, row.z))
+            .collect::<Vec<_>>();
+        let rates = interests::rates(&rated, &matched);
+        let names = match_rows
+            .iter()
+            .map(|row| (row.interest_id, row.name.as_str()))
+            .collect::<HashMap<_, _>>();
+        let rates_by_name = rates
+            .by_interest
+            .into_iter()
+            .filter_map(|(interest_id, rate)| {
+                names
+                    .get(&interest_id)
+                    .map(|name| ((*name).to_string(), rate))
+            })
+            .collect();
         let slop_authors = db.slop_authors().await?;
-        Ok(Self::build(examples, ranking).with_slop_authors(slop_authors))
+        Ok(Self::build(examples, ranking)
+            .with_interest_rates(rates_by_name, rates.attributable, ranking)
+            .with_slop_authors(slop_authors))
     }
 
     pub fn summary(&self) -> PreferenceSummary {
         PreferenceSummary {
             rated_with_embeddings: self.examples.len(),
             attributable_feed_ratings: self.attributable_feed_ratings,
+            attributable_interest_ratings: self.attributable_interest_ratings,
             knn_gate: self.knn_gate,
             feed_gate: self.feed_gate,
+            affinity_gate: self.affinity_gate,
         }
     }
 
@@ -297,19 +360,52 @@ impl PreferenceState {
                 self.attributable_feed_ratings, ranking.feed_floor
             )
         };
+        let affinity_detail = if self.affinity_gate > 0.0 {
+            format!("(n={})", self.attributable_interest_ratings)
+        } else {
+            format!(
+                "(n={} < {})",
+                self.attributable_interest_ratings, ranking.affinity_floor
+            )
+        };
         tracing::info!(
             rated_with_embeddings = self.examples.len(),
             knn_gate = self.knn_gate,
             feed_gate = self.feed_gate,
+            affinity_gate = self.affinity_gate,
             slop_authors = self.slop_authors.len(),
-            "preference: {} rated articles with embeddings → knn gate {:.2}; feed gate {:.1} {}; {} slop authors (penalty {:.2})",
+            "preference: {} rated articles with embeddings → knn gate {:.2}; feed gate {:.1} {}; affinity gate {:.1} {}; {} slop authors (penalty {:.2})",
             self.examples.len(),
             self.knn_gate,
             self.feed_gate,
             feed_detail,
+            self.affinity_gate,
+            affinity_detail,
             self.slop_authors.len(),
             self.slop_author_penalty
         );
+    }
+
+    /// Match-strength-weighted preference for the article's rated interests.
+    fn affinity(&self, top: &[TopInterest]) -> Option<f64> {
+        if self.affinity_gate <= 0.0 {
+            return None;
+        }
+        let mut weighted = 0.0;
+        let mut strength_sum = 0.0;
+        for interest in top {
+            let Some(rate) = self
+                .interest_rates
+                .get(&interest.name)
+                .filter(|rate| rate.n > 0)
+            else {
+                continue;
+            };
+            let strength = (interest.z / 3.0).clamp(0.0, 1.0);
+            weighted += strength * (rate.weight() - 0.5);
+            strength_sum += strength;
+        }
+        (strength_sum > 0.0).then_some(weighted / strength_sum)
     }
 
     /// Signed rated-neighbour preference and the three nearest rated articles
@@ -552,6 +648,7 @@ pub fn interest_matches(
                 let top_mean = all.iter().map(|item| item.z).sum::<f64>() / all.len() as f64;
                 0.7 * all[0].z + 0.3 * top_mean
             };
+            all.retain(|interest| interest.z >= MATCH_MIN_Z);
             (
                 article_id,
                 InterestMatch {
@@ -580,10 +677,12 @@ pub fn compute(
             let mut signals = Signals::baseline(article);
             signals.knn_gate = preference.knn_gate;
             signals.feed_gate = preference.feed_gate;
+            signals.affinity_gate = preference.affinity_gate;
             if let Some(matched) = interests.get(&article.id) {
                 signals.interest = Some(matched.score);
                 signals.interest_top1_cos = Some(matched.top1_cos);
                 signals.top_interests = matched.top_interests.clone();
+                signals.affinity = preference.affinity(&matched.top_interests);
             }
             if let Some(embedding) = article_embeddings.get(&article.id) {
                 let (knn, neighbours) = preference.knn(embedding, ranking);
@@ -680,6 +779,7 @@ pub fn preliminary_blend(signals: &mut Signals, configured: &PreliminaryWeights)
     let candidates = [
         ("interest", configured.interest, 1.0),
         ("knn", configured.knn, signals.knn_gate),
+        ("affinity", configured.affinity, signals.affinity_gate),
         ("heuristic", configured.heuristic, 1.0),
         ("feed", configured.feed, signals.feed_gate),
         ("social", configured.social, 1.0),
@@ -818,6 +918,47 @@ mod tests {
     }
 
     #[test]
+    fn match_cut_keeps_the_score_from_the_uncut_top_three() {
+        let mut articles = HashMap::new();
+        for id in 1..=30 {
+            let mut vector = vec![0.0; 30];
+            vector[id - 1] = 1.0;
+            articles.insert(id as ArticleId, vector);
+        }
+        let interest_at_z = |target: f64| {
+            let mean = -target / 29.0;
+            let spread = ((30.0 - target * target - target * target / 29.0) / 812.0).sqrt();
+            let mut vector = vec![mean + spread; 30];
+            vector[0] = target;
+            vector[29] = mean - 28.0 * spread;
+            unit(
+                &vector
+                    .into_iter()
+                    .map(|value| value as f32)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let interests = HashMap::from([
+            ("first".to_string(), interest_at_z(2.0)),
+            ("second".to_string(), interest_at_z(1.5)),
+            ("weak third".to_string(), interest_at_z(0.4)),
+        ]);
+
+        let matched = interest_matches(&articles, &interests);
+        let first = &matched[&1];
+        assert_eq!(
+            first
+                .top_interests
+                .iter()
+                .map(|interest| interest.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        let uncut_score = 0.7 * 2.0 + 0.3 * ((2.0 + 1.5 + 0.4) / 3.0);
+        assert!((first.score - uncut_score).abs() < 1e-5, "{}", first.score);
+    }
+
+    #[test]
     fn interest_falls_back_to_raw_cosine_under_thirty_articles() {
         let (articles, interests) = interest_fixture(10);
         let matched = interest_matches(&articles, &interests);
@@ -825,6 +966,11 @@ mod tests {
             assert!(
                 (m.score - m.top1_cos).abs() < 1e-9,
                 "article {id} should use raw top-1"
+            );
+            assert!(
+                m.top_interests
+                    .iter()
+                    .all(|interest| interest.z >= MATCH_MIN_Z)
             );
         }
         assert!((matched[&2].score - 0.707).abs() < 0.01);
@@ -928,6 +1074,99 @@ mod tests {
         let state = PreferenceState::build(vec![example(1, "loved", 1.0, &[1.0, 0.0])], &ranking);
         assert_eq!(state.knn_gate, 0.0);
         assert_eq!(state.knn(&unit(&[1.0, 0.0]), &ranking), (None, Vec::new()));
+    }
+
+    #[test]
+    fn affinity_is_absent_under_the_gate_and_without_rated_interests() {
+        let top = [TopInterest {
+            name: "Rust".into(),
+            z: 3.0,
+            cos: 0.8,
+        }];
+        let rates = HashMap::from([(
+            "Rust".to_string(),
+            Rate {
+                up: 3.0,
+                down: 0.0,
+                n: 1,
+            },
+        )]);
+        let closed = PreferenceState::build(Vec::new(), &ranking()).with_interest_rates(
+            rates,
+            1,
+            &ranking(),
+        );
+        assert_eq!(closed.affinity(&top), None);
+
+        let mut open_ranking = ranking();
+        open_ranking.affinity_floor = 0;
+        open_ranking.affinity_full = 1;
+        let empty = PreferenceState::build(Vec::new(), &open_ranking).with_interest_rates(
+            HashMap::new(),
+            1,
+            &open_ranking,
+        );
+        assert_eq!(empty.affinity(&top), None);
+    }
+
+    #[tokio::test]
+    async fn affinity_load_counts_ratings_without_embeddings() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("signals.db"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO articles (id, canonical_url, title, first_seen)
+             VALUES (1, 'https://example.com/1', 'Rated', '2026-09-13T00:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let now = Timestamp::now();
+        let interests::AddOutcome::Added(interest_id) =
+            interests::add(&db, "Rust", None, now).await.unwrap()
+        else {
+            unreachable!();
+        };
+        sqlx::query(
+            "INSERT INTO article_interests (article_id, interest_id, cos, z)
+             VALUES (1, ?, 0.8, 3.0)",
+        )
+        .bind(interest_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO rating_events
+             (article_id, kind, source, label, value, event_at)
+             VALUES (1, 'explicit', 'test', 'loved', 1.0, ?)",
+        )
+        .bind(now.to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let mut ranking = ranking();
+        ranking.affinity_floor = 0;
+        ranking.affinity_full = 1;
+        let voyage = VoyageConfig {
+            enabled: false,
+            ..VoyageConfig::default()
+        };
+
+        let state = PreferenceState::load(&db, &voyage, &ranking, now)
+            .await
+            .unwrap();
+        assert!(state.examples.is_empty());
+        assert_eq!(state.attributable_interest_ratings, 1);
+        assert_eq!(state.affinity_gate, 1.0);
+        let affinity = state
+            .affinity(&[TopInterest {
+                name: "Rust".into(),
+                z: 3.0,
+                cos: 0.8,
+            }])
+            .unwrap();
+        assert!((affinity - 1.0 / 6.0).abs() < 1e-9);
     }
 
     // --- §9.3 feed affinity ---
@@ -1165,8 +1404,8 @@ mod tests {
         assert!((signals.weights.values().sum::<f64>() - 1.0).abs() < 1e-9);
         assert!(!signals.weights.contains_key("knn"));
         assert!(!signals.weights.contains_key("social"));
-        // 0.35/0.55 × 0.8 + 0.20/0.55 × 0.4 = 0.6545…
-        assert!((blend - 65.4545).abs() < 0.01, "{blend}");
+        // 0.30/0.50 × 0.8 + 0.20/0.50 × 0.4 = 0.64.
+        assert!((blend - 64.0).abs() < 1e-9, "{blend}");
 
         let mut only_heuristic = Signals {
             heuristic: Some(2.0),
@@ -1190,6 +1429,61 @@ mod tests {
         preliminary_blend(&mut signals, &PreliminaryWeights::default());
         // knn 0.25 × 0.5 = 0.125 against heuristic 0.20.
         assert!((signals.weights["knn"] - 0.125 / 0.325).abs() < 1e-9);
+    }
+
+    #[test]
+    fn liked_interest_outranks_disliked_interest_with_affinity_in_the_blend() {
+        let mut ranking = ranking();
+        ranking.affinity_floor = 0;
+        ranking.affinity_full = 1;
+        let rates = HashMap::from([
+            (
+                "liked".to_string(),
+                Rate {
+                    up: 3.0,
+                    down: 0.0,
+                    n: 1,
+                },
+            ),
+            (
+                "disliked".to_string(),
+                Rate {
+                    up: 0.0,
+                    down: 4.0 / 3.0,
+                    n: 1,
+                },
+            ),
+        ]);
+        let state =
+            PreferenceState::build(Vec::new(), &ranking).with_interest_rates(rates, 1, &ranking);
+        let top = |name: &str| {
+            vec![TopInterest {
+                name: name.into(),
+                z: 3.0,
+                cos: 0.8,
+            }]
+        };
+        let mut signals = [
+            Signals {
+                affinity: state.affinity(&top("liked")),
+                heuristic: Some(1.0),
+                affinity_gate: state.affinity_gate,
+                ..Signals::default()
+            },
+            Signals {
+                affinity: state.affinity(&top("disliked")),
+                heuristic: Some(1.0),
+                affinity_gate: state.affinity_gate,
+                ..Signals::default()
+            },
+        ];
+        normalize(&mut signals.iter_mut().collect::<Vec<_>>());
+        for signal in &mut signals {
+            preliminary_blend(signal, &ranking.weights.preliminary);
+            assert!((signal.weights.values().sum::<f64>() - 1.0).abs() < 1e-9);
+            assert!(signal.weights.contains_key("affinity"));
+        }
+        assert!(signals[0].preliminary > signals[1].preliminary);
     }
 
     #[test]

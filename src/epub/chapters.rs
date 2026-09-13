@@ -232,7 +232,24 @@ fn facet_label(token: &str) -> Option<String> {
 pub struct Understanding {
     pub kicker: Option<String>,
     pub topics: Option<String>,
-    pub interests: Option<String>,
+    pub interests: Vec<InterestRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterestRef {
+    pub name: String,
+    pub href: String,
+}
+
+impl Understanding {
+    /// EPUBs keep interest names as plain text, without dashboard links.
+    pub fn interests_line(&self) -> String {
+        self.interests
+            .iter()
+            .map(|interest| interest.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" \u{00b7} ")
+    }
 }
 
 /// Reader-facing assessment details, split so templates can give each part the
@@ -257,7 +274,14 @@ pub fn understanding(pick: &Pick) -> Understanding {
         });
         (kicker, topics)
     });
-    let interests = (!pick.top_interests.is_empty()).then(|| pick.top_interests.join(" \u{00b7} "));
+    let interests = pick
+        .top_interests
+        .iter()
+        .map(|name| InterestRef {
+            name: name.clone(),
+            href: crate::interests::articles_href(name),
+        })
+        .collect();
 
     Understanding {
         kicker,
@@ -811,7 +835,16 @@ mod tests {
             Understanding {
                 kicker: Some("Software engineering · Analysis".into()),
                 topics: Some("copy-on-write · ZFS".into()),
-                interests: Some("Filesystems · Rust".into()),
+                interests: vec![
+                    InterestRef {
+                        name: "Filesystems".into(),
+                        href: "/dashboard/articles?interest=Filesystems".into(),
+                    },
+                    InterestRef {
+                        name: "Rust".into(),
+                        href: "/dashboard/articles?interest=Rust".into(),
+                    },
+                ],
             }
         );
     }
@@ -833,7 +866,10 @@ mod tests {
         assert_eq!(
             understanding(&pick),
             Understanding {
-                interests: Some("Rust".into()),
+                interests: vec![InterestRef {
+                    name: "Rust".into(),
+                    href: "/dashboard/articles?interest=Rust".into(),
+                }],
                 ..Understanding::default()
             }
         );

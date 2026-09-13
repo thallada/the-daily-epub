@@ -1,13 +1,13 @@
 {% extends "layout.html" %}{% block content %}<section class="dashboard profile">
 <header class="page-head"><div>
 <h1>Profile</h1>
-<p class="page-desc">The standing taste file the curator reads before every run: what you like, what the OPML declares, and what the editor model has learned from your verdicts.</p>
+<p class="page-desc">The standing taste file the curator reads before every run, alongside stored interests and what the editor model has learned from your verdicts.</p>
 </div><div class="page-actions"><a class="btn" href="/dashboard/ratings">Ratings</a><a class="btn" href="/dashboard/settings#curation.feedback">Feedback settings</a></div></header>
 
 <div class="profile-grid grid gap-6 lg:grid-cols-2">
 <div class="profile-editor min-w-0">
 <h3 class="font-mono text-base">profile.md</h3>
-<p class="meta mt-1 text-xs"><code>{{ path }}</code>{% if !exists %} — <strong class="text-down">missing</strong>; saving creates it{% else %} · {{ bytes }} bytes{% endif %} · limit {{ max_bytes }} bytes. Any <code>## Interests</code> section is parsed one interest per line; everything else goes into the system prompt verbatim.</p>
+<p class="meta mt-1 text-xs"><code>{{ path }}</code>{% if !exists %} — <strong class="text-down">missing</strong>; saving creates it{% else %} · {{ bytes }} bytes{% endif %} · limit {{ max_bytes }} bytes. Any <code>## Interests</code> section is ignored; everything else goes into the system prompt verbatim.</p>
 <form method="post" action="/dashboard/profile" class="profile-form mt-3">
 <textarea name="content" rows="24" spellcheck="true" required class="w-full font-mono text-sm">{{ content }}</textarea>
 <div class="mt-3 flex flex-wrap items-center gap-3"><button class="btn-primary" type="submit">Save</button> <span class="meta text-xs">The next run rebuilds the system prompt from the saved file.</span></div>
@@ -19,8 +19,6 @@
 <p class="meta mt-1 text-xs">A live read of the text on the left, exactly as <code>curate::profile</code> splits it.</p>
 <h4 class="mt-4 page-eyebrow">Passthrough sections</h4>
 {% if preview_body.trim().is_empty() %}<p class="meta mt-1 text-sm">Nothing passes through — the file is empty or only has an Interests section.</p>{% else %}<pre class="preview mt-2">{{ preview_body }}</pre>{% endif %}
-<h4 class="mt-5 page-eyebrow">Extracted <code>## Interests</code> lines</h4>
-{% if preview_interests.is_empty() %}<p class="meta mt-1 text-sm">None. The prompt uses the OPML interests alone.</p>{% else %}<ul class="mt-2 list-disc space-y-1 pl-5 text-sm marker:text-muted">{% for interest in preview_interests %}<li>{{ interest }}</li>{% endfor %}</ul>{% endif %}
 </div>
 </div>
 
@@ -40,9 +38,8 @@
 {% endif %}
 
 <h2>Standing interests</h2>
-<p class="meta text-sm"><code>{{ opml_path }}</code> · {{ opml_count }} interests, grouped the way the system prompt lists them. The union of these and the <code>## Interests</code> lines above is what the prompt uses; edit the OPML file to change them.</p>
-{% if !opml_error.is_empty() %}<p class="error">{{ opml_error }}</p>{% endif %}
-{% if !themes.is_empty() %}<dl class="kv themes">{% for theme in themes %}<dt class="text-ink">{{ theme.name }} <span class="meta">({{ theme.count }})</span></dt><dd class="text-muted">{{ theme.members }}</dd>{% endfor %}</dl>{% endif %}
+<p class="meta text-sm">{{ interest_count }} standing interests in {{ category_count }} categories — manage them on the <a href="/dashboard/interests">Interests page</a>.</p>
+{% if !categories.is_empty() %}<dl class="kv themes">{% for category in categories %}<dt class="text-ink">{{ category.name }} <span class="meta">({{ category.count }})</span></dt><dd class="text-muted">{{ category.members }}</dd>{% endfor %}</dl>{% endif %}
 
 <h2>Learned adjustments</h2>
 <p class="meta text-sm">Rebuilt weekly from ratings by the editor model (prompt version {{ prompt_version }}, built {{ prompt_built_at }}, {{ learned_age }}). {% if rebuild_due %}<strong class="text-warn">A rebuild is due</strong> — the next run performs it, or start it now.{% else %}The next scheduled rebuild is at least {{ rebuild_interval_days }} days after the last one; the next run performs it when due.{% endif %}</p>

@@ -3,6 +3,7 @@
 //! Everything of substance lives in the library (`src/lib.rs`); this binary only
 //! parses flags, loads config, opens the database and dispatches.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::PathBuf;
 
@@ -17,7 +18,7 @@ use daily_epub::db::Db;
 use daily_epub::pipeline::{self, GenerateOptions, GenerateOutcome};
 use daily_epub::report::{RunReport, VOYAGE_PROVIDER};
 use daily_epub::types::{ArticleId, Vote};
-use daily_epub::{curate, discovery, http, imports, jobs, lock, rate, server, social};
+use daily_epub::{curate, discovery, http, imports, interests, jobs, lock, rate, server, social};
 
 /// A personalized daily newspaper, delivered as an EPUB.
 #[derive(Debug, Parser)]
@@ -64,6 +65,9 @@ enum Command {
     /// Feed subscription candidates (feed discovery plan §4 step 6).
     #[command(subcommand)]
     Feeds(FeedsCommand),
+    /// Import and backfill standing interests.
+    #[command(subcommand)]
+    Interests(InterestsCommand),
     /// Operator jobs (what `daily-epub-job@<name>.service` runs).
     #[command(subcommand)]
     Job(JobCommand),
@@ -74,7 +78,8 @@ enum JobCommand {
     /// Run one catalogue job in-process and record it in the `jobs` table.
     Run {
         /// `generate`, `generate-YYYY-MM-DD`, `dry-run`, `profile-rebuild`,
-        /// `features-backfill`, `backfill-social`, `features-prune` or `import-ratings`.
+        /// `features-backfill`, `backfill-social`, `features-prune`, `import-ratings`
+        /// or `interests-categorize`.
         name: String,
     },
 }
@@ -84,6 +89,24 @@ enum FeedsCommand {
     /// Look for feeds behind recent aggregator-only articles and record the
     /// ones not already subscribed as candidates for `/dashboard/feeds`.
     Discover(FeedsDiscoverArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum InterestsCommand {
+    /// Import standing interests from OPML and the profile's Interests section.
+    Import(InterestsImportArgs),
+    /// Match every compatible cached article embedding to standing interests.
+    Backfill,
+}
+
+#[derive(Debug, clap::Args)]
+struct InterestsImportArgs {
+    /// OPML input (defaults to data/scour-interests.opml).
+    #[arg(long, value_name = "PATH")]
+    opml: Option<PathBuf>,
+    /// Profile input (defaults to profile_path from the configuration).
+    #[arg(long, value_name = "PATH")]
+    profile: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -410,6 +433,10 @@ async fn main() -> Result<()> {
             let db = Db::open_and_migrate(&config.database_path).await?;
             println!("{}", cmd_feeds_discover(&config, &db, args).await?);
         }
+        Command::Interests(command) => {
+            let db = Db::open_and_migrate(&config.database_path).await?;
+            println!("{}", cmd_interests(&config, &db, command).await?);
+        }
         Command::Job(JobCommand::Run { name }) => {
             let Some(job) = jobs::Job::parse(&name) else {
                 eprintln!("unknown job {name:?}; the catalogue is:");
@@ -435,8 +462,8 @@ async fn main() -> Result<()> {
 
 /// The commands that write the database and provider budgets and so hold the
 /// run lock (§5): `generate`, `profile rebuild`, `features backfill`,
-/// `backfill-social`, and a `job run` of any of them. Everything else is
-/// read-only or its own writer.
+/// `backfill-social`, `interests backfill`, and a `job run` of any of them.
+/// Everything else is read-only or its own writer.
 fn lock_holder(command: &Command) -> Option<&'static str> {
     match command {
         Command::Generate(_) => Some("generate"),
@@ -445,6 +472,7 @@ fn lock_holder(command: &Command) -> Option<&'static str> {
         Command::Profile(ProfileCommand::Rebuild) => Some("profile rebuild"),
         Command::Features(FeaturesCommand::Backfill(_)) => Some("features backfill"),
         Command::BackfillSocial(_) => Some("backfill-social"),
+        Command::Interests(InterestsCommand::Backfill) => Some("interests backfill"),
         // An unknown name takes no lock; the dispatch exits 2 before opening
         // the database.
         Command::Job(JobCommand::Run { name }) => {
@@ -457,7 +485,8 @@ fn lock_holder(command: &Command) -> Option<&'static str> {
         | Command::Features(FeaturesCommand::Prune)
         | Command::Db(_)
         | Command::Config(_)
-        | Command::Users(_) => None,
+        | Command::Users(_)
+        | Command::Interests(InterestsCommand::Import(_)) => None,
     }
 }
 
@@ -492,6 +521,152 @@ async fn cmd_feeds_discover(config: &Config, db: &Db, args: FeedsDiscoverArgs) -
         articles.len(),
         since
     ))
+}
+
+async fn cmd_interests(config: &Config, db: &Db, command: InterestsCommand) -> Result<String> {
+    match command {
+        InterestsCommand::Import(args) => cmd_interests_import(config, db, args).await,
+        InterestsCommand::Backfill => cmd_interests_backfill(config, db).await,
+    }
+}
+
+async fn cmd_interests_import(
+    config: &Config,
+    db: &Db,
+    args: InterestsImportArgs,
+) -> Result<String> {
+    let opml_path = args
+        .opml
+        .unwrap_or_else(|| PathBuf::from("data/scour-interests.opml"));
+    let profile_path = args.profile.unwrap_or_else(|| config.profile_path.clone());
+    let opml = std::fs::read_to_string(&opml_path)
+        .with_context(|| format!("reading interests OPML at {}", opml_path.display()))?;
+    let profile = curate::profile::load_profile(&profile_path)?;
+    let mut seen = HashSet::new();
+    let names = interests::parse_opml(&opml)
+        .into_iter()
+        .chain(profile.interests)
+        .filter(|name| seen.insert(name.to_lowercase()))
+        .collect::<Vec<_>>();
+
+    let now = jiff::Timestamp::now();
+    let mut added = Vec::new();
+    let mut skipped = 0;
+    for name in names {
+        match interests::add(db, &name, None, now).await? {
+            interests::AddOutcome::Added(id) => added.push((id, name)),
+            interests::AddOutcome::Duplicate => skipped += 1,
+        }
+    }
+
+    let new_names = added
+        .iter()
+        .map(|(_, name)| name.clone())
+        .collect::<Vec<_>>();
+    let categories = curate::profile::themes::group_into_themes(&new_names)
+        .into_iter()
+        .flat_map(|(category, members)| {
+            members.into_iter().map(move |name| {
+                let category = (category != "Other standing interests").then(|| category.clone());
+                (name.to_lowercase(), category)
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let mut uncategorized = 0;
+    for (id, name) in &added {
+        match categories
+            .get(&name.to_lowercase())
+            .and_then(Option::as_deref)
+        {
+            Some(category) => interests::set_category(db, *id, Some(category), now).await?,
+            None => uncategorized += 1,
+        }
+    }
+
+    Ok(format!(
+        "imported {}, skipped {} existing, {} left for the categorizer",
+        added.len(),
+        skipped,
+        uncategorized
+    ))
+}
+
+/// Backfill uses z-scores over the whole compatible cache as a stand-in for a
+/// run's per-day article cohort.
+async fn cmd_interests_backfill(config: &Config, db: &Db) -> Result<String> {
+    use sqlx::Row as _;
+
+    let mut article_embeddings = HashMap::new();
+    let mut after = i64::MIN;
+    loop {
+        let rows = sqlx::query(
+            "SELECT article_id, embedding FROM article_embeddings
+             WHERE model = ? AND dimension = ? AND article_id > ?
+             ORDER BY article_id LIMIT 500",
+        )
+        .bind(&config.voyage.model)
+        .bind(config.voyage.output_dimension as i64)
+        .bind(after)
+        .fetch_all(db.pool())
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in &rows {
+            let article_id: ArticleId = row.get("article_id");
+            after = article_id;
+            match embedding::decode_blob(
+                &row.get::<Vec<u8>, _>("embedding"),
+                config.voyage.output_dimension,
+            ) {
+                Ok(vector) => {
+                    article_embeddings.insert(article_id, vector);
+                }
+                Err(error) => {
+                    tracing::warn!(article_id, %error, "ignoring a malformed cached embedding")
+                }
+            }
+        }
+    }
+
+    let rows = interests::list(db).await?;
+    let names = rows
+        .iter()
+        .map(|interest| interest.name.clone())
+        .collect::<Vec<_>>();
+    let ids = rows
+        .into_iter()
+        .map(|interest| (interest.name, interest.id))
+        .collect::<HashMap<_, _>>();
+    // Like the pipeline: a missing key means cached vectors only, not a failure.
+    let service = match config.voyage.enabled {
+        true => match embedding::EmbeddingService::real(db.clone(), config.voyage.clone()) {
+            Ok(service) => Some(service),
+            Err(embedding::EmbeddingError::MissingApiKey) => None,
+            Err(error) => return Err(error).context("building the Voyage client"),
+        },
+        false => None,
+    };
+    let cached_only = service.is_none();
+    let service = service.unwrap_or_else(|| {
+        embedding::EmbeddingService::cached_only(db.clone(), config.voyage.clone())
+    });
+    let interest_embeddings = service.interests(&names).await?;
+    let mut matches = curate::signals::interest_matches(&article_embeddings, &interest_embeddings)
+        .into_iter()
+        .filter_map(|(article_id, matched)| {
+            (!matched.top_interests.is_empty()).then_some((article_id, matched.top_interests))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(article_id, _)| *article_id);
+    let inserted = interests::insert_matches_if_absent(db, &matches, &ids).await?;
+    if cached_only {
+        Ok(format!(
+            "no Voyage client; used cached interest vectors and wrote {inserted} interest match rows"
+        ))
+    } else {
+        Ok(format!("wrote {inserted} interest match rows"))
+    }
 }
 
 async fn cmd_users(db: &Db, command: UsersCommand) -> Result<()> {
@@ -724,7 +899,6 @@ async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<String> {
     use curate::llm::{Llms, provider_meters};
     let profile = curate::profile::load_or_build(
         db,
-        &config.interests_opml,
         &config.profile_path,
         config.curation.feedback.verdicts_in_prompt,
     )
@@ -749,7 +923,6 @@ async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<String> {
     let rebuilt = curate::profile::rebuild(
         db,
         llm,
-        &config.interests_opml,
         &config.profile_path,
         config.curation.feedback.verdicts_in_prompt,
     )
@@ -1008,6 +1181,7 @@ async fn run_job(config: &Config, db: &Db, job: &jobs::Job) -> Result<(String, O
             None,
         )),
         jobs::Job::ImportRatings => Ok((imports::run(config, db).await?, None)),
+        jobs::Job::InterestsCategorize => Ok((interests::categorize(config, db).await?, None)),
     }
 }
 
@@ -1151,6 +1325,10 @@ mod tests {
             lock_holder(&parse(&["backfill-social"])),
             Some("backfill-social")
         );
+        assert_eq!(
+            lock_holder(&parse(&["interests", "backfill"])),
+            Some("interests backfill")
+        );
         for args in [
             vec!["serve"],
             vec!["explain", "--date", "2026-09-02", "--near-misses"],
@@ -1159,7 +1337,9 @@ mod tests {
             vec!["db", "migrate"],
             vec!["features", "prune"],
             vec!["config", "check"],
+            vec!["interests", "import"],
             vec!["job", "run", "features-prune"],
+            vec!["job", "run", "interests-categorize"],
             vec!["job", "run", "not-a-job"],
         ] {
             assert_eq!(lock_holder(&parse(&args)), None, "{args:?}");
@@ -1209,6 +1389,34 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["daily-epub", "job", "run"]).is_err());
         assert!(Cli::try_parse_from(["daily-epub", "job"]).is_err());
+    }
+
+    #[test]
+    fn parses_interests_commands() {
+        match Cli::try_parse_from([
+            "daily-epub",
+            "interests",
+            "import",
+            "--opml",
+            "/tmp/interests.opml",
+            "--profile",
+            "/tmp/profile.md",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Interests(InterestsCommand::Import(args)) => {
+                assert_eq!(args.opml, Some(PathBuf::from("/tmp/interests.opml")));
+                assert_eq!(args.profile, Some(PathBuf::from("/tmp/profile.md")));
+            }
+            other => panic!("expected interests import, got {other:?}"),
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["daily-epub", "interests", "backfill"])
+                .unwrap()
+                .command,
+            Command::Interests(InterestsCommand::Backfill)
+        ));
     }
 
     /// Dashboard plan §17 "Jobs": `job run` flips the dashboard's `requested`
@@ -1496,5 +1704,150 @@ mod tests {
         assert_eq!(rows[1].get::<String, _>("label"), "cleared");
         assert_eq!(rows[1].get::<f64, _>("value"), 0.0);
         assert!(db.current_ratings(36500).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn interests_import_is_idempotent_and_preserves_theme_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("interests.db"))
+            .await
+            .unwrap();
+        let opml_path = dir.path().join("interests.opml");
+        let profile_path = dir.path().join("profile.md");
+        std::fs::write(
+            &opml_path,
+            r#"<opml><body><outline text="Rust"/><outline text="Flibbertigibbet"/></body></opml>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &profile_path,
+            "# Reader\n\n## Interests\n- rust\n- Postgres query plans\n",
+        )
+        .unwrap();
+        let config = Config {
+            profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+
+        let args = || InterestsImportArgs {
+            opml: Some(opml_path.clone()),
+            profile: None,
+        };
+        assert_eq!(
+            cmd_interests_import(&config, &db, args()).await.unwrap(),
+            "imported 3, skipped 0 existing, 1 left for the categorizer"
+        );
+        assert_eq!(
+            cmd_interests_import(&config, &db, args()).await.unwrap(),
+            "imported 0, skipped 3 existing, 0 left for the categorizer"
+        );
+
+        let rows = interests::list(&db).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows.iter()
+                .find(|interest| interest.name == "Rust")
+                .and_then(|interest| interest.category.as_deref()),
+            Some("Systems & languages")
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|interest| interest.name == "Flibbertigibbet")
+                .and_then(|interest| interest.category.as_deref()),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn interests_backfill_inserts_matches_without_replacing_run_rows() {
+        use daily_epub::curate::embedding::encode_blob;
+        use daily_epub::curate::signals::TopInterest;
+        use sqlx::Row as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_and_migrate(&dir.path().join("interests.db"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO articles (id, canonical_url, title, first_seen) VALUES
+             (1, 'https://example.com/1', 'One', '2026-09-12T00:00:00Z'),
+             (2, 'https://example.com/2', 'Two', '2026-09-12T00:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let now = jiff::Timestamp::now();
+        let interests::AddOutcome::Added(one_id) =
+            interests::add(&db, "First axis", None, now).await.unwrap()
+        else {
+            unreachable!();
+        };
+        let interests::AddOutcome::Added(two_id) =
+            interests::add(&db, "Second axis", None, now).await.unwrap()
+        else {
+            unreachable!();
+        };
+        for (article_id, vector) in [(1, [1.0_f32, 0.0]), (2, [0.0, 1.0])] {
+            sqlx::query(
+                "INSERT INTO article_embeddings
+                 (article_id, model, dimension, input_hash, embedding, created_at)
+                 VALUES (?, 'test-model', 2, 'hash', ?, '2026-09-12T00:00:00Z')",
+            )
+            .bind(article_id)
+            .bind(encode_blob(&vector).unwrap())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        for (name, vector) in [("First axis", [1.0_f32, 0.0]), ("Second axis", [0.0, 1.0])] {
+            sqlx::query(
+                "INSERT INTO interest_embeddings
+                 (interest, model, dimension, embedding, created_at)
+                 VALUES (?, 'test-model', 2, ?, '2026-09-12T00:00:00Z')",
+            )
+            .bind(name)
+            .bind(encode_blob(&vector).unwrap())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        interests::replace_matches(
+            &db,
+            Some(77),
+            &[(
+                1,
+                vec![TopInterest {
+                    name: "First axis".into(),
+                    cos: 0.75,
+                    z: 1.5,
+                }],
+            )],
+            &HashMap::from([("First axis".to_string(), one_id)]),
+        )
+        .await
+        .unwrap();
+        let mut config = Config::default();
+        config.voyage.enabled = false;
+        config.voyage.model = "test-model".into();
+        config.voyage.output_dimension = 2;
+
+        let message = cmd_interests_backfill(&config, &db).await.unwrap();
+        assert_eq!(
+            message,
+            "no Voyage client; used cached interest vectors and wrote 1 interest match rows"
+        );
+        let rows = sqlx::query(
+            "SELECT article_id, interest_id, run_id, cos, z
+             FROM article_interests ORDER BY article_id",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get::<i64, _>("interest_id"), one_id);
+        assert_eq!(rows[0].get::<Option<i64>, _>("run_id"), Some(77));
+        assert_eq!(rows[0].get::<f64, _>("cos"), 0.75);
+        assert_eq!(rows[1].get::<i64, _>("interest_id"), two_id);
+        assert_eq!(rows[1].get::<Option<i64>, _>("run_id"), None);
     }
 }

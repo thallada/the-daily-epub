@@ -10,13 +10,13 @@
 {% if understanding.kicker.is_some() || understanding.topics.is_some() %}
         <p class="rubric">{% if let Some(kicker) = understanding.kicker %}<span class="kicker">{{ kicker }}</span>{% if let Some(topics) = understanding.topics %} &#160; {{ topics }}{% endif %}{% else %}{% if let Some(topics) = understanding.topics %}{{ topics }}{% endif %}{% endif %}</p>
 {% endif %}
-{% if why.is_some() || understanding.interests.is_some() %}
+{% if why.is_some() || !understanding.interests.is_empty() %}
         <div class="why">
 {% if let Some(text) = why %}
           <p class="why-line"><em>Why it&#39;s here: {{ text }}</em></p>
 {% endif %}
-{% if let Some(interests) = understanding.interests %}
-          <p class="why-matches">Matches: {{ interests }}</p>
+{% if !understanding.interests.is_empty() %}
+          <p class="why-matches">Matches: {{ understanding.interests_line() }}</p>
 {% endif %}
         </div>
 {% endif %}
