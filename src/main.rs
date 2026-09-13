@@ -638,12 +638,19 @@ async fn cmd_interests_backfill(config: &Config, db: &Db) -> Result<String> {
         .into_iter()
         .map(|interest| (interest.name, interest.id))
         .collect::<HashMap<_, _>>();
-    let service = if config.voyage.enabled {
-        embedding::EmbeddingService::real(db.clone(), config.voyage.clone())
-            .context("building the Voyage client")?
-    } else {
-        embedding::EmbeddingService::cached_only(db.clone(), config.voyage.clone())
+    // Like the pipeline: a missing key means cached vectors only, not a failure.
+    let service = match config.voyage.enabled {
+        true => match embedding::EmbeddingService::real(db.clone(), config.voyage.clone()) {
+            Ok(service) => Some(service),
+            Err(embedding::EmbeddingError::MissingApiKey) => None,
+            Err(error) => return Err(error).context("building the Voyage client"),
+        },
+        false => None,
     };
+    let cached_only = service.is_none();
+    let service = service.unwrap_or_else(|| {
+        embedding::EmbeddingService::cached_only(db.clone(), config.voyage.clone())
+    });
     let interest_embeddings = service.interests(&names).await?;
     let mut matches = curate::signals::interest_matches(&article_embeddings, &interest_embeddings)
         .into_iter()
@@ -653,12 +660,12 @@ async fn cmd_interests_backfill(config: &Config, db: &Db) -> Result<String> {
         .collect::<Vec<_>>();
     matches.sort_by_key(|(article_id, _)| *article_id);
     let inserted = interests::insert_matches_if_absent(db, &matches, &ids).await?;
-    if config.voyage.enabled {
-        Ok(format!("wrote {inserted} interest match rows"))
-    } else {
+    if cached_only {
         Ok(format!(
-            "voyage disabled; used cached interest vectors and wrote {inserted} interest match rows"
+            "no Voyage client; used cached interest vectors and wrote {inserted} interest match rows"
         ))
+    } else {
+        Ok(format!("wrote {inserted} interest match rows"))
     }
 }
 
@@ -1827,7 +1834,7 @@ mod tests {
         let message = cmd_interests_backfill(&config, &db).await.unwrap();
         assert_eq!(
             message,
-            "voyage disabled; used cached interest vectors and wrote 1 interest match rows"
+            "no Voyage client; used cached interest vectors and wrote 1 interest match rows"
         );
         let rows = sqlx::query(
             "SELECT article_id, interest_id, run_id, cos, z
