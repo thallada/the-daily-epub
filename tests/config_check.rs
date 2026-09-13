@@ -35,7 +35,6 @@ fn config_check_prints_the_facts_and_exits_zero_without_keys() {
         "config: ",
         "database_path: /var/lib/daily-epub/daily-epub.db",
         "profile_path: data/profile.md",
-        "interests_opml: data/scour-interests.opml",
         "llm.bulk: deepseek · openai · deepseek-v4-flash",
         "key MISSING (set DAILY_EPUB_PROVIDERS__DEEPSEEK__API_KEY)",
         "llm.editor: anthropic · anthropic · claude-opus-5 · effort high · max_daily_usd $3.00",
@@ -66,4 +65,8 @@ fn config_check_exits_non_zero_on_an_invalid_config() {
     let (code, _, stderr) = run("[deepseek]\nmodel = \"x\"\n");
     assert_ne!(code, 0);
     assert!(stderr.contains("[providers.deepseek]"), "{stderr}");
+
+    let (code, _, stderr) = run("interests_opml = \"data/scour-interests.opml\"\n");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("interests_opml"), "{stderr}");
 }

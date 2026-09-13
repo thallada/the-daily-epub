@@ -46,7 +46,7 @@ use crate::types::{
     Article, ArticleId, Artifact, BehindThePaper, Candidate, Colophon, Edition, Issue, IssueMeta,
     Lineup, Models, TokenUsage, reading_minutes,
 };
-use crate::{comments, dedupe, discovery, epub, http, miniflux, publish, social, world};
+use crate::{comments, dedupe, discovery, epub, http, interests, miniflux, publish, social, world};
 
 /// One `generate` invocation's inputs — the CLI flags, already parsed (§2).
 #[derive(Debug, Clone, Default)]
@@ -943,15 +943,14 @@ async fn prepare_features(
         }
     };
     report.counts.embedded = article_embeddings.len() as i64;
-    let interests =
-        match profile::load_standing_interests(&config.interests_opml, &config.profile_path) {
-            Ok(interests) => interests,
-            Err(error) => {
-                tracing::warn!(%error, "could not load standing interests for embeddings");
-                Vec::new()
-            }
-        };
-    let interest_embeddings = match service.interests(&interests).await {
+    let interest_names = match interests::names(db).await {
+        Ok(interests) => interests,
+        Err(error) => {
+            tracing::warn!(%error, "could not load standing interests for embeddings");
+            Vec::new()
+        }
+    };
+    let interest_embeddings = match service.interests(&interest_names).await {
         Ok(embeddings) => embeddings,
         Err(error) => {
             report.warn(format!("interest embedding stage degraded: {error}"));
@@ -1138,7 +1137,6 @@ async fn build_llms(
 ) -> Llms {
     let profile = match profile::load_or_build(
         ctx.db,
-        &ctx.config.interests_opml,
         &ctx.config.profile_path,
         ctx.config.curation.feedback.verdicts_in_prompt,
     )
@@ -1168,7 +1166,6 @@ async fn build_llms(
     match profile::weekly_rebuild_if_due(
         ctx.db,
         rebuild_client,
-        &ctx.config.interests_opml,
         &ctx.config.profile_path,
         ctx.config.curation.feedback.verdicts_in_prompt,
     )
@@ -1577,12 +1574,9 @@ mod tests {
         config.curation.blocked_domains = vec!["blocked.example".into()];
         config.voyage.output_dimension = 4;
         config.target_article_count = 1;
-        config.interests_opml = dir.path().join("interests.opml");
-        std::fs::write(
-            &config.interests_opml,
-            "<opml><body><outline text=\"Writerdeck\"/></body></opml>",
-        )
-        .unwrap();
+        interests::add(&db, "Writerdeck", Some("Publishing"), Timestamp::now())
+            .await
+            .unwrap();
         config.profile_path = dir.path().join("profile.md");
         std::fs::write(&config.profile_path, "# Reader profile\n").unwrap();
 
@@ -1708,6 +1702,7 @@ mod tests {
         assert!(report.voyage_tokens > 0);
         // One batch for the two articles, one for the interest.
         assert_eq!(backend.calls(), 2);
+        assert_eq!(backend.requests()[1].input, ["Writerdeck"]);
         let signals = &features
             .iter()
             .find(|candidate| candidate.article.id == a)

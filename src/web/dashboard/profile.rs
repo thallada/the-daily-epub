@@ -1,8 +1,7 @@
 //! Dashboard: the profile page (`/dashboard/profile`, web plan §11).
 //!
-//! Edits `profile.md` with version history, shows what the loader parses out
-//! of it, the standing OPML interests by theme, the stored system prompt and
-//! the weekly learned adjustments, and offers the `profile-rebuild` job.
+//! Edits `profile.md` with version history and shows the stored interests,
+//! system prompt, and weekly learned adjustments.
 
 use std::path::Path;
 
@@ -18,6 +17,7 @@ use sqlx::Row;
 
 use crate::curate::profile::{self, KV_LEARNED_ADJUSTMENTS, ProfileFile, REBUILD_INTERVAL_DAYS};
 use crate::db::{Db, DbError, KV_TASTE_PROFILE};
+use crate::interests;
 use crate::server::AppState;
 use crate::web::session::{AuthSession, Viewer};
 use crate::web::{Flash, Html, Page, WebError, format_time, take_flash};
@@ -104,8 +104,7 @@ fn read_profile(path: &Path) -> anyhow::Result<Option<String>> {
     }
 }
 
-/// The live preview of what the loader extracts (§11): the passthrough body
-/// and the `## Interests` lines.
+/// The live preview of the prose that reaches the prompt.
 pub fn preview(content: &str) -> ProfileFile {
     profile::parse_profile_str(content)
 }
@@ -191,7 +190,7 @@ async fn versions(db: &Db, config: &crate::config::Config) -> Result<Vec<Version
 // Page
 // ---------------------------------------------------------------------------
 
-struct ThemeView {
+struct CategoryView {
     name: String,
     members: String,
     count: usize,
@@ -207,12 +206,10 @@ struct ProfileTemplate {
     bytes: usize,
     max_bytes: usize,
     preview_body: String,
-    preview_interests: Vec<String>,
     versions: Vec<VersionView>,
-    opml_path: String,
-    opml_count: usize,
-    opml_error: String,
-    themes: Vec<ThemeView>,
+    interest_count: usize,
+    category_count: usize,
+    categories: Vec<CategoryView>,
     prompt: String,
     prompt_chars: usize,
     prompt_version: String,
@@ -254,20 +251,17 @@ async fn show(
     let content = stored.unwrap_or_default();
     let parsed = preview(&content);
 
-    let (opml_count, opml_error, themes) = match profile::parse_interests(&config.interests_opml) {
-        Ok(interests) => {
-            let themes = profile::group_into_themes(&interests)
-                .into_iter()
-                .map(|(name, members)| ThemeView {
-                    name,
-                    count: members.len(),
-                    members: members.join(", "),
-                })
-                .collect();
-            (interests.len(), String::new(), themes)
-        }
-        Err(error) => (0, format!("{error:#}"), Vec::new()),
-    };
+    let grouped = interests::grouped(db).await.map_err(WebError::Internal)?;
+    let interest_count = grouped.iter().map(|(_, members)| members.len()).sum();
+    let category_count = grouped.len();
+    let categories = grouped
+        .into_iter()
+        .map(|(name, members)| CategoryView {
+            name,
+            count: members.len(),
+            members: members.join(", "),
+        })
+        .collect();
 
     let prompt = db.kv_get(KV_TASTE_PROFILE).await?.unwrap_or_default();
     let learned = db.kv_get(KV_LEARNED_ADJUSTMENTS).await?.unwrap_or_default();
@@ -297,12 +291,10 @@ async fn show(
         max_bytes: MAX_PROFILE_BYTES,
         content,
         preview_body: parsed.body,
-        preview_interests: parsed.interests,
         versions: versions(db, &config).await?,
-        opml_path: config.interests_opml.display().to_string(),
-        opml_count,
-        opml_error,
-        themes,
+        interest_count,
+        category_count,
+        categories,
         prompt_chars: prompt.len(),
         prompt_verdicts: count_verdict_lines(&prompt),
         prompt,
@@ -516,15 +508,15 @@ mod tests {
             .unwrap();
         let config = Config {
             profile_path: dir.path().join("profile.md"),
-            interests_opml: dir.path().join("interests.opml"),
             ..Config::default()
         };
         std::fs::write(&config.profile_path, "# Original\n\nProse.\n").unwrap();
-        std::fs::write(
-            &config.interests_opml,
-            r#"<outline text="Rust"/><outline text="Boston"/>"#,
-        )
-        .unwrap();
+        interests::add(&db, "Rust", Some("Software"), Timestamp::now())
+            .await
+            .unwrap();
+        interests::add(&db, "Boston", Some("Places"), Timestamp::now())
+            .await
+            .unwrap();
         db.kv_set(
             KV_TASTE_PROFILE,
             "system prompt text\n\n## Recent verdicts\n\nLOVED | x\n",
@@ -617,7 +609,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_page_shows_editor_preview_interests_prompt_and_rebuild_form() {
+    async fn profile_page_shows_editor_standing_interests_prompt_and_rebuild_form() {
         let (_dir, _state, app, cookie) = setup().await;
         let response = get(&app, Some(&cookie)).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -625,7 +617,8 @@ mod tests {
         assert!(body.contains("# Original"));
         assert!(body.contains("Prose."));
         assert!(body.contains("Rust, Boston") || body.contains("Rust") && body.contains("Boston"));
-        assert!(body.contains("2 interests"));
+        assert!(body.contains("2 standing interests in 2 categories"));
+        assert!(body.contains("Interests page"));
         assert!(body.contains("system prompt text"));
         assert!(body.contains("Rank depth higher."));
         assert!(body.contains("never built"));
@@ -666,7 +659,7 @@ mod tests {
 
         let page = text(get(&app, Some(&cookie)).await).await;
         assert!(page.contains("Saved; the next run rebuilds the system prompt."));
-        assert!(page.contains("Writerdeck"));
+        assert!(page.contains("section is ignored"));
         assert!(page.contains("# Original"));
         assert!(page.contains(">tyler<"));
 

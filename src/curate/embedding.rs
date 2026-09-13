@@ -19,9 +19,10 @@ use sha2::{Digest as _, Sha256};
 use sqlx::Row as _;
 
 use crate::config::{Config, VoyageConfig};
-use crate::curate::{approx_tokens, profile, prompt_text};
+use crate::curate::{approx_tokens, prompt_text};
 use crate::db::{Db, fmt_ts};
 use crate::http::RetryPolicy;
+use crate::interests;
 use crate::types::{Article, ArticleId};
 
 /// The only place the Voyage key comes from (§4.3).
@@ -898,14 +899,7 @@ pub async fn plan_backfill(
         }
     }
 
-    let interests =
-        match profile::load_standing_interests(&config.interests_opml, &config.profile_path) {
-            Ok(interests) => interests,
-            Err(error) => {
-                tracing::warn!(%error, "could not load standing interests; skipping them");
-                Vec::new()
-            }
-        };
+    let interest_names = interests::names(db).await?;
 
     let mut plan = BackfillPlan::default();
     let mut keep = |articles: Vec<Article>, misses: Vec<(ArticleId, i64)>| -> Vec<Article> {
@@ -922,8 +916,8 @@ pub async fn plan_backfill(
     let other_misses = service.uncached_articles(&others).await?;
     plan.others = keep(others, other_misses);
 
-    let interest_misses = service.uncached_interests(&interests).await?;
-    plan.cached += interests.len() - interest_misses.len();
+    let interest_misses = service.uncached_interests(&interest_names).await?;
+    plan.cached += interest_names.len() - interest_misses.len();
     plan.estimated_tokens += interest_misses
         .iter()
         .map(|interest| approx_tokens(interest) as i64)
@@ -1391,7 +1385,7 @@ mod tests {
 
     #[tokio::test]
     async fn backfill_prioritizes_the_learned_set_and_is_idempotent() {
-        let (dir, db) = db_with_articles(&[1, 2, 3]).await;
+        let (_dir, db) = db_with_articles(&[1, 2, 3]).await;
         // Article 1 is rated, article 2 is published, article 3 is neither.
         sqlx::query(
             "INSERT INTO rating_events (article_id, kind, source, label, value, event_at)
@@ -1418,16 +1412,11 @@ mod tests {
 
         let config = Config {
             voyage: small_config(),
-            interests_opml: dir.path().join("interests.opml"),
-            profile_path: dir.path().join("profile.md"),
             ..Config::default()
         };
-        std::fs::write(
-            &config.interests_opml,
-            "<opml><body><outline text=\"Writerdeck\"/></body></opml>",
-        )
-        .unwrap();
-        std::fs::write(&config.profile_path, "# Reader profile\n").unwrap();
+        interests::add(&db, "Writerdeck", Some("Publishing"), Timestamp::now())
+            .await
+            .unwrap();
 
         let backend = Arc::new(MockBackend::auto(4));
         let svc = service(db.clone(), config.voyage.clone(), backend.clone());

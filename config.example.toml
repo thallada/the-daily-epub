@@ -24,9 +24,8 @@ database_path = "/var/lib/daily-epub/daily-epub.db"
 # Default output directory for generated artifacts (overridden by `--out`).
 out_dir = "/var/lib/daily-epub/out"
 
-# Hand-maintained reader profile and Scour interests merged into the system prompt.
+# Hand-maintained reader profile loaded into the system prompt.
 profile_path = "data/profile.md"
-interests_opml = "data/scour-interests.opml"
 
 [miniflux]
 base_url = "http://127.0.0.1:8082"

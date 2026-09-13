@@ -3,7 +3,7 @@
 //! Interest queries stay here so the central database layer remains focused on
 //! the pipeline's shared records.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Result, bail};
 use jiff::Timestamp;
@@ -63,6 +63,35 @@ pub struct Rates {
 }
 
 const INTEREST_COLUMNS: &str = "id, name, category, created_at, categorized_at";
+
+/// Parse an OPML export for the one-time interests importer.
+pub fn parse_opml(raw: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for chunk in raw.split("text=\"").skip(1) {
+        let Some((value, _)) = chunk.split_once('"') else {
+            continue;
+        };
+        let name = xml_unescape(value).trim().to_string();
+        if !name.is_empty() && seen.insert(name.to_lowercase()) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+fn xml_unescape(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
 
 fn interest_from(row: &sqlx::sqlite::SqliteRow) -> Interest {
     Interest {
@@ -324,6 +353,29 @@ mod tests {
             .await
             .unwrap();
         (dir, db)
+    }
+
+    #[test]
+    fn opml_parser_unescapes_trims_and_deduplicates_names() {
+        let interests = parse_opml(
+            r#"<opml><body>
+                <outline text=" Rust "/>
+                <outline text="E-Ink &amp; RSS"/>
+                <outline text="rust"/>
+                <outline text="Quotes &quot;and&quot; apostrophes &apos;x&apos; &#39;y&#39;"/>
+                <outline text="Markup &lt;tag&gt;"/>
+                <outline text=""/>
+            </body></opml>"#,
+        );
+        assert_eq!(
+            interests,
+            [
+                "Rust",
+                "E-Ink & RSS",
+                "Quotes \"and\" apostrophes 'x' 'y'",
+                "Markup <tag>",
+            ]
+        );
     }
 
     async fn seed_article(db: &Db, id: ArticleId) {

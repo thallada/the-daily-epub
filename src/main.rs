@@ -724,7 +724,6 @@ async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<String> {
     use curate::llm::{Llms, provider_meters};
     let profile = curate::profile::load_or_build(
         db,
-        &config.interests_opml,
         &config.profile_path,
         config.curation.feedback.verdicts_in_prompt,
     )
@@ -749,7 +748,6 @@ async fn cmd_profile_rebuild(config: &Config, db: &Db) -> Result<String> {
     let rebuilt = curate::profile::rebuild(
         db,
         llm,
-        &config.interests_opml,
         &config.profile_path,
         config.curation.feedback.verdicts_in_prompt,
     )
