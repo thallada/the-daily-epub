@@ -2012,6 +2012,8 @@ mod tests {
 
         let article_id = source.lineup.picks[0].article.id;
         let dashboard_href = format!("/dashboard/articles/{article_id}");
+        let interest_href = crate::interests::articles_href("Filesystems");
+        assert!(!issue.contains(&interest_href));
         assert!(!issue.contains(&dashboard_href));
         let article = app
             .clone()
@@ -2741,6 +2743,7 @@ mod tests {
         assert!(admin_issue.contains("Was this a good pick?"));
         assert!(admin_issue.contains("value=\"loved\" data-label=\"loved\" class=\"active\""));
         assert!(admin_issue.contains(&dashboard_href));
+        assert!(admin_issue.contains(&crate::interests::articles_href("Filesystems")));
 
         let admin_article = app
             .clone()

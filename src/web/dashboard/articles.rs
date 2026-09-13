@@ -53,6 +53,7 @@ pub fn routes() -> Router<AppState> {
 #[derive(Debug, Default, Deserialize)]
 pub struct ArticlesQuery {
     pub q: Option<String>,
+    pub interest: Option<String>,
     pub feed: Option<String>,
     pub stage: Option<String>,
     pub reason: Option<String>,
@@ -68,8 +69,9 @@ pub struct ArticlesQuery {
 const RATED: [&str; 7] = ["any", "loved", "good", "down", "slop", "cleared", "none"];
 const PUBLISHED: [&str; 2] = ["yes", "no"];
 
-const ARTICLE_SORTS: [(&str, &str); 7] = [
+const ARTICLE_SORTS: [(&str, &str); 8] = [
     ("first_seen", "x.first_seen DESC, x.id DESC"),
+    ("match", "x.match_cos DESC, x.id DESC"),
     ("utility", "x.utility DESC, x.id DESC"),
     ("quality", "x.quality DESC, x.id DESC"),
     ("fit", "x.fit DESC, x.id DESC"),
@@ -82,6 +84,7 @@ const ARTICLE_SORTS: [(&str, &str); 7] = [
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArticleFilters {
     pub q: Option<String>,
+    pub interest: Option<InterestFilter>,
     pub feed: Option<i64>,
     pub stage: Option<String>,
     pub reason: Option<String>,
@@ -93,8 +96,14 @@ pub struct ArticleFilters {
     pub sort: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterestFilter {
+    pub id: Option<i64>,
+    pub name: String,
+}
+
 impl ArticleFilters {
-    pub fn from_query(query: &ArticlesQuery) -> Self {
+    pub fn from_query(query: &ArticlesQuery, interest: Option<InterestFilter>) -> Self {
         let owned = |value: Option<&str>| value.map(str::to_string);
         let date = |value: Option<&str>| {
             non_empty(value)
@@ -103,8 +112,19 @@ impl ArticleFilters {
         };
         let mut kinds: Vec<&str> = TRIAGE_KINDS.to_vec();
         kinds.push(PROVIDER_REJECTED);
+        let sort = ARTICLE_SORTS
+            .iter()
+            .find(|(name, _)| Some(*name) == query.sort.as_deref())
+            .map(|(name, _)| *name)
+            .filter(|sort| *sort != "match" || interest.is_some())
+            .unwrap_or(if interest.is_some() {
+                "match"
+            } else {
+                ARTICLE_SORTS[0].0
+            });
         Self {
             q: owned(non_empty(query.q.as_deref())),
+            interest,
             feed: non_empty(query.feed.as_deref()).and_then(|feed| feed.parse::<i64>().ok()),
             stage: owned(allow_listed(query.stage.as_deref(), &STAGES)),
             reason: owned(allow_listed(query.reason.as_deref(), &REASONS)),
@@ -113,11 +133,7 @@ impl ArticleFilters {
             from: date(query.from.as_deref()),
             to: date(query.to.as_deref()),
             kind: owned(allow_listed(query.kind.as_deref(), &kinds)),
-            sort: ARTICLE_SORTS
-                .iter()
-                .find(|(name, _)| Some(*name) == query.sort.as_deref())
-                .map(|(name, _)| *name)
-                .unwrap_or(ARTICLE_SORTS[0].0),
+            sort,
         }
     }
 
@@ -182,6 +198,10 @@ impl ArticleFilters {
     fn params(&self) -> Vec<(&'static str, Option<String>)> {
         vec![
             ("q", self.q.clone()),
+            (
+                "interest",
+                self.interest.as_ref().map(|interest| interest.name.clone()),
+            ),
             ("feed", self.feed.map(|feed| feed.to_string())),
             ("stage", self.stage.clone()),
             ("reason", self.reason.clone()),
@@ -219,6 +239,13 @@ pub struct ArticleListRow {
     pub rating: Option<String>,
     pub rating_class: &'static str,
     pub published: Option<String>,
+    pub interests: Vec<ArticleInterest>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArticleInterest {
+    pub name: String,
+    pub href: String,
 }
 
 const ARTICLE_INNER: &str =
@@ -226,12 +253,14 @@ const ARTICLE_INNER: &str =
                 a.word_count, e.feed_id, COALESCE(e.feed_title, '') AS feed_title,
                 l.run_id, l.stage, l.excluded_reason, l.utility, r.date AS run_date,
                 t.score AS triage, t.kind AS triage_kind, d.score AS quality, d.fit AS fit,
+                {match_cos} AS match_cos,
                 (SELECT re.label FROM rating_events re
                  WHERE re.article_id = a.id AND re.kind = 'explicit'
                  ORDER BY re.event_at DESC, re.id DESC LIMIT 1) AS rating,
                 (SELECT ia.issue_date FROM issue_articles ia
                  WHERE ia.article_id = a.id ORDER BY ia.issue_date DESC LIMIT 1) AS published
          FROM articles a
+         {interest_join}
          LEFT JOIN entries e ON e.id = a.best_entry_id
          LEFT JOIN candidate_runs l ON l.article_id = a.id
               AND l.run_id = (SELECT MAX(c2.run_id) FROM candidate_runs c2
@@ -245,10 +274,16 @@ pub async fn list_articles(
     config: &Config,
     filters: &ArticleFilters,
     page: u32,
-) -> Result<(Vec<ArticleListRow>, Pagination), sqlx::Error> {
+) -> anyhow::Result<(Vec<ArticleListRow>, Pagination)> {
     let (clauses, binds) = filters.where_clauses();
-    let count_sql = format!("SELECT COUNT(*) FROM ({ARTICLE_INNER}) x WHERE 1 = 1{clauses}");
-    let total: i64 = bind_all(dynamic_query(count_sql), &binds)
+    let (inner, interest_binds) = article_inner(filters);
+    let all_binds = interest_binds
+        .iter()
+        .cloned()
+        .chain(binds.iter().cloned())
+        .collect::<Vec<_>>();
+    let count_sql = format!("SELECT COUNT(*) FROM ({inner}) x WHERE 1 = 1{clauses}");
+    let total: i64 = bind_all(dynamic_query(count_sql), &all_binds)
         .fetch_one(db.pool())
         .await?
         .get(0);
@@ -258,15 +293,15 @@ pub async fn list_articles(
         total,
     };
     let select_sql = format!(
-        "SELECT * FROM ({ARTICLE_INNER}) x WHERE 1 = 1{clauses} ORDER BY {} LIMIT ? OFFSET ?",
+        "SELECT * FROM ({inner}) x WHERE 1 = 1{clauses} ORDER BY {} LIMIT ? OFFSET ?",
         filters.order_by()
     );
-    let rows = bind_all(dynamic_query(select_sql), &binds)
+    let rows = bind_all(dynamic_query(select_sql), &all_binds)
         .bind(i64::from(ARTICLES_PER_PAGE))
         .bind(pagination.offset())
         .fetch_all(db.pool())
         .await?;
-    let rows = rows
+    let mut rows: Vec<ArticleListRow> = rows
         .iter()
         .map(|row| {
             let id: ArticleId = row.get("id");
@@ -290,10 +325,43 @@ pub async fn list_articles(
                 rating_class: widget_label(rating.as_deref()),
                 rating,
                 published: row.get("published"),
+                interests: Vec::new(),
             }
         })
         .collect();
+    let ids = rows.iter().map(|row| row.id).collect::<Vec<_>>();
+    let mut by_article: HashMap<ArticleId, Vec<ArticleInterest>> = HashMap::new();
+    for matched in crate::interests::matches_for_articles(db, &ids).await? {
+        by_article
+            .entry(matched.article_id)
+            .or_default()
+            .push(ArticleInterest {
+                href: crate::interests::articles_href(&matched.name),
+                name: matched.name,
+            });
+    }
+    for row in &mut rows {
+        row.interests = by_article.remove(&row.id).unwrap_or_default();
+    }
     Ok((rows, pagination))
+}
+
+fn article_inner(filters: &ArticleFilters) -> (String, Vec<Bind>) {
+    match &filters.interest {
+        Some(interest) => (
+            ARTICLE_INNER.replace("{match_cos}", "ai.cos").replace(
+                "{interest_join}",
+                "JOIN article_interests ai ON ai.article_id = a.id AND ai.interest_id = ?",
+            ),
+            vec![Bind::Int(interest.id.unwrap_or(-1))],
+        ),
+        None => (
+            ARTICLE_INNER
+                .replace("{match_cos}", "NULL")
+                .replace("{interest_join}", ""),
+            Vec::new(),
+        ),
+    }
 }
 
 #[derive(Template)]
@@ -308,6 +376,7 @@ struct ArticlesTemplate {
     rated: Vec<&'static str>,
     kinds: Vec<&'static str>,
     sorts: Vec<&'static str>,
+    interest_options: Vec<crate::interests::Interest>,
     pager: Pager,
 }
 
@@ -319,11 +388,24 @@ async fn list(
 ) -> Result<Response, WebError> {
     let viewer = auth.user().await.map(Viewer::from);
     let config = state.config();
-    let filters = ArticleFilters::from_query(&query);
+    let interest_options = crate::interests::list(&state.db)
+        .await
+        .map_err(WebError::Internal)?;
+    let requested_interest = non_empty(query.interest.as_deref()).map(str::to_string);
+    let interest = requested_interest.map(|name| {
+        let found = interest_options
+            .iter()
+            .find(|interest| interest.name.eq_ignore_ascii_case(&name));
+        InterestFilter {
+            id: found.map(|interest| interest.id),
+            name: found.map(|interest| interest.name.clone()).unwrap_or(name),
+        }
+    });
+    let filters = ArticleFilters::from_query(&query, interest);
     let page_no = page_number(query.page);
     let (articles, pagination) = list_articles(&state.db, &config, &filters, page_no)
         .await
-        .map_err(db_err)?;
+        .map_err(WebError::Internal)?;
     let pager = Pager::new(pagination, "/dashboard/articles", &filters.params());
     let mut kinds: Vec<&'static str> = TRIAGE_KINDS.to_vec();
     kinds.push(PROVIDER_REJECTED);
@@ -342,6 +424,7 @@ async fn list(
         rated: RATED.to_vec(),
         kinds,
         sorts: ARTICLE_SORTS.iter().map(|(name, _)| *name).collect(),
+        interest_options,
         pager,
     })
     .into_response())
@@ -845,7 +928,7 @@ mod tests {
     fn query(f: impl FnOnce(&mut ArticlesQuery)) -> ArticleFilters {
         let mut query = ArticlesQuery::default();
         f(&mut query);
-        ArticleFilters::from_query(&query)
+        ArticleFilters::from_query(&query, None)
     }
 
     #[tokio::test]
@@ -937,6 +1020,86 @@ mod tests {
         let by_title = query(|q| q.sort = Some("title".into()));
         let (rows, _) = list_articles(db, &config, &by_title, 1).await.unwrap();
         assert_eq!(rows[0].id, 1);
+    }
+
+    #[test]
+    fn the_match_sort_needs_an_interest_and_round_trips_in_the_pager_links() {
+        let without = query(|q| q.sort = Some("match".into()));
+        assert_eq!(without.sort, "first_seen");
+        assert!(without.params().contains(&("sort", None)));
+
+        let with = ArticlesQuery {
+            interest: Some("Rust".into()),
+            ..ArticlesQuery::default()
+        };
+        let with = ArticleFilters::from_query(
+            &with,
+            Some(InterestFilter {
+                id: Some(7),
+                name: "Rust".into(),
+            }),
+        );
+        assert_eq!(with.sort, "match", "the interest filter sorts by cosine");
+        let params = with.params();
+        assert!(params.contains(&("interest", Some("Rust".into()))));
+        assert!(params.contains(&("sort", Some("match".into()))));
+    }
+
+    #[tokio::test]
+    async fn interest_filter_finds_matches_unknown_is_empty_and_badges_link() {
+        let seed = seed().await;
+        let crate::interests::AddOutcome::Added(interest_id) = crate::interests::add(
+            &seed.db,
+            "Rust & Systems",
+            Some("Software"),
+            "2026-09-12T12:00:00Z".parse().unwrap(),
+        )
+        .await
+        .unwrap() else {
+            unreachable!();
+        };
+        sqlx::query(
+            "INSERT INTO article_interests (article_id, interest_id, cos, z, run_id)
+             VALUES (1, ?, 0.82, 2.1, ?)",
+        )
+        .bind(interest_id)
+        .bind(seed.run_id)
+        .execute(seed.db.pool())
+        .await
+        .unwrap();
+
+        let app = app_with_users(&seed.db).await;
+        let admin = login_cookie(&app, "admin", "correct horse battery").await;
+        let filtered = get(
+            &app,
+            "/dashboard/articles?interest=rust+%26+systems",
+            Some(&admin),
+        )
+        .await;
+        assert_eq!(filtered.status(), axum::http::StatusCode::OK);
+        let filtered = crate::web::dashboard::tests::response_text(filtered).await;
+        assert!(filtered.contains("Article 1 about prose"), "{filtered}");
+        assert!(!filtered.contains("Article 2 about graphs"), "{filtered}");
+        assert!(filtered.contains("value=\"match\" selected"), "{filtered}");
+        assert!(
+            filtered.contains(
+                "href=\"/dashboard/articles?interest=Rust+%26+Systems\">Rust &#38; Systems</a>"
+            ),
+            "{filtered}"
+        );
+
+        let unknown = get(
+            &app,
+            "/dashboard/articles?interest=not-a-real-interest",
+            Some(&admin),
+        )
+        .await;
+        assert_eq!(unknown.status(), axum::http::StatusCode::OK);
+        let unknown = crate::web::dashboard::tests::response_text(unknown).await;
+        assert!(
+            unknown.contains("No articles match this filter."),
+            "{unknown}"
+        );
     }
 
     #[tokio::test]
