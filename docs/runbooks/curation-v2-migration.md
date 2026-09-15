@@ -212,7 +212,7 @@ de generate --dry-run --out /var/lib/daily-epub/out-check
 The dry run makes real DeepSeek, Claude and Voyage calls but publishes nothing and writes no
 `issues` row. Read the printed lineup and the four report lines (`curation:`, `admission:`,
 `preference:`, `providers:`); the cost should be well under $1. Then read the EPUB it wrote
-(Calibre or KOReader): The Brief, the `Why it's here` line under each headline, and the new
+(Calibre or KOReader): The Brief and the new
 Behind-the-paper chapter before the colophon. Finally:
 
 ```sh
@@ -261,7 +261,7 @@ content filter (those are bisected, retried once on the editor provider, and the
 `provider_rejected` so they are not retried daily). The `triage:` and `assess:` log lines say how
 many were reused versus requested. The bulk-side cost of the second run is therefore small; the
 editor, summaries and the Brief are the real spend. Compare the two
-lineups, the `why` lines and the Brief side by side, and the `providers:` cost line. To switch
+lineups and the Brief side by side, and the `providers:` cost line. To switch
 for good, set `editor = "gemini"` in `[llm]` (and `summary_model` stays `editor`, so summaries
 move with it). The same trick works for the bulk role: `DAILY_EPUB_LLM__BULK=gemini`.
 

@@ -42,7 +42,6 @@ struct IndexEntry {
     source: String,
     reading_minutes: i64,
     summary: String,
-    why: Option<String>,
     understanding: Understanding,
 }
 
@@ -82,7 +81,6 @@ struct ArticleChapter {
     meta_line: String,
     social_line: Option<String>,
     understanding: Understanding,
-    why: Option<String>,
     summary: Option<String>,
     excerpt_only: bool,
     body_html: String,
@@ -411,7 +409,6 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
                 source: index_source_line(&pick.article),
                 reading_minutes: pick.article.reading_minutes(),
                 summary: summary_for(issue, pick).unwrap_or_default().to_string(),
-                why: pick.why.clone(),
                 understanding: understanding(pick),
             })
             .collect();
@@ -426,7 +423,6 @@ pub fn render_in_this_issue(issue: &Issue) -> Result<Chapter, EpubError> {
                 source: "Wikipedia Current Events".into(),
                 reading_minutes: 3,
                 summary: "The day's events, as recorded by the Current Events portal.".into(),
-                why: None,
                 understanding: Understanding::default(),
             }],
         });
@@ -504,7 +500,6 @@ pub fn render_article(
         meta_line: meta_parts.join(" \u{00b7} "),
         social_line: social_line(&article.social),
         understanding: understanding(pick),
-        why: pick.why.clone(),
         summary: summary_for(issue, pick).map(str::to_string),
         excerpt_only: article.excerpt_only,
         body_html: prepare_body(&article.content_html, images_),

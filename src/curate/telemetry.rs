@@ -2,7 +2,7 @@
 //! the `explain` command and feature retention (plan §7.4–7.5, §15.2, §16).
 //!
 //! One row per considered article per run says where it stopped and why. Rows
-//! are upserted on every stage transition with every column set (never
+//! are upserted on every stage transition with every active field set (never
 //! `COALESCE`), so the last write for a run is the whole truth.
 
 use std::collections::BTreeMap;
@@ -45,16 +45,15 @@ pub struct CandidateRun<'a> {
     pub rank_utility: Option<i64>,
     pub cluster_id: Option<i64>,
     pub cluster_rank: Option<i64>,
-    pub editor_why: Option<&'a str>,
 }
 
-/// Upsert one row, setting every column (§7.4).
+/// Upsert one row, setting every active telemetry field (§7.4).
 pub async fn write(db: &Db, row: &CandidateRun<'_>) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO candidate_runs
              (run_id, article_id, stage, excluded_reason, admitted_by, signals_json,
-              utility, rank_utility, cluster_id, cluster_rank, editor_why)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              utility, rank_utility, cluster_id, cluster_rank)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id, article_id) DO UPDATE SET
              stage = excluded.stage,
              excluded_reason = excluded.excluded_reason,
@@ -63,8 +62,7 @@ pub async fn write(db: &Db, row: &CandidateRun<'_>) -> Result<(), sqlx::Error> {
              utility = excluded.utility,
              rank_utility = excluded.rank_utility,
              cluster_id = excluded.cluster_id,
-             cluster_rank = excluded.cluster_rank,
-             editor_why = excluded.editor_why",
+             cluster_rank = excluded.cluster_rank",
     )
     .bind(row.run_id)
     .bind(row.article_id)
@@ -76,7 +74,6 @@ pub async fn write(db: &Db, row: &CandidateRun<'_>) -> Result<(), sqlx::Error> {
     .bind(row.rank_utility)
     .bind(row.cluster_id)
     .bind(row.cluster_rank)
-    .bind(row.editor_why)
     .execute(db.pool())
     .await?;
     Ok(())
@@ -103,7 +100,6 @@ pub async fn thin_excluded(
             rank_utility: None,
             cluster_id: None,
             cluster_rank: None,
-            editor_why: None,
         },
     )
     .await
@@ -236,7 +232,6 @@ pub struct ExplainRow {
     pub rank_utility: Option<i64>,
     pub cluster_id: Option<i64>,
     pub cluster_rank: Option<i64>,
-    pub editor_why: Option<String>,
 }
 
 impl ExplainRow {
@@ -254,7 +249,6 @@ impl ExplainRow {
             rank_utility: row.get("rank_utility"),
             cluster_id: row.get("cluster_id"),
             cluster_rank: row.get("cluster_rank"),
-            editor_why: row.get("editor_why"),
         }
     }
 
@@ -306,7 +300,7 @@ pub async fn explain_row(
         "SELECT cr.run_id, cr.article_id, COALESCE(a.title, '') AS title,
                 COALESCE(e.feed_title, '') AS feed_title,
                 cr.stage, cr.excluded_reason, cr.admitted_by, cr.signals_json,
-                cr.utility, cr.rank_utility, cr.cluster_id, cr.cluster_rank, cr.editor_why
+                cr.utility, cr.rank_utility, cr.cluster_id, cr.cluster_rank
          FROM candidate_runs cr JOIN articles a ON a.id = cr.article_id
          LEFT JOIN entries e ON e.id = a.best_entry_id
          WHERE cr.run_id = ? AND cr.article_id = ?",
@@ -329,7 +323,7 @@ pub async fn near_misses(
         "SELECT cr.run_id, cr.article_id, COALESCE(a.title, '') AS title,
                 COALESCE(e.feed_title, '') AS feed_title,
                 cr.stage, cr.excluded_reason, cr.admitted_by, cr.signals_json,
-                cr.utility, cr.rank_utility, cr.cluster_id, cr.cluster_rank, cr.editor_why
+                cr.utility, cr.rank_utility, cr.cluster_id, cr.cluster_rank
          FROM candidate_runs cr JOIN articles a ON a.id = cr.article_id
          LEFT JOIN entries e ON e.id = a.best_entry_id
          WHERE cr.run_id = ? AND cr.stage != 'selected' AND cr.stage != 'excluded'",
@@ -489,9 +483,6 @@ pub async fn render_explain(db: &Db, row: &ExplainRow) -> Result<String, sqlx::E
     }
     if let Some(admitted_by) = &row.admitted_by {
         let _ = writeln!(out, "admitted by: {admitted_by}");
-    }
-    if let Some(why) = &row.editor_why {
-        let _ = writeln!(out, "editor: {why}");
     }
     Ok(out)
 }
@@ -1255,7 +1246,6 @@ mod tests {
                 rank_utility: None,
                 cluster_id: None,
                 cluster_rank: None,
-                editor_why: None,
             },
         )
         .await
@@ -1289,7 +1279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rows_are_upserted_with_every_column_replaced() {
+    async fn rows_are_upserted_with_every_active_field_replaced() {
         let (_dir, db) = db_with_articles(&[1]).await;
         let run_id = db.start_run(date(), Timestamp::now()).await.unwrap();
         write(
@@ -1305,7 +1295,6 @@ mod tests {
                 rank_utility: None,
                 cluster_id: None,
                 cluster_rank: None,
-                editor_why: None,
             },
         )
         .await
@@ -1323,7 +1312,6 @@ mod tests {
                 rank_utility: None,
                 cluster_id: None,
                 cluster_rank: None,
-                editor_why: Some("because"),
             },
         )
         .await
@@ -1333,7 +1321,6 @@ mod tests {
         assert_eq!(row.excluded_reason, None, "no COALESCE");
         assert_eq!(row.utility, None);
         assert_eq!(row.admitted_by.as_deref(), Some("[\"prefilter\"]"));
-        assert_eq!(row.editor_why.as_deref(), Some("because"));
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM candidate_runs")
             .fetch_one(db.pool())
             .await
@@ -1360,7 +1347,6 @@ mod tests {
                 rank_utility: None,
                 cluster_id: None,
                 cluster_rank: None,
-                editor_why: None,
             },
         )
         .await
@@ -1493,7 +1479,6 @@ mod tests {
                     rank_utility: None,
                     cluster_id: None,
                     cluster_rank: None,
-                    editor_why: None,
                 },
             )
             .await
@@ -1582,7 +1567,6 @@ mod tests {
                 rank_utility: Some(3),
                 cluster_id: None,
                 cluster_rank: None,
-                editor_why: None,
             },
         )
         .await
@@ -1600,7 +1584,6 @@ mod tests {
                 rank_utility: Some(1),
                 cluster_id: None,
                 cluster_rank: None,
-                editor_why: Some("because"),
             },
         )
         .await
@@ -1697,7 +1680,6 @@ mod tests {
                     rank_utility: None,
                     cluster_id: None,
                     cluster_rank: None,
-                    editor_why: None,
                 },
             )
             .await

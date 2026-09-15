@@ -648,27 +648,19 @@ async fn run_stages(
         .copied()
         .filter(|id| !selected_set.contains(id))
         .collect::<Vec<_>>();
-    // The editor's one-line `why` (§13) lands in `candidate_runs.editor_why` so
-    // `explain` can quote it; heuristic picks leave it NULL.
-    let selected_with_why = lineup
-        .picks
-        .iter()
-        .map(|pick| (pick.article.id, pick.why.as_deref()))
-        .collect::<Vec<_>>();
     set_candidate_stage(
         &mut personalized,
         &not_selected,
         "shortlisted",
         Some("not_selected"),
     );
-    let why = selected_with_why.into_iter().collect::<HashMap<_, _>>();
     for candidate in &mut personalized {
         if selected_set.contains(&candidate.article.id) {
             candidate.stage = "selected".into();
             candidate.excluded_reason = None;
         }
     }
-    record_candidates_with_why(ctx, &personalized, &why)
+    record_candidates(ctx, &personalized)
         .await
         .context("recording selection telemetry")?;
     report.counts.exploration_selected = personalized
@@ -1039,14 +1031,6 @@ async fn prepare_features(
 }
 
 async fn record_candidates(ctx: &StageContext<'_>, candidates: &[Candidate]) -> Result<()> {
-    record_candidates_with_why(ctx, candidates, &HashMap::new()).await
-}
-
-async fn record_candidates_with_why(
-    ctx: &StageContext<'_>,
-    candidates: &[Candidate],
-    editor_why: &HashMap<ArticleId, Option<&str>>,
-) -> Result<()> {
     for candidate in candidates {
         let json = telemetry::serialize_candidate(candidate);
         let admitted_by = if candidate.admitted_by.is_empty() {
@@ -1067,7 +1051,6 @@ async fn record_candidates_with_why(
                 rank_utility: candidate.rank_utility,
                 cluster_id: candidate.cluster,
                 cluster_rank: candidate.cluster_rank,
-                editor_why: editor_why.get(&candidate.article.id).copied().flatten(),
             },
         )
         .await

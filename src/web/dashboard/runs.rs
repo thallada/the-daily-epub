@@ -506,7 +506,6 @@ pub struct CandidateView {
     pub fit: String,
     pub exploration: bool,
     pub auto_include: bool,
-    pub editor_why: Option<String>,
     pub signals: SignalsView,
 }
 
@@ -541,7 +540,6 @@ impl CandidateView {
             fit: fmt_opt(row.get("fit"), 1),
             exploration: signals.exploration,
             auto_include: signals.auto_include,
-            editor_why: row.get("editor_why"),
             signals,
         }
     }
@@ -575,7 +573,7 @@ pub async fn candidates(
         "SELECT cr.article_id, COALESCE(a.title, '') AS title,
                 COALESCE(e.feed_title, '') AS feed_title, a.word_count,
                 cr.stage, cr.excluded_reason, cr.admitted_by, cr.signals_json, cr.utility,
-                cr.rank_utility, cr.cluster_id, cr.cluster_rank, cr.editor_why,
+                cr.rank_utility, cr.cluster_id, cr.cluster_rank,
                 t.score AS triage, d.score AS quality, d.fit AS fit
          {CANDIDATE_FROM}{clauses}
          ORDER BY {}
@@ -964,8 +962,6 @@ mod tests {
         assert_eq!(rows[0].article_id, 1);
         assert_eq!(rows[0].admitted_first.as_deref(), Some("triage"));
         assert_eq!(rows[0].admitted_rest, "interest");
-        assert_eq!(rows[0].editor_why.as_deref(), Some("Why one"));
-
         let by_rank = CandidateFilters::from_query(&query(None, Some("rank")));
         let (rows, _) = candidates(db, seed.run_id, &by_rank, 1).await.unwrap();
         assert_eq!(rows[0].rank, "1");
@@ -1099,7 +1095,6 @@ mod tests {
             "near miss: {detail}"
         );
         assert!(detail.contains("Gaussian Splatting"), "signals: {detail}");
-        assert!(detail.contains("Why one"), "{detail}");
         assert!(detail.contains("Alpha Blog"), "{detail}");
         assert!(detail.contains("class=\"funnel\""), "{detail}");
         assert!(

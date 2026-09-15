@@ -29,14 +29,13 @@ use jiff::civil::Date;
 const ADMIN_PASSWORD: &str = "adminpassword123";
 const READER_PASSWORD: &str = "readerpassword123";
 
-/// (section, title, feed, summary, why, words)
-const STORIES: &[(&str, &str, &str, &str, &str, i64)] = &[
+/// (section, title, feed, summary, words)
+const STORIES: &[(&str, &str, &str, &str, i64)] = &[
     (
         "Top Stories",
         "How a Forty-Year-Old Filesystem Quietly Rewrote Its Write Path",
         "Systems Weekly",
         "A long, careful account of the redesign, with the benchmarks that justified it and the two regressions that nearly sank it.",
-        "The systems story with enough operational detail to matter to you",
         3100,
     ),
     (
@@ -44,7 +43,6 @@ const STORIES: &[(&str, &str, &str, &str, &str, i64)] = &[
         "The Case Against Feature Flags",
         "Alice on Software",
         "Argues that flags outlive their purpose and proposes a retirement discipline, with examples from three codebases.",
-        "A contrarian take on tooling you use every day",
         1850,
     ),
     (
@@ -52,7 +50,6 @@ const STORIES: &[(&str, &str, &str, &str, &str, i64)] = &[
         "What the Latest Battery Chemistry Actually Changes",
         "Ars Technica",
         "Separates the press-release claims from the measurable improvements in energy density and cycle life.",
-        "You keep an eye on energy storage; this one is unusually sober",
         2200,
     ),
     (
@@ -60,7 +57,6 @@ const STORIES: &[(&str, &str, &str, &str, &str, i64)] = &[
         "A Field Guide to Distributed Consensus, Told Through One Outage",
         "The Morning Paper",
         "Walks through a real incident to explain leader election, log replication and why the fix was a config change.",
-        "Distributed systems explained with an actual outage rather than diagrams",
         4200,
     ),
     (
@@ -68,7 +64,6 @@ const STORIES: &[(&str, &str, &str, &str, &str, i64)] = &[
         "Why Every Map Is a Lie & How Cartographers Choose Which One to Tell",
         "Longreads",
         "A history of projections and the politics behind them, from Mercator to the maps in your phone.",
-        "Long-form nonfiction outside the technical orbit you asked for",
         5100,
     ),
     (
@@ -76,7 +71,6 @@ const STORIES: &[(&str, &str, &str, &str, &str, i64)] = &[
         "Notes on Writing a Rust Linter That People Actually Enable",
         "Rust Blog",
         "Design notes on false-positive budgets, fix suggestions and the social side of shipping a lint.",
-        "Rust tooling with a practical bent",
         1600,
     ),
     (
@@ -84,7 +78,6 @@ const STORIES: &[(&str, &str, &str, &str, &str, i64)] = &[
         "The Terminal Is the Best UI We Have and It Is Getting Better",
         "Julia's Notebook",
         "A tour of modern terminal features (hyperlinks, images, synchronized output) and which tools use them.",
-        "Terminal ergonomics, one of your recurring interests",
         1300,
     ),
     (
@@ -92,7 +85,6 @@ const STORIES: &[(&str, &str, &str, &str, &str, i64)] = &[
         "A Small-Town Bakery's Sourdough Starter Turns One Hundred",
         "Saveur",
         "A charming profile of a starter kept alive across four generations and the bread it still makes.",
-        "A small-scene delight outside the usual technical orbit",
         900,
     ),
     (
@@ -100,15 +92,14 @@ const STORIES: &[(&str, &str, &str, &str, &str, i64)] = &[
         "Inside the Community Keeping 1990s Synthesizers Alive",
         "Sound on Sound",
         "Repair collectives, replacement parts and the odd economics of vintage gear.",
-        "Music hardware, for the weekend",
         1700,
     ),
 ];
 
-fn story_article(index: usize, story: &(&str, &str, &str, &str, &str, i64)) -> Article {
+fn story_article(index: usize, story: &(&str, &str, &str, &str, i64)) -> Article {
     let id = index as i64 + 1;
     let entry_id = 1000 + id;
-    let (_, title, feed, _, _, words) = *story;
+    let (_, title, feed, _, words) = *story;
     let mut article = fixtures::article(id, entry_id, title);
     article.feed_title = feed.to_string();
     article.feed_id = 7 + index as i64;
@@ -167,7 +158,7 @@ fn dev_issue(date: Date, issue_number: i64, generated_at: Timestamp) -> Issue {
     let mut picks = Vec::new();
     let mut summaries = BTreeMap::new();
     for (index, story) in STORIES.iter().enumerate() {
-        let (section, _, _, summary, why, _) = *story;
+        let (section, _, _, summary, _) = *story;
         if !section_order.iter().any(|s| s == section) {
             section_order.push(section.to_string());
         }
@@ -237,7 +228,6 @@ fn dev_issue(date: Date, issue_number: i64, generated_at: Timestamp) -> Issue {
             section: section.to_string(),
             position,
             is_lead: index == 0,
-            why: Some(why.to_string()),
             summary: Some(summary.to_string()),
             llm,
             top_interests,
@@ -418,7 +408,6 @@ async fn seed_near_misses(db: &Db, run_id: i64) -> anyhow::Result<()> {
                 rank_utility: Some(index + 10),
                 cluster_id: Some(index),
                 cluster_rank: Some(1),
-                editor_why: None,
             },
         )
         .await?;

@@ -12,5 +12,4 @@
 <td class="num">{{ candidate.quality }}</td>
 <td class="num">{{ candidate.fit }}</td>
 <td class="cell-tight">{% if candidate.exploration %}<span class="badge">exploration</span>{% endif %}{% if candidate.auto_include %}<span class="badge">auto</span>{% endif %}</td>
-<td class="cell-wrap text-muted">{% if let Some(why) = candidate.editor_why %}{{ why }}{% endif %}</td>
 </tr>

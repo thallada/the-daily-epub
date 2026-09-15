@@ -43,7 +43,7 @@
 
 <h2>Run history</h2>
 {% if history.is_empty() %}<p class="muted text-sm">Never considered by a run.</p>{% else %}<div class="scroll-x"><table class="history">
-<thead><tr><th>run</th><th>date</th><th>stage</th><th>reason</th><th>admitted by</th><th class="num">utility</th><th class="num">rank</th><th class="num">cluster</th><th>editor</th></tr></thead>
+<thead><tr><th>run</th><th>date</th><th>stage</th><th>reason</th><th>admitted by</th><th class="num">utility</th><th class="num">rank</th><th class="num">cluster</th></tr></thead>
 <tbody>{% for row in history %}<tr>
 <td class="cell-wrap"><details class="signals"><summary><a href="{{ row.run_href }}">run {{ row.run_id }}</a> <span class="badge {{ row.status }}">{{ row.status }}</span></summary>{% let signals = row.signals %}{% include "_signals_table.html" %}</details></td>
 <td class="cell-tight text-muted">{{ row.date }}</td>
@@ -53,7 +53,6 @@
 <td class="num">{{ row.utility }}</td>
 <td class="num">{{ row.rank }}</td>
 <td class="num">{{ row.cluster }}</td>
-<td class="cell-wrap text-muted">{% if let Some(why) = row.editor_why %}{{ why }}{% endif %}</td>
 </tr>{% endfor %}</tbody></table></div>{% endif %}
 
 <h2>Neighbours and interests</h2>

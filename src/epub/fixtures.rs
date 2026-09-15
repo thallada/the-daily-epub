@@ -87,7 +87,6 @@ pub fn issue() -> Issue {
         section: "Top Stories".into(),
         position: 0,
         is_lead: true,
-        why: Some("The systems story with enough operational detail to matter".into()),
         summary: Some("What it argues, and why it is worth the time.".into()),
         llm: Some(Deep {
             quality: 9.0,
@@ -115,7 +114,6 @@ pub fn issue() -> Issue {
         section: "Niche Corner".into(),
         position: 0,
         is_lead: false,
-        why: Some("A small-scene delight outside the usual technical orbit".into()),
         summary: None,
         llm: None,
         top_interests: Vec::new(),

@@ -53,7 +53,6 @@ pub struct PublicEntry {
     pub reading_minutes: i64,
     pub word_count: i64,
     pub summary: Option<String>,
-    pub why: Option<String>,
     pub understanding: crate::epub::chapters::Understanding,
     pub comment_links: Vec<CommentLink>,
     pub is_lead: bool,
@@ -132,7 +131,6 @@ impl From<&Issue> for PublicIssue {
                                     .map(str::trim)
                                     .filter(|summary| !summary.is_empty())
                                     .map(str::to_string),
-                                why: pick.why.clone(),
                                 understanding: crate::epub::chapters::understanding(pick),
                                 comment_links,
                                 is_lead: pick.is_lead,
@@ -423,7 +421,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn public_issue_shows_summaries_and_why_but_no_bodies() {
+    fn public_issue_shows_summaries_but_no_bodies() {
         let source = crate::epub::fixtures::issue();
         let public = PublicIssue::from(&source);
         assert_eq!(
@@ -442,19 +440,19 @@ mod tests {
         assert!(html.contains("Hacker News"));
         assert!(html.contains("What it argues, and why it is worth the time."));
         assert!(html.contains("A short abstract for the second piece."));
-        assert!(html.contains("The systems story with enough operational detail to matter"));
-        assert!(html.contains("A small-scene delight outside the usual technical orbit"));
+        assert!(!html.contains("The systems story with enough operational detail to matter"));
+        assert!(!html.contains("A small-scene delight outside the usual technical orbit"));
         assert!(html.contains("Software engineering · Analysis"));
         assert!(html.contains("copy-on-write · ZFS"));
         assert!(html.contains("Matches: Filesystems · Rust"));
         let rubric_position = html.find("Software engineering · Analysis").unwrap();
-        let why_position = html.find("Why it's here").unwrap();
+        let matches_position = html.find("Matches: Filesystems · Rust").unwrap();
         let summary_position = html
             .find("What it argues, and why it is worth the time.")
             .unwrap();
         let comments_position = html.find(">Hacker News:").unwrap();
-        assert!(rubric_position < why_position);
-        assert!(why_position < summary_position);
+        assert!(rubric_position < matches_position);
+        assert!(matches_position < summary_position);
         assert!(summary_position < comments_position);
         for private in [
             "Two stories today",

@@ -619,11 +619,6 @@ async fn llm_pipeline_runs_against_a_mock_backend() {
         "the model's summaries were used, not excerpts"
     );
     assert!(editorial_doc.front_page_html.contains("storage internals"));
-    assert!(
-        lineup.picks.iter().all(|p| p.why.is_none()),
-        "the scripted editor gave no why lines"
-    );
-
     // Every scripted response was consumed, and the meter priced them (§3.6).
     assert_eq!(backend.calls(), 1 + 1 + 5 + 1);
     let total = meter.total();

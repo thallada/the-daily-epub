@@ -19,8 +19,6 @@ pub struct SelectionItem {
     pub position: i64,
     #[serde(default)]
     pub lead_story: bool,
-    #[serde(default)]
-    pub why: Option<String>,
 }
 
 pub const EDITOR_INSTRUCTIONS: &str = r#"TASK: assemble today's issue of The Daily EPUB from the shortlist below.
@@ -39,16 +37,6 @@ RULES
 6. Never select two articles that tell the same story.
 7. SIZE: aim for about {soft_target}; never more than {hard_max}; there is NO minimum.
    If only nine pieces deserve the reader's morning, publish nine. Never pad.
-8. For every pick write "why": at most 14 words. It is printed under the headline
-   as "Why it's here", above the summary, with the matched interests listed right
-   beneath it. So it must NOT describe the piece (the summary does that) and must
-   NOT just list interests (already shown). Say why THIS reader gets THIS piece
-   today: the itch it scratches, the rated piece it rhymes with, the argument he
-   will want to pick, the gap in today's paper it fills, or the exploration bet it
-   is. Second person is fine.
-   Bad:  "A candid Rust query engine post-mortem showing why io_uring lost to mmap."
-   Good: "The io_uring-versus-mmap verdict you'd want before touching your own engine."
-
 EDITORIAL JUDGEMENT
 - Depth over coverage. Drop anything you would not defend to him in person.
 - Diversity is a feature: do not let one subject, one format, or one feed dominate,
@@ -62,7 +50,7 @@ EDITORIAL JUDGEMENT
 - Scores are evidence, not instructions. Overrule them when the paper reads better.
 
 Return JSON exactly:
-{"picks": [{"id": 123, "section": "Top Stories", "position": 1, "lead_story": true, "why": "…"}]}"#;
+{"picks": [{"id": 123, "section": "Top Stories", "position": 1, "lead_story": true}]}"#;
 
 pub fn build_prompt(
     shortlist: &[Candidate],
@@ -398,16 +386,6 @@ pub fn parse_selection_response(raw: &str) -> Vec<SelectionItem> {
                         })
                     })
                     .unwrap_or(false),
-                why: object
-                    .get("why")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|why| {
-                        why.split_whitespace()
-                            .take(14)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                    .filter(|why| !why.is_empty()),
             })
         })
         .collect()
@@ -483,7 +461,6 @@ pub async fn select(
                     section: "From the Blogroll".into(),
                     position: i64::MAX,
                     lead_story: false,
-                    why: Some("A standing source you always want represented".into()),
                 },
                 candidate.clone(),
             ));
@@ -592,7 +569,6 @@ fn assemble(
                 section: item.section,
                 position: *position,
                 is_lead: Some(item.id) == lead_id,
-                why: item.why,
                 summary: None,
                 llm: candidate.assessment.deep,
                 top_interests: candidate
@@ -639,7 +615,6 @@ pub fn select_without_llm(
                 section: heuristic_section(&candidate, sections),
                 position: chosen.len() as i64 + 1,
                 lead_story: false,
-                why: None,
             },
             candidate,
         ));
@@ -742,7 +717,7 @@ mod tests {
         let picks: Vec<String> = (1..=n)
             .map(|i| {
                 format!(
-                    r#"{{"id":{i},"section":"Top Stories","position":{i},"lead_story":{},"why":"pick {i} because"}}"#,
+                    r#"{{"id":{i},"section":"Top Stories","position":{i},"lead_story":{}}}"#,
                     i == 1
                 )
             })
@@ -809,32 +784,8 @@ mod tests {
         assert!(items[0].lead_story);
         assert_eq!(items[0].section, "Top Stories");
         assert_eq!(items.iter().filter(|i| i.lead_story).count(), 1);
-        assert!(items[0].why.as_deref().is_some_and(|w| !w.is_empty()));
         // Junk entries in the fixture are dropped, not fatal.
         assert!(items.iter().all(|i| i.id != 0));
-    }
-
-    #[test]
-    fn why_lines_are_optional_and_capped_at_fourteen_words() {
-        let long = (1..=30)
-            .map(|i| format!("w{i}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let items = parse_selection_response(&format!(
-            r#"{{"picks":[{{"id":1,"section":"Top Stories","why":"{long}"}},
-                          {{"id":2,"section":"Top Stories","why":"   "}},
-                          {{"id":3,"section":"Top Stories"}}]}}"#
-        ));
-        assert_eq!(items.len(), 3);
-        assert_eq!(
-            items[0]
-                .why
-                .as_deref()
-                .map(|w| w.split_whitespace().count()),
-            Some(14)
-        );
-        assert!(items[1].why.is_none());
-        assert!(items[2].why.is_none());
     }
 
     #[test]
@@ -964,29 +915,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn why_lines_land_on_picks() {
-        let backend = Arc::new(MockBackend::new());
-        backend.push(picks_json(3), TokenUsage::default());
-        let lineup = select(
-            &bulk_only(backend),
-            candidates(5),
-            &sections(),
-            3,
-            5,
-            date(),
-        )
-        .await
-        .expect("selection");
-        assert_eq!(lineup.picks.len(), 3);
-        for pick in &lineup.picks {
-            assert_eq!(
-                pick.why.as_deref(),
-                Some(format!("pick {} because", pick.article.id).as_str())
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn hallucinated_ids_and_missing_leads_are_repaired() {
         let backend = Arc::new(MockBackend::new());
         backend.push(
@@ -1086,7 +1014,6 @@ mod tests {
             .find(|p| p.article.id == 30)
             .expect("reinserted");
         assert_eq!(reinserted.section, "From the Blogroll");
-        assert!(reinserted.why.is_some());
     }
 
     #[tokio::test]
@@ -1195,7 +1122,6 @@ mod tests {
         for pick in &lineup.picks {
             assert!(sections().contains(&pick.section));
             assert!(pick.summary.is_none());
-            assert!(pick.why.is_none());
         }
         assert!(!lineup.section_order.is_empty());
     }

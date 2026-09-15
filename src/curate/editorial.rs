@@ -275,10 +275,9 @@ pub fn build_brief_prompt(lineup: &Lineup, summaries: &BTreeMap<ArticleId, Strin
                 .unwrap_or_else(|| excerpt_summary(pick));
             let _ = writeln!(
                 prompt,
-                "- {}\n  feed: {}\n  why: {}\n  quality: {}\n  fit: {}\n  summary: {}",
+                "- {}\n  feed: {}\n  quality: {}\n  fit: {}\n  summary: {}",
                 pick.article.title.trim(),
                 pick.article.feed_title.trim(),
-                pick.why.as_deref().unwrap_or("not supplied"),
                 quality,
                 fit,
                 summary
@@ -459,7 +458,6 @@ mod tests {
             section: section.into(),
             position: 1,
             is_lead,
-            why: Some(format!("the {title} piece you'd argue with")),
             summary: None,
             llm: None,
             top_interests: Vec::new(),
@@ -635,7 +633,6 @@ mod tests {
         assert!(prompt.contains("## Top Stories"));
         assert!(prompt.contains("## Boston & Local"));
         assert!(prompt.contains("- Migrating 40TB off Postgres"));
-        assert!(prompt.contains("why: the Migrating 40TB off Postgres piece you'd argue with"));
         assert!(prompt.contains("summary: A migration story with numbers."));
         assert!(prompt.contains("quality: unassessed"));
         assert!(prompt.contains("fit: unassessed"));

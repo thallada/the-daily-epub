@@ -119,7 +119,7 @@ pub async fn load(
         (issue, true)
     } else {
         let rows = sqlx::query(
-            "SELECT article_id, section, position, is_lead, summary, why
+            "SELECT article_id, section, position, is_lead, summary
              FROM issue_articles WHERE issue_date = ? ORDER BY section, position",
         )
         .bind(date.to_string())
@@ -148,7 +148,6 @@ pub async fn load(
                 section,
                 position: pick_row.get("position"),
                 is_lead: pick_row.get("is_lead"),
-                why: pick_row.get("why"),
                 summary,
                 llm: None,
                 top_interests: Vec::new(),
@@ -881,7 +880,6 @@ struct FullEntry {
     reading_minutes: i64,
     is_lead: bool,
     summary: String,
-    why: Option<String>,
     understanding: chapters::Understanding,
     rating: Option<RatingWidget>,
 }
@@ -950,7 +948,6 @@ struct ArticleTemplate {
     byline: Option<String>,
     source: Source,
     meta_line: String,
-    why: Option<String>,
     social_line: Option<String>,
     understanding: chapters::Understanding,
     summary: Option<String>,
@@ -1029,7 +1026,6 @@ pub async fn render_full(
                     summary: summary_for(&view.issue, pick)
                         .unwrap_or_default()
                         .to_string(),
-                    why: pick.why.clone(),
                     understanding: chapters::understanding(pick),
                     rating: is_admin.then(|| {
                         RatingWidget::for_issue(
@@ -1132,7 +1128,6 @@ pub async fn article(
             thousands(article.word_count),
             article.reading_minutes()
         ),
-        why: pick.why.clone(),
         social_line: chapters::social_line(&article.social),
         understanding: chapters::understanding(pick),
         summary: summary_for(&view.issue, pick).map(str::to_string),
@@ -1636,7 +1631,6 @@ mod tests {
                     rank_utility: Some(3),
                     cluster_id: Some(1),
                     cluster_rank: Some(2),
-                    editor_why: None,
                 },
             )
             .await
@@ -1844,7 +1838,6 @@ mod tests {
         assert!(html.contains("The Lead Story"));
         assert!(html.contains("Hacker News"));
         assert!(html.contains("What it argues, and why it is worth the time."));
-        assert!(html.contains("Why it's here"));
         assert!(!html.contains("Two stories today"));
         assert!(!html.contains("Something happened"));
         assert!(!html.contains("Body of"));
@@ -1903,7 +1896,6 @@ mod tests {
             1
         );
         assert!(feed.contains("What it argues, and why it is worth the time."));
-        assert!(feed.contains("Why it&apos;s here"));
         assert!(!feed.contains("Something happened"));
         assert!(!feed.contains("Two stories today"));
         assert!(!feed.contains("Body of"));
@@ -2000,7 +1992,6 @@ mod tests {
         assert!(issue.contains("Two stories today"));
         assert!(issue.contains("What it argues"));
         assert!(issue.contains("A short abstract for the second piece"));
-        assert!(issue.contains("Why it"));
         assert!(issue.contains("Software engineering · Analysis"));
         assert!(issue.contains("copy-on-write · ZFS"));
         assert!(issue.contains("Matches: Filesystems · Rust"));
@@ -2036,13 +2027,13 @@ mod tests {
         assert!(article.contains("loading=\"lazy\""));
         assert!(article.contains("referrerpolicy=\"no-referrer\""));
         let rubric_position = article.find("Software engineering · Analysis").unwrap();
-        let why_position = article.find("Why it's here").unwrap();
+        let matches_position = article.find("Matches: Filesystems · Rust").unwrap();
         let summary_position = article
             .find("What it argues, and why it is worth the time.")
             .unwrap();
         let social_position = article.find("342 on HN").unwrap();
-        assert!(rubric_position < why_position);
-        assert!(why_position < summary_position);
+        assert!(rubric_position < matches_position);
+        assert!(matches_position < summary_position);
         assert!(summary_position < social_position);
         assert!(article.contains("A Niche Delight"));
         assert!(article.contains("rel=\"next\""));

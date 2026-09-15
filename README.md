@@ -8,8 +8,8 @@ the articles, enriches them with HackerNews/Lobsters/Reddit social proof, has
 DeepSeek triage every eligible opening and closely assess a 120-article union,
 then utility-ranks and diversity-caps a 60-item shortlist for Claude Opus 5 — the editor —
 which assembles the issue
-(no minimum size, a hard ceiling), writes a one-line *why* under every headline,
-the summaries and *The Brief*. It assembles two EPUB editions (a standard one
+(no minimum size, a hard ceiling), then writes the summaries and *The Brief*.
+It assembles two EPUB editions (a standard one
 and one tuned for the Xteink X4 e-ink reader), converts the X4 edition to XTC, and
 publishes the lot over its own OPDS catalog — which doubles as a
 [BookOrbit](https://github.com/thallada/bookorbit) watched folder if you run one.
@@ -207,8 +207,8 @@ the database or takes the lock, so it is safe to run next to a live `generate`.
 ## Web site and dashboard
 
 The server is both the public newspaper index and the private operator UI. An
-anonymous visitor sees titles, authors, sources, metadata, AI summaries, why
-lines and outbound comment links; article bodies, the Brief, the World Briefing
+anonymous visitor sees titles, authors, sources, metadata, AI summaries and
+outbound comment links; article bodies, the Brief, the World Briefing
 and comments stay private. A signed-in `user`
 sees complete issues and article chapters and can download available formats
 from a single download menu. An
@@ -855,7 +855,7 @@ epubcheck "./out/The Daily EPUB - $(date +%F).epub"   # expect zero errors
 
 # 4. Now with the bulk and editor providers, still not publishing
 daily-epub generate --dry-run --out ./out --max-articles 6
-#    → check the lineup is sane (at most 6 picks, each with a "why" line) and the
+#    → check the lineup is sane (at most 6 picks) and the
 #      printed per-provider cost is well under $1
 
 # 5. Full live run

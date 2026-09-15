@@ -606,8 +606,8 @@ impl Db {
             .await?;
         for pick in picks {
             sqlx::query(
-                "INSERT INTO issue_articles (issue_date, article_id, section, position, is_lead, summary, why)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO issue_articles (issue_date, article_id, section, position, is_lead, summary)
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(date.to_string())
             .bind(pick.article.id)
@@ -615,7 +615,6 @@ impl Db {
             .bind(pick.position)
             .bind(pick.is_lead)
             .bind(pick.summary.as_deref())
-            .bind(pick.why.as_deref())
             .execute(&mut *tx)
             .await?;
         }

@@ -370,7 +370,6 @@ fn pick_for(target: &Target, content_html: String) -> Pick {
         section: target.issue.clone(),
         position: 0,
         is_lead: false,
-        why: None,
         summary: None,
         llm: None,
         top_interests: Vec::new(),

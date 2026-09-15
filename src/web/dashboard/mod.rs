@@ -865,17 +865,8 @@ pub(crate) mod tests {
                 Some("[\"triage\",\"interest\"]"),
                 88.0,
                 1,
-                Some("Why one"),
             ),
-            (
-                2,
-                "selected",
-                None,
-                Some("[\"blend\"]"),
-                80.0,
-                2,
-                Some("Why two"),
-            ),
+            (2, "selected", None, Some("[\"blend\"]"), 80.0, 2),
             (
                 3,
                 "shortlisted",
@@ -883,7 +874,6 @@ pub(crate) mod tests {
                 Some("[\"triage\"]"),
                 75.0,
                 3,
-                None,
             ),
             (
                 4,
@@ -892,10 +882,9 @@ pub(crate) mod tests {
                 Some("[\"triage\"]"),
                 60.0,
                 4,
-                None,
             ),
         ];
-        for (article_id, stage, reason, admitted_by, utility, rank, why) in rows {
+        for (article_id, stage, reason, admitted_by, utility, rank) in rows {
             let json = signals(utility / 10.0, article_id == 2);
             telemetry::write(
                 &db,
@@ -910,7 +899,6 @@ pub(crate) mod tests {
                     rank_utility: Some(rank),
                     cluster_id: Some(1),
                     cluster_rank: Some(rank),
-                    editor_why: why,
                 },
             )
             .await
@@ -931,7 +919,6 @@ pub(crate) mod tests {
                     rank_utility: None,
                     cluster_id: None,
                     cluster_rank: None,
-                    editor_why: None,
                 },
             )
             .await
@@ -958,7 +945,6 @@ pub(crate) mod tests {
                 rank_utility: None,
                 cluster_id: None,
                 cluster_rank: None,
-                editor_why: None,
             },
         )
         .await
@@ -1008,9 +994,9 @@ pub(crate) mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO issue_articles
-             (issue_date, article_id, section, position, is_lead, summary, why)
-             VALUES (?, 1, 'Top Stories', 0, 1, 'Summary one', 'Why one'),
-                    (?, 2, 'Top Stories', 1, 0, 'Summary two', 'Why two')",
+             (issue_date, article_id, section, position, is_lead, summary)
+             VALUES (?, 1, 'Top Stories', 0, 1, 'Summary one'),
+                    (?, 2, 'Top Stories', 1, 0, 'Summary two')",
         )
         .bind(date.to_string())
         .bind(date.to_string())

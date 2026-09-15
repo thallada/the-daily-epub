@@ -372,8 +372,6 @@ pub struct Pick {
     /// Order within the section, ascending.
     pub position: i64,
     pub is_lead: bool,
-    /// Editor-written reason, at most 14 words (§13).
-    pub why: Option<String>,
     /// Newspaper-abstract summary from stage C; `None` until editorial runs.
     pub summary: Option<String>,
     pub llm: Option<Deep>,

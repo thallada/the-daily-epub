@@ -472,7 +472,6 @@ pub struct HistoryRow {
     pub utility: String,
     pub rank: String,
     pub cluster: String,
-    pub editor_why: Option<String>,
     pub signals: SignalsView,
 }
 
@@ -640,8 +639,7 @@ pub async fn assessments(
 pub async fn run_history(db: &Db, article_id: ArticleId) -> Result<Vec<HistoryRow>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT cr.run_id, r.date, r.status, cr.stage, cr.excluded_reason, cr.admitted_by,
-                cr.signals_json, cr.utility, cr.rank_utility, cr.cluster_id, cr.cluster_rank,
-                cr.editor_why
+                cr.signals_json, cr.utility, cr.rank_utility, cr.cluster_id, cr.cluster_rank
          FROM candidate_runs cr JOIN runs r ON r.id = cr.run_id
          WHERE cr.article_id = ? ORDER BY cr.run_id DESC",
     )
@@ -673,7 +671,6 @@ pub async fn run_history(db: &Db, article_id: ArticleId) -> Result<Vec<HistoryRo
                     (Some(id), None) => id.to_string(),
                     _ => "—".into(),
                 },
-                editor_why: row.get("editor_why"),
                 signals: SignalsView::from_json(&row.get::<String, _>("signals_json")),
             }
         })
