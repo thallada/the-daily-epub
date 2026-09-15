@@ -186,6 +186,8 @@
 
   .reader-page :where(h1, h2, h3, h4), .reader-section-heading { text-wrap:balance; }
   .reader-section-heading { @apply border-t-[3px] border-double border-rule-strong pt-3 font-serif text-[1.05rem] font-semibold uppercase leading-[1.2] tracking-[0.15em] text-ink; }
+  .interest-chip { @apply inline-block rounded-full border border-rule-strong px-2.5 py-0.5 text-xs leading-5 text-ink-2 no-underline; }
+  a.interest-chip:hover { @apply border-accent text-accent; }
 
   .rating { @apply my-5 flex flex-wrap items-center gap-x-3 font-sans text-xs; }
   .rating-prompt { @apply font-serif text-[0.8rem] italic text-muted; }

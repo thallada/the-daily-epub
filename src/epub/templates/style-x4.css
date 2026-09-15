@@ -95,16 +95,19 @@ img {
   font-variant: small-caps;
 }
 
-.why,
-.index-why {
-  margin: 0.2em 0 0 0;
-  font-size: 0.9em;
+.matches {
+  margin: 0.35em 0 0 0;
+  font-size: 0.8em;
+  color: #444444;
 }
 
-.why-matches {
-  margin: 0;
-  font-size: 0.85em;
-  color: #444444;
+.interest {
+  display: inline-block;
+  margin: 0 0.15em 0.15em 0;
+  padding: 0 0.5em;
+  border: 1px solid #888888;
+  border-radius: 0.8em;
+  white-space: nowrap;
 }
 
 .dateline,

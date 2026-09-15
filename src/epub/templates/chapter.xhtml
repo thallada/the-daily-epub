@@ -11,11 +11,7 @@
         <p class="rubric">{% if let Some(kicker) = understanding.kicker %}<span class="kicker">{{ kicker }}</span>{% if let Some(topics) = understanding.topics %} &#160; {{ topics }}{% endif %}{% else %}{% if let Some(topics) = understanding.topics %}{{ topics }}{% endif %}{% endif %}</p>
 {% endif %}
 {% if !understanding.interests.is_empty() %}
-        <div class="why">
-{% if !understanding.interests.is_empty() %}
-          <p class="why-matches">Matches: {{ understanding.interests_line() }}</p>
-{% endif %}
-        </div>
+        <p class="matches"><span class="kicker">Matches</span>{% for interest in understanding.interests %} <span class="interest">{{ interest.name }}</span>{% endfor %}</p>
 {% endif %}
 {% if let Some(text) = summary %}
         <p class="summary">{{ text }}</p>

@@ -239,17 +239,6 @@ pub struct InterestRef {
     pub href: String,
 }
 
-impl Understanding {
-    /// EPUBs keep interest names as plain text, without dashboard links.
-    pub fn interests_line(&self) -> String {
-        self.interests
-            .iter()
-            .map(|interest| interest.name.as_str())
-            .collect::<Vec<_>>()
-            .join(" \u{00b7} ")
-    }
-}
-
 /// Reader-facing assessment details, split so templates can give each part the
 /// same editorial hierarchy across web and EPUB surfaces.
 pub fn understanding(pick: &Pick) -> Understanding {
@@ -919,7 +908,21 @@ mod tests {
         // The lead's rubric and matches are on the index; the second pick has neither.
         assert_eq!(chapter.xhtml.matches("class=\"rubric\"").count(), 1);
         assert!(chapter.xhtml.contains("Software engineering · Analysis"));
-        assert!(chapter.xhtml.contains("Matches: Filesystems · Rust"));
+        assert!(
+            chapter
+                .xhtml
+                .contains("<span class=\"interest\">Filesystems</span>")
+        );
+        assert!(
+            chapter
+                .xhtml
+                .contains("<span class=\"interest\">Rust</span>")
+        );
+        let rubric_position = chapter.xhtml.find("class=\"rubric\"").unwrap();
+        let matches_position = chapter.xhtml.find("class=\"matches\"").unwrap();
+        let summary_position = chapter.xhtml.find("class=\"index-summary\"").unwrap();
+        assert!(rubric_position < matches_position);
+        assert!(matches_position < summary_position);
         // Titles are escaped (askama emits numeric references), never injected raw.
         assert!(chapter.xhtml.contains("A Niche Delight &#38; Other Tales"));
         assert_xml_ok(&chapter.xhtml);
@@ -992,11 +995,22 @@ mod tests {
         assert!(chapter.xhtml.contains("class=\"rubric\""));
         assert!(chapter.xhtml.contains("Software engineering · Analysis"));
         assert!(chapter.xhtml.contains("copy-on-write · ZFS"));
-        assert!(chapter.xhtml.contains("Matches: Filesystems · Rust"));
+        assert!(
+            chapter
+                .xhtml
+                .contains("<span class=\"interest\">Filesystems</span>")
+        );
+        assert!(
+            chapter
+                .xhtml
+                .contains("<span class=\"interest\">Rust</span>")
+        );
         let rubric_position = chapter.xhtml.find("class=\"rubric\"").unwrap();
+        let matches_position = chapter.xhtml.find("class=\"matches\"").unwrap();
         let summary_position = chapter.xhtml.find("class=\"summary\"").unwrap();
         let social_position = chapter.xhtml.find("class=\"social\"").unwrap();
-        assert!(rubric_position < summary_position);
+        assert!(rubric_position < matches_position);
+        assert!(matches_position < summary_position);
         assert!(summary_position < social_position);
         let footer = chapter
             .xhtml
@@ -1004,7 +1018,7 @@ mod tests {
             .unwrap()
             .1;
         assert!(!footer.contains("class=\"rubric\""));
-        assert!(!footer.contains("Matches:"));
+        assert!(!footer.contains("class=\"matches\""));
         let second = render_article(
             &issue,
             &issue.lineup.picks[1],

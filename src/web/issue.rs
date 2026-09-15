@@ -1994,7 +1994,13 @@ mod tests {
         assert!(issue.contains("A short abstract for the second piece"));
         assert!(issue.contains("Software engineering · Analysis"));
         assert!(issue.contains("copy-on-write · ZFS"));
-        assert!(issue.contains("Matches: Filesystems · Rust"));
+        assert!(issue.contains("<span class=\"interest-chip\">Filesystems</span>"));
+        assert!(issue.contains("<span class=\"interest-chip\">Rust</span>"));
+        let issue_rubric_position = issue.find("Software engineering · Analysis").unwrap();
+        let issue_matches_position = issue.find(">Matches</span>").unwrap();
+        let issue_summary_position = issue.find("What it argues").unwrap();
+        assert!(issue_rubric_position < issue_matches_position);
+        assert!(issue_matches_position < issue_summary_position);
         assert!(issue.contains("A. Writer · Example Feed"));
         assert!(!issue.contains("example feed · Example Feed"));
         assert!(issue.contains("World Briefing"));
@@ -2027,7 +2033,9 @@ mod tests {
         assert!(article.contains("loading=\"lazy\""));
         assert!(article.contains("referrerpolicy=\"no-referrer\""));
         let rubric_position = article.find("Software engineering · Analysis").unwrap();
-        let matches_position = article.find("Matches: Filesystems · Rust").unwrap();
+        let matches_position = article.find(">Matches</span>").unwrap();
+        assert!(article.contains("<span class=\"interest-chip\">Filesystems</span>"));
+        assert!(article.contains("<span class=\"interest-chip\">Rust</span>"));
         let summary_position = article
             .find("What it argues, and why it is worth the time.")
             .unwrap();
@@ -2734,7 +2742,8 @@ mod tests {
         assert!(admin_issue.contains("Was this a good pick?"));
         assert!(admin_issue.contains("value=\"loved\" data-label=\"loved\" class=\"active\""));
         assert!(admin_issue.contains(&dashboard_href));
-        assert!(admin_issue.contains(&crate::interests::articles_href("Filesystems")));
+        let interest_href = crate::interests::articles_href("Filesystems");
+        assert!(admin_issue.contains(&format!("class=\"interest-chip\" href=\"{interest_href}\"")));
 
         let admin_article = app
             .clone()

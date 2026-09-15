@@ -14,11 +14,7 @@
           <p class="rubric">{% if let Some(kicker) = entry.understanding.kicker %}<span class="kicker">{{ kicker }}</span>{% if let Some(topics) = entry.understanding.topics %} &#160; {{ topics }}{% endif %}{% else %}{% if let Some(topics) = entry.understanding.topics %}{{ topics }}{% endif %}{% endif %}</p>
 {% endif %}
 {% if !entry.understanding.interests.is_empty() %}
-          <div class="index-why">
-{% if !entry.understanding.interests.is_empty() %}
-            <p class="why-matches">Matches: {{ entry.understanding.interests_line() }}</p>
-{% endif %}
-          </div>
+          <p class="matches"><span class="kicker">Matches</span>{% for interest in entry.understanding.interests %} <span class="interest">{{ interest.name }}</span>{% endfor %}</p>
 {% endif %}
 {% if !entry.summary.is_empty() %}
           <p class="index-summary">{{ entry.summary }}</p>
