@@ -447,7 +447,7 @@ mod tests {
         assert!(html.contains("<span class=\"interest-chip\">Filesystems</span>"));
         assert!(html.contains("<span class=\"interest-chip\">Rust</span>"));
         let rubric_position = html.find("Software engineering · Analysis").unwrap();
-        let matches_position = html.find(">Matches</span>").unwrap();
+        let matches_position = html.find("Matched interests: </span>").unwrap();
         let summary_position = html
             .find("What it argues, and why it is worth the time.")
             .unwrap();

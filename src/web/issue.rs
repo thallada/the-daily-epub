@@ -1997,7 +1997,7 @@ mod tests {
         assert!(issue.contains("<span class=\"interest-chip\">Filesystems</span>"));
         assert!(issue.contains("<span class=\"interest-chip\">Rust</span>"));
         let issue_rubric_position = issue.find("Software engineering · Analysis").unwrap();
-        let issue_matches_position = issue.find(">Matches</span>").unwrap();
+        let issue_matches_position = issue.find("Matched interests: </span>").unwrap();
         let issue_summary_position = issue.find("What it argues").unwrap();
         assert!(issue_rubric_position < issue_matches_position);
         assert!(issue_matches_position < issue_summary_position);
@@ -2033,7 +2033,7 @@ mod tests {
         assert!(article.contains("loading=\"lazy\""));
         assert!(article.contains("referrerpolicy=\"no-referrer\""));
         let rubric_position = article.find("Software engineering · Analysis").unwrap();
-        let matches_position = article.find(">Matches</span>").unwrap();
+        let matches_position = article.find("Matched interests: </span>").unwrap();
         assert!(article.contains("<span class=\"interest-chip\">Filesystems</span>"));
         assert!(article.contains("<span class=\"interest-chip\">Rust</span>"));
         let summary_position = article

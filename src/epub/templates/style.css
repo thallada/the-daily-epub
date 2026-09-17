@@ -160,19 +160,17 @@ hr.rule {
   color: #444444;
 }
 
+/* Matched interests read like the rubric's topics, with a muted vertical
+   bar between them instead of the topics' dot. */
 .matches {
-  margin: 0.35em 0 0 0;
+  margin: 0.2em 0 0 0;
   font-size: 0.8em;
   color: #444444;
 }
 
-.interest {
-  display: inline-block;
-  margin: 0 0.15em 0.15em 0;
-  padding: 0 0.5em;
-  border: 1px solid #888888;
-  border-radius: 0.8em;
-  white-space: nowrap;
+.sep {
+  color: #aaaaaa;
+  padding: 0 0.4em;
 }
 
 .summary {
