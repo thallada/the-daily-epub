@@ -4,6 +4,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum_login::tower_sessions::Session;
 use jiff::civil::Date;
+use serde::Serialize;
 
 use crate::server::AppState;
 use crate::types::{Issue, SocialSource};
@@ -289,10 +290,25 @@ pub async fn archive(
     Ok(public_cache(response, &headers))
 }
 
-pub async fn feed(State(state): State<AppState>) -> Result<Response, WebError> {
+/// One issue as both public feeds carry it.
+///
+/// Atom and JSON Feed differ only in how these five fields are spelled out, so
+/// the expensive part — loading the issue and rendering `feed_entry.html` — is
+/// done once, by [`feed_entries`], and shared.
+struct FeedEntry {
+    id: String,
+    href: String,
+    title: String,
+    generated_at: jiff::Timestamp,
+    content: String,
+}
+
+/// The last 30 issues, newest first, plus the newest `generated_at` among them
+/// (the feed-level `<updated>`).
+async fn feed_entries(state: &AppState) -> Result<(Vec<FeedEntry>, jiff::Timestamp), WebError> {
     let config = state.config();
     let rows = state.db.issue_dates(Some(30)).await?;
-    let mut entries = String::new();
+    let mut entries = Vec::new();
     let mut updated = jiff::Timestamp::UNIX_EPOCH;
     for row in rows {
         let Some(view) = issue::load(&state.db, &config, row.date).await? else {
@@ -306,20 +322,38 @@ pub async fn feed(State(state): State<AppState>) -> Result<Response, WebError> {
         let content = FeedEntryTemplate { issue: &issue }.render();
         crate::web::timing::record_render(started.elapsed());
         let content = content.map_err(|error| WebError::Internal(error.into()))?;
-        let href = format!(
-            "{}/issues/{}",
-            config.server.public_url.trim_end_matches('/'),
-            issue.date
-        );
+        entries.push(FeedEntry {
+            id: format!(
+                "tag:{},{}:issue/{}",
+                feed_host(&config.server.public_url),
+                issue.date.year(),
+                issue.date
+            ),
+            href: format!(
+                "{}/issues/{}",
+                config.server.public_url.trim_end_matches('/'),
+                issue.date
+            ),
+            title: format!("The Daily EPUB — {}", issue.date),
+            generated_at: issue.generated_at,
+            content,
+        });
+    }
+    Ok((entries, updated))
+}
+
+pub async fn feed(State(state): State<AppState>) -> Result<Response, WebError> {
+    let config = state.config();
+    let (issues, updated) = feed_entries(&state).await?;
+    let mut entries = String::new();
+    for entry in &issues {
         entries.push_str(&format!(
-            "<entry><id>tag:{},{}:issue/{}</id><title>The Daily EPUB — {}</title><updated>{}</updated><link rel=\"alternate\" href=\"{}\"/><content type=\"html\">{}</content></entry>",
-            feed_host(&config.server.public_url),
-            issue.date.year(),
-            issue.date,
-            issue.date,
-            issue.generated_at,
-            xml_escape(&href),
-            xml_escape(&content),
+            "<entry><id>{}</id><title>{}</title><updated>{}</updated><link rel=\"alternate\" href=\"{}\"/><content type=\"html\">{}</content></entry>",
+            entry.id,
+            entry.title,
+            entry.generated_at,
+            xml_escape(&entry.href),
+            xml_escape(&entry.content),
         ));
     }
     let home = config.server.public_url.trim_end_matches('/');
@@ -334,6 +368,59 @@ pub async fn feed(State(state): State<AppState>) -> Result<Response, WebError> {
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "application/atom+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, PUBLIC_CACHE),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// JSON Feed 1.1 <https://jsonfeed.org/version/1.1>, the same issues `/feed.xml`
+/// carries.
+#[derive(Serialize)]
+struct JsonFeed<'a> {
+    version: &'static str,
+    title: &'static str,
+    home_page_url: &'a str,
+    feed_url: String,
+    items: Vec<JsonFeedItem<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonFeedItem<'a> {
+    id: &'a str,
+    url: &'a str,
+    title: &'a str,
+    /// The rendered `feed_entry.html`, raw: JSON escaping is serde's job.
+    content_html: &'a str,
+    date_published: String,
+}
+
+pub async fn feed_json(State(state): State<AppState>) -> Result<Response, WebError> {
+    let config = state.config();
+    let (entries, _updated) = feed_entries(&state).await?;
+    let home = config.server.public_url.trim_end_matches('/');
+    let body = serde_json::to_string(&JsonFeed {
+        version: "https://jsonfeed.org/version/1.1",
+        title: "The Daily EPUB",
+        home_page_url: home,
+        feed_url: format!("{home}/feed.json"),
+        items: entries
+            .iter()
+            .map(|entry| JsonFeedItem {
+                id: &entry.id,
+                url: &entry.href,
+                title: &entry.title,
+                content_html: &entry.content,
+                date_published: entry.generated_at.to_string(),
+            })
+            .collect(),
+    })
+    .map_err(|error| WebError::Internal(error.into()))?;
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/feed+json; charset=utf-8"),
             (header::CACHE_CONTROL, PUBLIC_CACHE),
         ],
         body,

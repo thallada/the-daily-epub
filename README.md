@@ -290,7 +290,7 @@ articles do not yet have embeddings to compare.
 
 | Route | Access | Purpose |
 |---|---|---|
-| `GET /`, `/issues`, `/issues/{date}`, `/feed.xml` | Public | Latest issue, archive, stripped issue index, and equivalent Atom feed. Signed-in issue views expand to the complete issue. |
+| `GET /`, `/issues`, `/issues/{date}`, `/feed.xml`, `/feed.json` | Public | Latest issue, archive, stripped issue index, and the equivalent Atom and JSON Feed 1.1 feeds. Signed-in issue views expand to the complete issue. |
 | `GET /issues/{date}/articles/{id}`, `/world`, `/behind` | User or admin | Private article, World Briefing, and Behind the paper chapters. |
 | `GET /issues/{date}/read` | User or admin | Open the Standard edition in BookOrbit's web reader when the integration is enabled. |
 | `GET /robots.txt`, `/static/{file}` | Public | Crawler policy and embedded CSS, JavaScript, and favicon. |
@@ -721,7 +721,7 @@ toggle and nothing else. The whole matrix:
 
 | route | `Cache-Control` |
 |---|---|
-| `/`, `/issues`, `/issues/{date}`, `/feed.xml`, `/issues.json` (anonymous) | `public, max-age=300` |
+| `/`, `/issues`, `/issues/{date}`, `/feed.xml`, `/feed.json`, `/issues.json` (anonymous) | `public, max-age=300` |
 | the same pages with a `daily_session=` cookie | `private, no-store` |
 | `/robots.txt` | `public, max-age=86400` |
 | `/static/*?v=<hash>` | `public, max-age=31536000, immutable` |

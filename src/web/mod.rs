@@ -708,6 +708,7 @@ pub fn router(config: &crate::config::Config) -> axum::Router<crate::server::App
         .route("/issues", get(public::archive))
         .route("/issues/{date}", get(public::show_issue))
         .route("/feed.xml", get(public::feed))
+        .route("/feed.json", get(public::feed_json))
         .route("/robots.txt", get(public::robots))
         .route("/static/{file}", get(static_asset))
         .merge(access_routes)

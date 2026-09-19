@@ -1888,18 +1888,63 @@ mod tests {
         )
         .unwrap();
         let document = roxmltree::Document::parse(&feed).unwrap();
-        assert_eq!(
-            document
-                .descendants()
-                .filter(|node| node.tag_name().name() == "entry")
-                .count(),
-            1
-        );
+        let atom_entries = document
+            .descendants()
+            .filter(|node| node.tag_name().name() == "entry")
+            .count();
+        assert_eq!(atom_entries, 1);
         assert!(feed.contains("What it argues, and why it is worth the time."));
         assert!(!feed.contains("Something happened"));
         assert!(!feed.contains("Two stories today"));
         assert!(!feed.contains("Body of"));
         assert!(!feed.contains("write path"));
+
+        let json = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/feed.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            json.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/feed+json; charset=utf-8"
+        );
+        assert_eq!(
+            json.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=300"
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(json.into_body(), 1024 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(json["version"], "https://jsonfeed.org/version/1.1");
+        let items = json["items"].as_array().unwrap();
+        assert_eq!(items.len(), atom_entries);
+        let item = &items[0];
+        assert!(item["id"].as_str().unwrap().starts_with("tag:"), "{item}");
+        assert!(
+            item["url"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("/issues/{}", source.meta.date)),
+            "{item}"
+        );
+        assert!(
+            item["title"]
+                .as_str()
+                .unwrap()
+                .starts_with("The Daily EPUB — "),
+            "{item}"
+        );
+        let content_html = item["content_html"].as_str().unwrap();
+        assert!(content_html.contains("<h2>"), "{content_html}");
+        assert!(
+            !item["date_published"].as_str().unwrap().is_empty(),
+            "{item}"
+        );
 
         let robots = app
             .clone()
