@@ -1942,6 +1942,17 @@ mod tests {
         let content_html = item["content_html"].as_str().unwrap();
         assert!(content_html.contains("<h2>"), "{content_html}");
         assert!(
+            content_html.contains("<p class=\"meta\">A. Writer · Example Feed · example.com</p>"),
+            "{content_html}"
+        );
+        assert!(
+            content_html.contains(
+                "<p class=\"links\"><a href=\"https://news.ycombinator.com/item?id=40100000\">Hacker News</a></p>"
+            ),
+            "{content_html}"
+        );
+        assert!(!content_html.contains("</a> — "), "{content_html}");
+        assert!(
             !item["date_published"].as_str().unwrap().is_empty(),
             "{item}"
         );

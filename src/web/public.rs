@@ -553,4 +553,35 @@ mod tests {
             assert!(!html.contains(private), "leaked {private:?} in {html}");
         }
     }
+
+    #[test]
+    fn feed_entry_wraps_byline_and_links_in_paragraphs() {
+        let mut source = crate::epub::fixtures::issue();
+        // A second comment link, so the separator between links is exercised.
+        source.lineup.picks[0].article.comments_url =
+            Some("https://example.com/discuss".to_string());
+        let issue = PublicIssue::from(&source);
+        let html = FeedEntryTemplate { issue: &issue }.render().unwrap();
+
+        assert!(html.contains("<h2>Top Stories</h2><ul>"), "{html}");
+        assert!(
+            html.contains(
+                "<li><a href=\"https://example.com/1001\">The Lead Story</a><p class=\"meta\">A. Writer · Example Feed · example.com</p>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("<p class=\"summary\">What it argues, and why it is worth the time.</p>"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<p class=\"links\"><a href=\"https://news.ycombinator.com/item?id=40100000\">Hacker News</a> · <a href=\"https://example.com/discuss\">Comments</a></p></li>"
+            ),
+            "{html}"
+        );
+        // The old run-together byline and adjacent links are gone.
+        assert!(!html.contains("</a> — "), "{html}");
+        assert!(!html.contains("Hacker News</a><a "), "{html}");
+    }
 }
