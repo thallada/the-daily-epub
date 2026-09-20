@@ -47,9 +47,9 @@
 <tbody>{% for row in history %}<tr>
 <td class="cell-wrap"><details class="signals"><summary><a href="{{ row.run_href }}">run {{ row.run_id }}</a> <span class="badge {{ row.status }}">{{ row.status }}</span></summary>{% let signals = row.signals %}{% include "_signals_table.html" %}</details></td>
 <td class="cell-tight text-muted">{{ row.date }}</td>
-<td class="cell-tight"><span class="badge {{ row.stage }}">{{ row.stage }}</span></td>
-<td class="cell-tight text-muted">{% if let Some(reason) = row.reason %}{{ reason }}{% endif %}</td>
-<td class="cell-tight text-muted">{% if let Some(first) = row.admitted_first %}{{ first }}{% if !row.admitted_rest.is_empty() %} <span class="muted text-xs">({{ row.admitted_rest }})</span>{% endif %}{% endif %}</td>
+<td><span class="badge {{ row.stage }}">{{ row.stage }}</span></td>
+<td class="text-muted">{% if let Some(reason) = row.reason %}{{ reason }}{% endif %}</td>
+<td class="text-muted">{% if let Some(first) = row.admitted_first %}{{ first }}{% if !row.admitted_rest.is_empty() %} <span class="muted text-xs">({{ row.admitted_rest }})</span>{% endif %}{% endif %}</td>
 <td class="num">{{ row.utility }}</td>
 <td class="num">{{ row.rank }}</td>
 <td class="num">{{ row.cluster }}</td>
@@ -57,7 +57,7 @@
 
 <h2>Neighbours and interests</h2>
 {% if let Some(signals) = latest_signals %}{% if signals.top_interests.is_empty() && signals.neighbours.is_empty() %}<p class="muted text-sm">The latest run recorded no interests or neighbours for this article.</p>{% else %}<div class="cards">
-<section class="card"><h3>Top interests</h3>{% if signals.top_interests.is_empty() %}<p class="muted">None.</p>{% else %}<div class="scroll-x"><table><thead><tr><th>interest</th><th class="num">z</th><th class="num">cos</th></tr></thead><tbody>{% for interest in signals.top_interests %}<tr><td><a href="{{ interest.href }}">{{ interest.name }}</a></td><td class="num">{{ interest.z }}</td><td class="num">{{ interest.cos }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}</section>
+<section class="card"><h3>Top interests</h3>{% if signals.top_interests.is_empty() %}<p class="muted">None.</p>{% else %}<div class="scroll-x"><table><thead><tr><th>interest</th><th class="num">z</th><th class="num">cos</th></tr></thead><tbody>{% for interest in signals.top_interests %}<tr><td class="cell-wrap"><a href="{{ interest.href }}">{{ interest.name }}</a></td><td class="num">{{ interest.z }}</td><td class="num">{{ interest.cos }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}</section>
 <section class="card"><h3>Nearest rated neighbours</h3>{% if signals.neighbours.is_empty() %}<p class="muted">None.</p>{% else %}<div class="scroll-x"><table><thead><tr><th>label</th><th class="num">cos</th><th>article</th></tr></thead><tbody>{% for neighbour in signals.neighbours %}<tr><td><span class="badge {{ neighbour.label }}">{{ neighbour.label }}</span></td><td class="num">{{ neighbour.cos }}</td><td class="cell-wrap"><a href="/dashboard/articles/{{ neighbour.article_id }}">{{ neighbour.title }}</a></td></tr>{% endfor %}</tbody></table></div>{% endif %}</section>
 </div>{% endif %}{% else %}<p class="muted text-sm">No signals recorded.</p>{% endif %}
 
@@ -67,9 +67,9 @@
 <tbody>{% for article in articles %}<tr>
 <td class="num">{{ article.cosine }}</td>
 <td class="cell-wrap"><a href="/dashboard/articles/{{ article.id }}">{{ article.title }}</a></td>
-<td class="cell-tight">{{ article.feed }}</td>
+<td>{{ article.feed }}</td>
 <td class="cell-tight text-muted">{{ article.first_seen }}</td>
-<td class="cell-tight">{% if let Some(rating) = article.rating %}<span class="badge {{ article.rating_class }}">{{ rating }}</span>{% else %}<span class="muted">unrated</span>{% endif %}</td>
+<td>{% if let Some(rating) = article.rating %}<span class="badge {{ article.rating_class }}">{{ rating }}</span>{% else %}<span class="muted">unrated</span>{% endif %}</td>
 </tr>{% endfor %}</tbody></table></div>{% endif %}{% else %}<p class="muted text-sm">No embedding stored — run features-backfill.</p>{% endif %}
 
 <h2>Embedding</h2>
@@ -80,12 +80,12 @@
 <thead><tr><th>when</th><th>label</th><th class="num">value</th><th>kind</th><th>source</th><th>user</th><th>issue</th><th>note</th></tr></thead>
 <tbody>{% for event in events %}<tr>
 <td class="cell-tight text-muted">{{ event.event_at }}</td>
-<td class="cell-tight"><span class="badge {{ event.label_class }}">{{ event.label }}</span></td>
+<td><span class="badge {{ event.label_class }}">{{ event.label }}</span></td>
 <td class="num">{{ event.value }}</td>
-<td class="cell-tight text-muted">{{ event.kind }}</td>
-<td class="cell-tight text-muted">{{ event.source }}</td>
-<td class="cell-tight">{% if let Some(user) = event.user %}{{ user }}{% else %}<span class="muted">—</span>{% endif %}</td>
+<td class="text-muted">{{ event.kind }}</td>
+<td class="text-muted">{{ event.source }}</td>
+<td>{% if let Some(user) = event.user %}{{ user }}{% else %}<span class="muted">—</span>{% endif %}</td>
 <td class="cell-tight">{% if let Some(date) = event.issue_date %}<a href="/issues/{{ date }}">{{ date }}</a>{% endif %}</td>
-<td class="cell-wrap text-muted">{% if let Some(note) = event.note %}{{ note }}{% endif %}</td>
+<td class="cell-wrap text-muted">{% if let Some(note) = event.note %}<div class="line-clamp-3" title="{{ note }}">{{ note }}</div>{% endif %}</td>
 </tr>{% endfor %}</tbody></table></div>{% endif %}
 </section>{% endblock %}

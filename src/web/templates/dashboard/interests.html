@@ -20,7 +20,7 @@
 <thead><tr><th>interest</th><th>category</th><th class="num">weight</th><th class="num">up</th><th class="num">down</th><th class="num">rated matches</th><th class="num">matched articles</th><th>added</th><th>actions</th></tr></thead>
 <tbody>{% for row in rows %}<tr>
 <td class="cell-wrap"><a href="{{ row.href }}">{{ row.name }}</a></td>
-<td class="cell-tight">{% if let Some(category) = row.category %}<a href="{{ row.category_href }}">{{ category }}</a>{% else %}<a class="muted" href="{{ row.category_href }}">uncategorized</a>{% endif %}</td>
+<td>{% if let Some(category) = row.category %}<a href="{{ row.category_href }}">{{ category }}</a>{% else %}<a class="muted" href="{{ row.category_href }}">uncategorized</a>{% endif %}</td>
 <td class="num tabular-nums">{{ row.weight }}</td>
 <td class="num tabular-nums">{{ row.up }}</td>
 <td class="num tabular-nums">{{ row.down }}</td>

@@ -17,7 +17,7 @@
 <div class="scroll-x"><table class="funnel-table">
 <thead><tr><th>stage</th><th>share</th><th class="num">reached</th><th class="num">stopped here</th><th>why</th></tr></thead>
 <tbody>{% for stage in funnel %}<tr>
-<td class="cell-tight align-middle"><span class="badge {{ stage.stage }}">{{ stage.stage }}</span></td>
+<td class="align-middle"><span class="badge {{ stage.stage }}">{{ stage.stage }}</span></td>
 <td class="funnel-cell"><div class="funnel"><svg class="h-3" width="{{ stage.percent }}%" role="img" aria-label="{{ stage.reached }} reached"></svg></div></td>
 <td class="num align-middle">{{ stage.reached }}</td>
 <td class="num align-middle text-muted">{{ stage.stopped }}</td>
@@ -45,7 +45,7 @@
 <h2>Near misses</h2>
 {% if near_misses.is_empty() %}<p class="muted text-sm">None recorded.</p>{% else %}<div class="scroll-x"><table>
 <thead><tr><th class="num">#</th><th class="num">score</th><th>title</th><th>feed</th><th class="num">quality</th><th class="num">fit</th><th>stage</th><th>reason</th></tr></thead>
-<tbody>{% for miss in near_misses %}<tr><td class="num text-muted">{{ loop.index }}</td><td class="num">{{ miss.score }}</td><td class="cell-wrap"><a href="{{ miss.href }}">{{ miss.title }}</a></td><td class="cell-tight text-muted">{{ miss.feed }}</td><td class="num">{{ miss.quality }}</td><td class="num">{{ miss.fit }}</td><td class="cell-tight"><span class="badge {{ miss.stage }}">{{ miss.stage }}</span></td><td class="cell-wrap text-muted">{% if let Some(reason) = miss.reason %}{{ reason }}{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+<tbody>{% for miss in near_misses %}<tr><td class="num text-muted">{{ loop.index }}</td><td class="num">{{ miss.score }}</td><td class="cell-wrap"><a href="{{ miss.href }}">{{ miss.title }}</a></td><td class="text-muted">{{ miss.feed }}</td><td class="num">{{ miss.quality }}</td><td class="num">{{ miss.fit }}</td><td><span class="badge {{ miss.stage }}">{{ miss.stage }}</span></td><td class="cell-wrap text-muted">{% if let Some(reason) = miss.reason %}{{ reason }}{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
 
 <h2>Candidates</h2>
 <form class="filters" method="get" action="/dashboard/runs/{{ run.id }}">

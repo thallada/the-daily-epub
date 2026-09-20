@@ -23,16 +23,16 @@
 <tbody>{% for article in articles %}<tr>
 <td class="cell-tight text-muted">{{ article.first_seen }}</td>
 <td class="cell-wrap"><a href="{{ article.href }}">{{ article.title }}</a></td>
-<td class="cell-tight">{% if let Some(feed_id) = article.feed_id %}<a href="/dashboard/articles?feed={{ feed_id }}">{{ article.feed }}</a>{% else %}{{ article.feed }}{% endif %}</td>
+<td>{% if let Some(feed_id) = article.feed_id %}<a href="/dashboard/articles?feed={{ feed_id }}">{{ article.feed }}</a>{% else %}{{ article.feed }}{% endif %}</td>
 <td class="cell-wrap">{% for interest in article.interests %}<a class="badge" href="{{ interest.href }}">{{ interest.name }}</a>{% if !loop.last %} {% endif %}{% endfor %}</td>
 <td class="num">{{ article.words }}</td>
-<td class="cell-tight">{% if let Some(stage) = article.stage %}<span class="badge {{ stage }}">{{ stage }}</span>{% if let Some(run_id) = article.run_id %} <a class="muted text-xs" href="/dashboard/runs/{{ run_id }}">{% if let Some(date) = article.run_date %}{{ date }}{% else %}run {{ run_id }}{% endif %}</a>{% endif %}{% else %}<span class="muted text-xs">never considered</span>{% endif %}</td>
-<td class="cell-tight text-muted">{% if let Some(reason) = article.reason %}{{ reason }}{% endif %}</td>
+<td>{% if let Some(stage) = article.stage %}<span class="badge {{ stage }}">{{ stage }}</span>{% if let Some(run_id) = article.run_id %} <a class="muted text-xs" href="/dashboard/runs/{{ run_id }}">{% if let Some(date) = article.run_date %}{{ date }}{% else %}run {{ run_id }}{% endif %}</a>{% endif %}{% else %}<span class="muted text-xs">never considered</span>{% endif %}</td>
+<td class="text-muted">{% if let Some(reason) = article.reason %}{{ reason }}{% endif %}</td>
 <td class="num">{{ article.utility }}</td>
 <td class="num">{{ article.triage }}</td>
 <td class="num">{{ article.quality }}</td>
 <td class="num">{{ article.fit }}</td>
-<td class="cell-tight">{% if let Some(rating) = article.rating %}<span class="badge {{ article.rating_class }}">{{ rating }}</span>{% endif %}</td>
+<td>{% if let Some(rating) = article.rating %}<span class="badge {{ article.rating_class }}">{{ rating }}</span>{% endif %}</td>
 <td class="cell-tight">{% if let Some(date) = article.published %}<a href="/issues/{{ date }}">{{ date }}</a>{% endif %}</td>
 </tr>{% endfor %}{% if articles.is_empty() %}<tr><td colspan="13" class="text-muted">No articles match this filter.</td></tr>{% endif %}</tbody></table></div>
 {% include "dashboard/_pager.html" %}
