@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 @source "../web/templates";
 @source "./static/app.js";
 
@@ -159,8 +159,8 @@
   .kv { @apply grid grid-cols-[minmax(9rem,1fr)_2fr] gap-x-5 gap-y-1.5; }
   .kv dt { @apply text-sm text-muted; }
   .kv dd { @apply m-0 min-w-0 text-sm; overflow-wrap:anywhere; }
+  /* Dashboard table layout contract: docs/dashboard-tables.md. */
   .scroll-x { @apply max-w-full overflow-x-auto; overscroll-behavior-inline:contain; }
-  .scroll-x > table { min-width:max-content; }
   .scroll-x.tall { @apply max-h-[70vh] overflow-y-auto; overscroll-behavior-block:contain; }
 
   .reader-page { @apply min-w-0; overflow-wrap:anywhere; }
@@ -219,7 +219,26 @@
   ul.error, ul.notice { @apply list-disc pl-8; }
 
   /* ---------- dashboard shell ---------- */
-  .dashboard { @apply mx-auto my-8 max-w-7xl px-4 pb-6 font-sans text-base leading-normal sm:px-6; }
+  .dashboard {
+    --gutter:1rem;
+    @apply my-8 grid pb-6 font-sans text-base leading-normal;
+    grid-template-columns:
+      [full-start] var(--gutter)
+      [wide-start] 1fr
+      [content-start] minmax(0, calc(80rem - 2 * var(--gutter)))
+      [content-end] 1fr
+      [wide-end] var(--gutter)
+      [full-end];
+  }
+  @media (width >= 40rem) { .dashboard { --gutter:1.5rem; } }
+  .dashboard > * { grid-column:content; min-width:0; }
+  .dashboard > .scroll-x { grid-column:wide; }
+  .dashboard > .scroll-x > table {
+    width:auto;
+    min-width:min(100%, calc(80rem - 2 * var(--gutter)));
+    max-width:100%;
+    margin-inline:auto;
+  }
   .dashboard > * + * { @apply mt-4; }
   .dashboard h1 { @apply text-2xl font-semibold leading-tight tracking-[-0.01em]; }
   .dashboard h2 { @apply text-lg font-semibold; }
@@ -254,8 +273,9 @@
 
   .muted, .meta { @apply text-muted; }
   .jobs a, .picks > li > a:first-child { @apply text-ink no-underline hover:text-accent; }
-  .num { @apply whitespace-nowrap text-right tabular-nums; }
-  .cell-wrap { @apply min-w-[10rem] max-w-[24rem] whitespace-normal; overflow-wrap:anywhere; }
+  .num { @apply text-right tabular-nums; }
+  td.num { @apply whitespace-nowrap; }
+  .cell-wrap { @apply min-w-[10rem] max-w-[32rem] whitespace-normal; overflow-wrap:anywhere; }
   .cell-tight { @apply whitespace-nowrap; }
 
   .filters { @apply flex flex-wrap items-end gap-x-4 gap-y-3 border-y border-rule py-3 font-sans text-sm; }
