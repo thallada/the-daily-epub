@@ -231,7 +231,9 @@
       [full-end];
   }
   @media (width >= 40rem) { .dashboard { --gutter:1.5rem; } }
-  .dashboard > * { grid-column:content; min-width:0; }
+  /* Grid items never collapse margins, so a child's bottom margin (`.table-filter`, `.rating`) would add to
+     the next child's `mt-4`; the rhythm comes from top margins only. `!important` beats those utilities. */
+  .dashboard > * { grid-column:content; min-width:0; margin-bottom:0 !important; }
   .dashboard > .scroll-x { grid-column:wide; }
   .dashboard > .scroll-x > table {
     width:auto;
