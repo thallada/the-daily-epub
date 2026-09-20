@@ -36,10 +36,10 @@ nowrap ones kept everything.
 
    | class        | use it for                                                     | behaviour                                                              |
    | ------------ | -------------------------------------------------------------- | ---------------------------------------------------------------------- |
-   | *(none)*     | short prose, names, tokens, badges                             | wraps at spaces                                                        |
+   | *(none)*     | short prose, names, tokens, badges and badge lists             | wraps at spaces (a `.badge` is nowrap on its own, so lists wrap between badges) |
    | `num`        | numbers, money, counts                                         | right-aligned tabular figures; `td.num` never wraps, `th.num` may      |
    | `cell-tight` | timestamps, dates, ids, a single short token that must not split | `white-space: nowrap`. Nothing longer than ~20 characters              |
-   | `cell-wrap`  | titles, URLs, notes, messages, badge lists, anything free-form | floor 10rem, ceiling 32rem, `overflow-wrap: anywhere`                  |
+   | `cell-wrap`  | titles, URLs, notes, messages, anything free-form              | floor 10rem, ceiling 32rem, `overflow-wrap: anywhere`                  |
 
    Anything long that must not wrap gets an inner block with a Tailwind clamp
    (`<div class="line-clamp-2" title="…">`) inside a `cell-wrap` cell; the cell
@@ -57,9 +57,14 @@ nowrap ones kept everything.
 - Give every `td` one of the four classes above according to its content.
   When in doubt, leave it unclassed: wrapping is the safe default.
 - Never `cell-tight` a name, a title, a reason sentence or a free-text field.
-- Check the page at 390, 1280 and 2560px. At 1280 and above the wrapper's
+- Check the page at 390, 1280 and 2560px. At 1440 and above the wrapper's
   `scrollWidth` must equal its `clientWidth`; at 390 a wide table is allowed to
-  scroll.
+  scroll. A table's floor is the sum of its nowrap columns plus 10rem per
+  `cell-wrap` column: the 13-column articles table bottoms out near 1270px, so
+  it still scrolls a little on a 1280px viewport. Tables inside a `.card`
+  cannot grow past the card (20rem minimum), so a card table with more than
+  four numeric columns (run page: provider usage) scrolls inside its card at
+  1280px; move such a table to page level if that matters.
 
 ## Measuring
 
