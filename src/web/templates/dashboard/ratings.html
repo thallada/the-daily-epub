@@ -89,7 +89,7 @@
 {% for row in current %}<tr>
 <td class="rating-cell min-w-[13rem]">{% let widget = row.widget %}{% include "_rating_widget.html" %}</td>
 <td class="cell-wrap"><a href="/dashboard/articles/{{ row.article_id }}">{{ row.title }}</a><br><span class="meta text-xs">{{ row.feed_title }}{% if !row.issue_date.is_empty() %} · <a href="/issues/{{ row.issue_date }}">{{ row.issue_date }}</a>{% endif %}</span></td>
-<td>{{ row.when }}<br><span class="meta text-xs">{{ row.source }} · <span class="by">{{ row.username }}</span></span></td>
+<td class="cell-tight">{{ row.when }}<br><span class="meta text-xs">{{ row.source }} · <span class="by">{{ row.username }}</span></span></td>
 <td class="cell-wrap text-muted"><div class="line-clamp-3" title="{{ row.note }}">{{ row.note }}</div></td>
 <td class="cell-tight tabular-nums">{{ row.age_days }} d → {{ row.decay }}</td>
 <td class="num">{% if row.has_embedding && !row.neighbour_weight.is_empty() %}{{ row.neighbour_weight }}{% if row.beyond_lookback %} <span class="meta text-xs">(beyond lookback)</span>{% endif %}{% else if row.badge == "cleared" %}<span class="meta">—</span>{% else %}<span class="meta text-xs">no embedding</span>{% endif %}</td>
