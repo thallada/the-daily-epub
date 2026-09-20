@@ -55,7 +55,7 @@
 <div class="filter-actions"><button class="btn" type="submit">Filter</button> <a class="btn-quiet" href="{{ events_href }}">Reset</a></div>
 </form>
 <p class="meta text-sm">{{ pagination.total }} events, newest first. History is append-only; a later explicit event for the same article marks the earlier one <em>superseded</em>. Use the clear verdict to retract.</p>
-<div class="scroll-x tall"><table>
+<div class="scroll-x"><table>
 <thead><tr><th class="num">Event</th><th>Verdict</th><th class="num">Value</th><th>Article</th><th>Issue</th><th>When</th><th>Source</th><th>By</th><th>Note</th></tr></thead>
 <tbody>
 {% for event in events %}<tr{% if event.superseded %} class="superseded"{% endif %}>
@@ -83,7 +83,7 @@
 <div class="filter-actions"><button class="btn" type="submit">Filter</button> <a class="btn-quiet" href="{{ current_href }}">Reset</a></div>
 </form>
 <p class="meta text-sm">One row per rated article (its latest explicit event), newest first. {% match last_run %}{% when Some with (run) %}"Used last run" counts the candidates of run #{{ run.id }} ({{ run.date }}, {{ run.status }}) that listed the article among their nearest rated neighbours, and how many of those were selected.{% when None %}No run has happened yet, so "Used last run" is empty.{% endmatch %}</p>
-<div class="scroll-x tall"><table class="contributions">
+<div class="scroll-x"><table class="contributions">
 <thead><tr><th>Verdict</th><th>Article</th><th>When · by</th><th>Note</th><th>Age → decay</th><th class="num">Neighbour weight</th><th>Feed credit</th><th>In prompt</th><th>In rebuild</th><th>Used last run</th></tr></thead>
 <tbody>
 {% for row in current %}<tr>

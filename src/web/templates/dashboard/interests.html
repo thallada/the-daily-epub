@@ -16,7 +16,7 @@
 <div class="filter-actions"><button class="btn" type="submit">Apply</button> <a class="btn-quiet" href="/dashboard/interests">Reset</a></div>
 </form>
 {% if rows.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter interests" aria-label="Filter interests" data-table-filter>{% endif %}
-<div class="scroll-x tall"><table data-filter>
+<div class="scroll-x"><table data-filter>
 <thead><tr><th>interest</th><th>category</th><th class="num">weight</th><th class="num">up</th><th class="num">down</th><th class="num">rated matches</th><th class="num">matched articles</th><th>added</th><th>actions</th></tr></thead>
 <tbody>{% for row in rows %}<tr>
 <td class="cell-wrap"><a href="{{ row.href }}">{{ row.name }}</a></td>

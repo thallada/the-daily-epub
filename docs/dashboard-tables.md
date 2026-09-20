@@ -50,10 +50,14 @@ nowrap ones kept everything.
 
 ## Checklist for a new table
 
-- Wrap it in `<div class="scroll-x">` (add `tall` for a 70vh vertical cap) and
-  make that wrapper a **direct child** of `<section class="dashboard">` if the
+- Wrap it in `<div class="scroll-x">` and make that wrapper a **direct child** of `<section class="dashboard">` if the
   table has more than a handful of columns. Tables inside `.card`, `.cards` or
   `details` stay inside their box and just wrap/scroll there.
+- Let the page scroll. A table that is the page's feature (paginated lists,
+  anything that is the last thing on the page) shows every row at full height;
+  a scrolling island inside a scrolling page just fights the wheel. Add `tall`
+  (70vh cap, own scrollbar) only when the table is a side feature with real
+  content below it, as the profile page's version history is.
 - Give every `td` one of the four classes above according to its content.
   When in doubt, leave it unclassed: wrapping is the safe default.
 - Never `cell-tight` a name, a title, a reason sentence or a free-text field.

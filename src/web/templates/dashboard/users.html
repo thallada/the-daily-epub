@@ -15,7 +15,7 @@
 <td><div class="flex flex-wrap gap-2"><form class="form-inline" method="post" action="/dashboard/users/requests/{{ request.id }}/approve"><input type="text" name="username" value="{{ request.suggested_username }}" autocomplete="username" maxlength="32" required pattern="[A-Za-z0-9._-]+" aria-label="Username for {{ request.email }}"><button class="btn-primary" type="submit"{% if !mail_configured %} disabled title="Email is not configured"{% endif %}>Approve</button></form><form method="post" action="/dashboard/users/requests/{{ request.id }}/done"><button class="btn" type="submit">Mark done</button></form></div></td>
 </tr>{% endfor %}</tbody></table></div>{% endif %}
 </section>
-{% if users.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x tall"><table data-filter>
+{% if users.len() > 1 %}<input type="search" class="table-filter" placeholder="Filter rows on this page" aria-label="Filter rows on this page" data-table-filter>{% endif %}<div class="scroll-x"><table data-filter>
 <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Last login</th><th class="num">Open sessions</th></tr></thead>
 <tbody>{% for user in users %}<tr>
 <td class="font-medium text-ink">{{ user.username }}</td>
