@@ -234,13 +234,15 @@
   /* Grid items never collapse margins, so a child's bottom margin (`.table-filter`, `.rating`) would add to
      the next child's `mt-4`; the rhythm comes from top margins only. `!important` beats those utilities. */
   .dashboard > * { grid-column:content; min-width:0; margin-bottom:0 !important; }
-  .dashboard > .scroll-x { grid-column:wide; }
-  .dashboard > .scroll-x > table {
-    width:auto;
+  /* The wrapper shrinks to its table (a centred grid item is sized fit-content), so the
+     flanks beside a narrow table stay page, not scroll container: wheeling there scrolls the page. */
+  .dashboard > .scroll-x {
+    grid-column:wide;
+    justify-self:center;
     min-width:min(100%, calc(80rem - 2 * var(--gutter)));
     max-width:100%;
-    margin-inline:auto;
   }
+  .dashboard > .scroll-x > table { width:auto; min-width:100%; }
   .dashboard > * + * { @apply mt-4; }
   .dashboard h1 { @apply text-2xl font-semibold leading-tight tracking-[-0.01em]; }
   .dashboard h2 { @apply text-lg font-semibold; }
