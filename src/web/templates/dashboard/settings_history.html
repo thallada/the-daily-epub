@@ -7,7 +7,7 @@
 <thead><tr><th>When</th><th>Who</th><th>Key</th><th>Before</th><th>After</th></tr></thead>
 <tbody>{% for change in changes %}<tr>
 <td class="cell-tight text-muted">{{ change.changed_at }}</td>
-<td class="cell-tight">{% match change.username %}{% when Some with (name) %}{{ name }}{% when None %}<em class="text-muted">removed user</em>{% endmatch %}</td>
+<td>{% match change.username %}{% when Some with (name) %}{{ name }}{% when None %}<em class="text-muted">removed user</em>{% endmatch %}</td>
 <td><code>{{ change.key }}</code></td>
 <td class="cell-wrap">{% match change.old_value %}{% when Some with (value) %}<pre class="preview">{{ value }}</pre>{% when None %}<em class="text-muted">absent</em>{% endmatch %}</td>
 <td class="cell-wrap">{% match change.new_value %}{% when Some with (value) %}<pre class="preview">{{ value }}</pre>{% when None %}<em class="text-muted">removed</em>{% endmatch %}</td>

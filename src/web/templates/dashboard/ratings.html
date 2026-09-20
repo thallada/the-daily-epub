@@ -19,9 +19,9 @@
 <tbody>{% for row in imports %}<tr>
 <td class="cell-tight text-muted">{{ row.requested }}</td>
 <td class="cell-wrap"><a href="{{ row.url }}" rel="noopener" target="_blank">{{ row.url }}</a></td>
-<td class="cell-tight"><span class="badge {{ row.label }}">{{ row.verdict }}</span></td>
-<td class="cell-tight"><span class="badge {{ row.status }}">{{ row.status }}</span></td>
-<td class="cell-wrap text-muted">{{ row.message }}</td>
+<td><span class="badge {{ row.label }}">{{ row.verdict }}</span></td>
+<td><span class="badge {{ row.status }}">{{ row.status }}</span></td>
+<td class="cell-wrap text-muted"><div class="line-clamp-3" title="{{ row.message }}">{{ row.message }}</div></td>
 <td class="num">{% if let Some(article_id) = row.article_id %}<a href="/dashboard/articles/{{ article_id }}">{{ article_id }}</a>{% endif %}</td>
 </tr>{% endfor %}
 {% if imports.is_empty() %}<tr><td colspan="6" class="text-muted">No rating imports yet.</td></tr>{% endif %}</tbody>
@@ -60,14 +60,14 @@
 <tbody>
 {% for event in events %}<tr{% if event.superseded %} class="superseded"{% endif %}>
 <td class="num">#{{ event.id }}{% if event.kind != "explicit" %} <span class="badge">{{ event.kind }}</span>{% endif %}{% if event.superseded %} <span class="badge cleared">superseded</span>{% endif %}</td>
-<td class="cell-tight"><span class="badge {{ event.badge }}">{{ event.verdict }}</span></td>
+<td><span class="badge {{ event.badge }}">{{ event.verdict }}</span></td>
 <td class="num">{{ event.value }}</td>
 <td class="cell-wrap"><a href="/dashboard/articles/{{ event.article_id }}">{{ event.title }}</a></td>
 <td class="cell-tight">{% if !event.issue_date.is_empty() %}<a href="/issues/{{ event.issue_date }}">{{ event.issue_date }}</a>{% endif %}</td>
 <td class="cell-tight text-muted">{{ event.when }}</td>
-<td class="cell-tight text-muted">{{ event.source }}</td>
-<td class="cell-tight text-muted">{{ event.username }}</td>
-<td class="cell-wrap text-muted">{{ event.note }}</td>
+<td class="text-muted">{{ event.source }}</td>
+<td class="text-muted">{{ event.username }}</td>
+<td class="cell-wrap text-muted"><div class="line-clamp-3" title="{{ event.note }}">{{ event.note }}</div></td>
 </tr>
 {% endfor %}
 {% if events.is_empty() %}<tr><td colspan="9" class="text-muted">No rating events match.</td></tr>{% endif %}
@@ -89,14 +89,14 @@
 {% for row in current %}<tr>
 <td class="rating-cell min-w-[13rem]">{% let widget = row.widget %}{% include "_rating_widget.html" %}</td>
 <td class="cell-wrap"><a href="/dashboard/articles/{{ row.article_id }}">{{ row.title }}</a><br><span class="meta text-xs">{{ row.feed_title }}{% if !row.issue_date.is_empty() %} · <a href="/issues/{{ row.issue_date }}">{{ row.issue_date }}</a>{% endif %}</span></td>
-<td class="cell-tight">{{ row.when }}<br><span class="meta text-xs">{{ row.source }} · <span class="by">{{ row.username }}</span></span></td>
-<td class="cell-wrap text-muted">{{ row.note }}</td>
+<td>{{ row.when }}<br><span class="meta text-xs">{{ row.source }} · <span class="by">{{ row.username }}</span></span></td>
+<td class="cell-wrap text-muted"><div class="line-clamp-3" title="{{ row.note }}">{{ row.note }}</div></td>
 <td class="cell-tight tabular-nums">{{ row.age_days }} d → {{ row.decay }}</td>
 <td class="num">{% if row.has_embedding && !row.neighbour_weight.is_empty() %}{{ row.neighbour_weight }}{% if row.beyond_lookback %} <span class="meta text-xs">(beyond lookback)</span>{% endif %}{% else if row.badge == "cleared" %}<span class="meta">—</span>{% else %}<span class="meta text-xs">no embedding</span>{% endif %}</td>
-<td class="cell-tight text-muted">{% for credit in row.feed_credits %}{{ credit.title }} <span class="tabular-nums text-ink">{{ credit.credit }}</span>{% if !loop.last %}<br>{% endif %}{% endfor %}</td>
+<td class="cell-wrap text-muted">{% for credit in row.feed_credits %}{{ credit.title }} <span class="tabular-nums text-ink">{{ credit.credit }}</span>{% if !loop.last %}<br>{% endif %}{% endfor %}</td>
 <td class="text-center">{% if row.in_prompt %}<span class="text-loved">✓</span>{% endif %}</td>
 <td class="text-center">{% if row.in_rebuild %}<span class="text-loved">✓</span>{% endif %}</td>
-<td class="cell-tight tabular-nums">{% if row.used_total > 0 %}{{ row.used_total }} ({{ row.used_selected }} selected){% endif %}</td>
+<td class="tabular-nums">{% if row.used_total > 0 %}{{ row.used_total }} ({{ row.used_selected }} selected){% endif %}</td>
 </tr>
 {% endfor %}
 {% if current.is_empty() %}<tr><td colspan="10" class="text-muted">No current verdicts match.</td></tr>{% endif %}

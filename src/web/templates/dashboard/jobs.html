@@ -21,14 +21,14 @@
 <thead><tr><th class="num">job</th><th>name</th><th>requested by</th><th>requested</th><th>started</th><th>finished</th><th class="num">duration</th><th>status</th><th>message</th><th class="num">run</th></tr></thead>
 <tbody>{% for job in jobs %}<tr>
 <td class="num"><a href="/dashboard/jobs/{{ job.id }}">{{ job.id }}</a></td>
-<td class="cell-tight font-mono text-xs">{{ job.name }}</td>
-<td class="cell-tight text-muted">{{ job.requested_by }}</td>
+<td class="font-mono text-xs">{{ job.name }}</td>
+<td class="text-muted">{{ job.requested_by }}</td>
 <td class="cell-tight text-muted">{{ job.requested }}</td>
 <td class="cell-tight text-muted">{{ job.started }}</td>
 <td class="cell-tight text-muted">{{ job.finished }}</td>
 <td class="num">{{ job.duration }}</td>
-<td class="cell-tight"><span class="badge {{ job.status }}">{{ job.status }}</span></td>
-<td class="message cell-wrap text-muted">{% if let Some(message) = job.message %}{{ message }}{% endif %}</td>
+<td><span class="badge {{ job.status }}">{{ job.status }}</span></td>
+<td class="message cell-wrap text-muted">{% if let Some(message) = job.message %}<div class="line-clamp-3" title="{{ message }}">{{ message }}</div>{% endif %}</td>
 <td class="num">{% if let Some(run_id) = job.run_id %}<a href="/dashboard/runs/{{ run_id }}">{{ run_id }}</a>{% endif %}</td>
 </tr>{% endfor %}</tbody></table></div>{% endif %}
 </section>{% endblock %}

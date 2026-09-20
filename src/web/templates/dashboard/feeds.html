@@ -6,7 +6,7 @@
 <nav class="tabs" aria-label="Candidate status"><a href="/dashboard/feeds"{% if status == "candidate" %} class="active" aria-current="page"{% endif %}>Candidates ({{ candidate_count }})</a> <a href="/dashboard/feeds?status=added"{% if status == "added" %} class="active" aria-current="page"{% endif %}>Added ({{ added_count }})</a> <a href="/dashboard/feeds?status=dismissed"{% if status == "dismissed" %} class="active" aria-current="page"{% endif %}>Dismissed ({{ dismissed_count }})</a></nav>
 {% if let Some(error) = categories_error %}<p class="notice">{{ error }}</p>{% endif %}
 {% include "dashboard/_pager.html" %}
-<div class="scroll-x"><table class="table-fixed">
+<div class="scroll-x"><table>
 <thead><tr><th class="num w-14">Score</th><th>Feed</th><th>Why</th><th class="num w-20">Articles</th><th class="w-20">Seen</th><th class="w-60 lg:w-84"><span class="sr-only">Actions</span></th></tr></thead>
 <tbody>{% for row in rows %}<tr>
 <td class="num tabular-nums">{{ row.score }}</td>

@@ -12,7 +12,7 @@
 <tbody>{% for run in runs %}<tr>
 <td class="num"><a href="/dashboard/runs/{{ run.id }}">{{ run.id }}</a></td>
 <td class="cell-tight"><a href="/issues/{{ run.date }}">{{ run.date }}</a></td>
-<td class="cell-tight"><span class="badge {{ run.status }}">{{ run.status }}</span>{% if run.dry_run %} <span class="muted text-xs">dry</span>{% endif %}</td>
+<td><span class="badge {{ run.status }}">{{ run.status }}</span>{% if run.dry_run %} <span class="muted text-xs">dry</span>{% endif %}</td>
 <td class="cell-tight text-muted">{{ run.started }}</td>
 <td class="num text-muted">{{ run.duration }}</td>
 <td class="cell-tight tabular-nums">{{ run.funnel }}</td>

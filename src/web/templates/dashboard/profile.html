@@ -30,10 +30,10 @@
 <tbody>{% for version in versions %}<tr>
 <td class="num">#{{ version.id }}</td>
 <td class="cell-tight text-muted">{{ version.saved_at }}</td>
-<td class="cell-tight">{{ version.saved_by }}</td>
+<td>{{ version.saved_by }}</td>
 <td class="num text-muted">{{ version.bytes }} bytes</td>
-<td><pre class="preview">{{ version.preview }}</pre></td>
-<td class="cell-tight"><form method="post" action="/dashboard/profile/restore" data-confirm="Restore version #{{ version.id }}? The current file is kept as a new version."><input type="hidden" name="version_id" value="{{ version.id }}"><button class="btn" type="submit">Restore</button></form></td>
+<td class="cell-wrap"><pre class="preview">{{ version.preview }}</pre></td>
+<td><form method="post" action="/dashboard/profile/restore" data-confirm="Restore version #{{ version.id }}? The current file is kept as a new version."><input type="hidden" name="version_id" value="{{ version.id }}"><button class="btn" type="submit">Restore</button></form></td>
 </tr>{% endfor %}</tbody></table></div>
 {% endif %}
 
